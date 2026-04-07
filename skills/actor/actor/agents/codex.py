@@ -45,10 +45,12 @@ class CodexAgent(Agent):
     def _spawn_and_capture(
         self, args: List[str], cwd: Optional[Path]
     ) -> Tuple[int, Optional[str]]:
+        env = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
         kwargs: dict = dict(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=None,  # inherit
+            env=env,
         )
         if cwd is not None:
             kwargs["cwd"] = str(cwd)

@@ -29,10 +29,12 @@ class ClaudeAgent(Agent):
         return args
 
     def _spawn_and_track(self, args: List[str], cwd: Path) -> int:
+        env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
         proc = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
             cwd=str(cwd),
+            env=env,
         )
         pid = proc.pid
         with self._lock:
