@@ -20,7 +20,7 @@ Refer to this as `ACTOR` in the instructions below. Use the exact path printed a
 
 ## Core Rules
 
-1. **Always run `actor run` in background mode.** Use the Bash tool's `run_in_background: true` parameter. Do NOT use shell `&`. You will be automatically notified when the actor finishes.
+1. **Always run `actor run` in background mode.** Use the Bash tool's `run_in_background: true` parameter. Do NOT use shell `&`. You will be automatically notified when the actor finishes. **Each `actor run` MUST be its own separate Bash tool call.** Never batch multiple `actor run` commands in a single Bash call — this prevents proper process tracking and notification.
 2. **ALWAYS read the output when an actor finishes.** When you receive a background task notification, you MUST read the output file BEFORE taking any further action or responding to the user. The agent may have asked a question, proposed a plan, or reported an error. You cannot know what happened without reading the output.
 3. **Do NOT use `actor logs` for routine output.** The background notification output file is your primary source. Only use `actor logs` when the user explicitly asks for logs or you need historical context.
 4. **Choose descriptive actor names.** The name becomes the git branch. Use lowercase with hyphens: `fix-auth`, `refactor-nav`, `add-tests`.
