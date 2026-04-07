@@ -103,8 +103,17 @@ That behavior is omitted here so this file only contains the animation.
     var startTime = Date.now();
 
     function resize() {
-      var charW = 8.4;
-      var charH = 16.8;
+      // Measure actual character size from the background element
+      var measure = document.createElement("span");
+      measure.style.visibility = "hidden";
+      measure.style.position = "absolute";
+      measure.style.whiteSpace = "pre";
+      measure.textContent = "X";
+      bg.appendChild(measure);
+      var rect = measure.getBoundingClientRect();
+      var charW = rect.width || 8.4;
+      var charH = rect.height || 16.8;
+      bg.removeChild(measure);
       cols = Math.ceil(window.innerWidth / charW) + 1;
       rows = Math.ceil(window.innerHeight / charH) + 1;
     }
