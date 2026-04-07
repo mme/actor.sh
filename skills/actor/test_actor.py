@@ -669,7 +669,7 @@ class TestCmdRun(unittest.TestCase):
         with self.assertRaises(NotFound):
             cmd_run(db, agent, pm, name="nope", prompt="go", config_pairs=[])
 
-    def test_run_agent_start_failure_no_run_inserted(self):
+    def test_run_agent_start_failure_marks_run_as_error(self):
         db = self._db()
         create_actor(db, "test")
         agent = FakeAgent()
@@ -678,7 +678,9 @@ class TestCmdRun(unittest.TestCase):
         with self.assertRaises(ActorError):
             cmd_run(db, agent, pm, name="test", prompt="do the thing", config_pairs=[])
         latest = db.latest_run("test")
-        self.assertIsNone(latest, "no run row should exist after start failure")
+        self.assertIsNotNone(latest, "run row should exist marked as error")
+        self.assertEqual(latest.status, Status.ERROR)
+        self.assertEqual(latest.exit_code, -1)
 
 
 # ──────────────────────────────────────────────────────────────────────

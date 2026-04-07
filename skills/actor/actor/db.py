@@ -162,6 +162,15 @@ class Database:
         self._conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
 
+    def update_run_pid(self, run_id: int, pid: int) -> None:
+        cur = self._conn.execute(
+            "UPDATE runs SET pid = ? WHERE id = ?",
+            (pid, run_id),
+        )
+        self._conn.commit()
+        if cur.rowcount == 0:
+            raise ActorError("run not found")
+
     def update_run_status(self, run_id: int, status: Status, exit_code: Optional[int]) -> None:
         now = _now_iso()
         cur = self._conn.execute(

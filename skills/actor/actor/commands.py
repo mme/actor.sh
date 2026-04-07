@@ -214,18 +214,7 @@ def cmd_run(
 
     dir_p = Path(actor.dir)
 
-    # Start or resume
-    if actor.agent_session is not None:
-        pid = agent.resume(dir_p, actor.agent_session, prompt, effective_config)
-        new_session: Optional[str] = None
-    else:
-        pid, new_session = agent.start(dir_p, prompt, effective_config)
-
-    # Update session ID if we got one
-    if new_session is not None:
-        db.update_actor_session(name, new_session)
-
-    # Insert run row
+    # Insert run row BEFORE starting agent so list/show see it immediately
     now = _now_iso()
     run = Run(
         id=0,
@@ -233,12 +222,31 @@ def cmd_run(
         prompt=prompt,
         status=Status.RUNNING,
         exit_code=None,
-        pid=pid,
+        pid=None,
         config=effective_config,
         started_at=now,
         finished_at=None,
     )
     run_id = db.insert_run(run)
+
+    # Start or resume
+    try:
+        if actor.agent_session is not None:
+            pid = agent.resume(dir_p, actor.agent_session, prompt, effective_config)
+            new_session: Optional[str] = None
+        else:
+            pid, new_session = agent.start(dir_p, prompt, effective_config)
+    except Exception:
+        # Agent failed to start — mark run as error
+        db.update_run_status(run_id, Status.ERROR, -1)
+        raise
+
+    # Update PID on the run row
+    db.update_run_pid(run_id, pid)
+
+    # Update session ID if we got one
+    if new_session is not None:
+        db.update_actor_session(name, new_session)
 
     # Block until agent exits
     exit_code = agent.wait(pid)
