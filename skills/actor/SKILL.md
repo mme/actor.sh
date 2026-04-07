@@ -25,8 +25,9 @@ Refer to this as `ACTOR` in the instructions below. Use the exact path printed a
 3. **Do NOT use `actor logs` for routine output.** The background notification output file is your primary source. Only use `actor logs` when the user explicitly asks for logs or you need historical context.
 4. **Choose descriptive actor names.** The name becomes the git branch. Use lowercase with hyphens: `fix-auth`, `refactor-nav`, `add-tests`.
 5. **One actor per independent task.** If the user asks for multiple things that don't depend on each other, create multiple actors.
-6. **Stay responsive.** After starting actors, tell the user they're running and continue the conversation. Read and report results when the background notification arrives.
-7. **Only check status when asked.** Do not proactively run `actor list`, `actor show`, or `actor logs` unless the user asks about status or details.
+6. **Use worktrees by default in git repos.** When in a git repository, always create actors with worktrees (the default). This is critical when running multiple actors — each gets its own isolated copy of the repo so they don't overwrite each other's changes. Only use `--no-worktree` when the user explicitly asks or the directory is not a git repo.
+7. **Stay responsive.** After starting actors, tell the user they're running and continue the conversation. Read and report results when the background notification arrives.
+8. **Only check status when asked.** Do not proactively run `actor list`, `actor show`, or `actor logs` unless the user asks about status or details.
 
 ## Commands Reference
 
