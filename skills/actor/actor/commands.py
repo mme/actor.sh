@@ -542,6 +542,80 @@ def cmd_done(
     return f"{name} done"
 
 
+# -- cmd_fork --
+
+def cmd_fork(
+    db: Database,
+    git: GitOps,
+    source_name: str,
+    new_name: str,
+) -> Actor:
+    """Fork an existing actor into a new actor branched from its current state."""
+    validate_name(new_name)
+
+    source = db.get_actor(source_name)
+
+    if not source.worktree:
+        raise ActorError(f"cannot fork '{source_name}' — only worktree actors can be forked")
+
+    source_dir = Path(source.dir)
+    if not source_dir.is_dir():
+        raise ActorError(f"actor directory '{source.dir}' does not exist")
+
+    source_repo = source.source_repo
+    if source_repo is None:
+        raise ActorError(f"worktree actor '{source_name}' missing source_repo")
+
+    # Commit any uncommitted changes in the source worktree
+    import subprocess
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(source_dir),
+        capture_output=True,
+        text=True,
+    )
+    if result.stdout.strip():
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=str(source_dir),
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", f"actor fork: snapshot for {new_name}"],
+            cwd=str(source_dir),
+            capture_output=True,
+        )
+
+    # Create new worktree branched from the source actor's branch
+    wt_path = _worktree_path(new_name)
+    git.create_worktree(Path(source_repo), wt_path, new_name, source_name)
+
+    now = _now_iso()
+    actor = Actor(
+        name=new_name,
+        agent=source.agent,
+        agent_session=None,
+        dir=str(wt_path),
+        source_repo=source_repo,
+        base_branch=source.base_branch,
+        worktree=True,
+        config=dict(source.config),
+        created_at=now,
+        updated_at=now,
+    )
+
+    try:
+        db.insert_actor(actor)
+    except ActorError:
+        try:
+            git.remove_worktree(Path(source_repo), wt_path)
+        except Exception as cleanup_err:
+            print(f"warning: failed to clean up worktree at {wt_path}: {cleanup_err}", file=sys.stderr)
+        raise
+
+    return actor
+
+
 # ---------------------------------------------------------------------------
 # Public wrappers for testable internals
 # ---------------------------------------------------------------------------

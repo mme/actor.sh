@@ -60,6 +60,7 @@ from .commands import (
     cmd_config,
     cmd_logs,
     cmd_done,
+    cmd_fork,
     truncate,
     format_duration,
     worktree_path,
@@ -117,6 +118,7 @@ __all__ = [
     "cmd_config",
     "cmd_logs",
     "cmd_done",
+    "cmd_fork",
     # Helpers
     "truncate",
     "format_duration",
