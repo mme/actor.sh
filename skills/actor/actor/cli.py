@@ -77,10 +77,11 @@ Examples:
 Examples:
   actor run my-feature "fix the nav bar"            Run a prompt
   actor run my-feature "fix it" --config model=opus  Override config for this run
-  actor run my-feature "continue" &                  Run in background""",
+  actor run my-feature -i                            Resume interactively""",
     )
     p_run.add_argument("name", help="Actor name")
-    p_run.add_argument("prompt", help="Prompt to send to the agent")
+    p_run.add_argument("prompt", nargs="?", default=None, help="Prompt to send to the agent")
+    p_run.add_argument("-i", "--interactive", action="store_true", help="Resume the actor in interactive mode")
     p_run.add_argument("--config", dest="config", nargs="+", default=[], metavar="KEY=VALUE", help="Config overrides for this run")
 
     # -- list --
@@ -198,13 +199,31 @@ def main(argv: Optional[List[str]] = None) -> None:
             print(f"{actor.name} created ({actor.dir})")
 
         elif args.command == "run":
-            agent = agent_for(args.name)
-            cmd_run(
-                db, agent, proc_mgr,
-                name=args.name,
-                prompt=args.prompt,
-                config_pairs=args.config,
-            )
+            if args.interactive:
+                actor = db.get_actor(args.name)
+                dir_path = actor.dir
+                session_id = actor.agent_session
+                if session_id is None:
+                    raise ActorError(f"'{args.name}' has no session yet — run it non-interactively first")
+                os.chdir(dir_path)
+                if actor.agent == AgentKind.CLAUDE:
+                    cmd = ["claude", "--resume", session_id]
+                elif actor.agent == AgentKind.CODEX:
+                    cmd = ["codex", "resume", session_id]
+                else:
+                    raise ActorError(f"interactive mode not supported for agent: {actor.agent}")
+                os.execvp(cmd[0], cmd)
+            else:
+                if args.prompt is None:
+                    print("error: prompt is required (or use -i for interactive mode)", file=sys.stderr)
+                    sys.exit(1)
+                agent = agent_for(args.name)
+                cmd_run(
+                    db, agent, proc_mgr,
+                    name=args.name,
+                    prompt=args.prompt,
+                    config_pairs=args.config,
+                )
 
         elif args.command == "list":
             output = cmd_list(db, proc_mgr, status_filter=args.status)
