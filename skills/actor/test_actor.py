@@ -19,7 +19,7 @@ from actor import (
     # Database
     Database,
     # Commands
-    cmd_new, cmd_run, cmd_list, cmd_show, cmd_stop, cmd_config, cmd_logs, cmd_done,
+    cmd_new, cmd_run, cmd_list, cmd_show, cmd_stop, cmd_config, cmd_logs, cmd_discard,
     # Helpers
     truncate, format_duration,
 )
@@ -1643,35 +1643,35 @@ class TestCmdLogs(unittest.TestCase):
 
 
 # ──────────────────────────────────────────────────────────────────────
-#  Test: cmd_done
+#  Test: cmd_discard
 # ──────────────────────────────────────────────────────────────────────
 
-class TestCmdDone(unittest.TestCase):
+class TestCmdDiscard(unittest.TestCase):
 
     def _db(self) -> Database:
         return Database.open(":memory:")
 
-    def test_done_no_worktree_just_deletes_metadata(self):
+    def test_discard_no_worktree_just_deletes_metadata(self):
         db = self._db()
         create_actor(db, "test", config=[])
         pm = FakeProcessManager()
-        cmd_done(db, pm, name="test")
+        cmd_discard(db, pm, name="test")
         with self.assertRaises(NotFound):
             db.get_actor("test")
 
-    def test_done_worktree_just_deletes_metadata(self):
+    def test_discard_worktree_just_deletes_metadata(self):
         db = self._db()
         git = FakeGit()
         create_actor_with_worktree(db, git, "feature")
         git.calls.clear()
         pm = FakeProcessManager()
-        cmd_done(db, pm, name="feature")
+        cmd_discard(db, pm, name="feature")
         # No git operations — worktree stays on disk
         self.assertEqual(len(git.calls), 0)
         with self.assertRaises(NotFound):
             db.get_actor("feature")
 
-    def test_done_errors_if_running(self):
+    def test_discard_errors_if_running(self):
         db = self._db()
         create_actor(db, "test", config=[])
         pm = FakeProcessManager()
@@ -1683,9 +1683,9 @@ class TestCmdDone(unittest.TestCase):
         db.insert_run(run)
         pm.mark_alive(999)
         with self.assertRaises(IsRunning):
-            cmd_done(db, pm, name="test")
+            cmd_discard(db, pm, name="test")
 
-    def test_done_detects_stale_pid_and_proceeds(self):
+    def test_discard_detects_stale_pid_and_proceeds(self):
         db = self._db()
         create_actor(db, "test", config=[])
         pm = FakeProcessManager()
@@ -1696,17 +1696,17 @@ class TestCmdDone(unittest.TestCase):
         )
         db.insert_run(run)
         # PID 888 is NOT alive
-        cmd_done(db, pm, name="test")
+        cmd_discard(db, pm, name="test")
         with self.assertRaises(NotFound):
             db.get_actor("test")
 
-    def test_done_not_found(self):
+    def test_discard_not_found(self):
         db = self._db()
         pm = FakeProcessManager()
         with self.assertRaises(NotFound):
-            cmd_done(db, pm, name="nope")
+            cmd_discard(db, pm, name="nope")
 
-    def test_done_deletes_runs_too(self):
+    def test_discard_deletes_runs_too(self):
         db = self._db()
         create_actor(db, "test", config=[])
         run = Run(
@@ -1717,7 +1717,7 @@ class TestCmdDone(unittest.TestCase):
         )
         db.insert_run(run)
         pm = FakeProcessManager()
-        cmd_done(db, pm, name="test")
+        cmd_discard(db, pm, name="test")
         self.assertIsNone(db.latest_run("test"))
 
 

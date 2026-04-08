@@ -15,7 +15,7 @@ from .agents.claude import ClaudeAgent
 from .agents.codex import CodexAgent
 from .commands import (
     cmd_config,
-    cmd_done,
+    cmd_discard,
     cmd_list,
     cmd_logs,
     cmd_new,
@@ -169,16 +169,16 @@ Examples:
     p_config.add_argument("name", help="Actor name")
     p_config.add_argument("pairs", nargs="*", default=[], metavar="KEY=VALUE", help="Config key=value pairs to set (omit to view)")
 
-    # -- done --
-    p_done = sub.add_parser(
-        "done",
+    # -- discard --
+    p_discard = sub.add_parser(
+        "discard",
         help="Remove an actor from the database (worktree stays on disk)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
-  actor done my-feature                             Remove actor from DB""",
+  actor discard my-feature                          Remove actor from DB""",
     )
-    p_done.add_argument("name", help="Actor name")
+    p_discard.add_argument("name", help="Actor name")
 
     return parser
 
@@ -310,8 +310,8 @@ def main(argv: Optional[List[str]] = None) -> None:
             if output:
                 print(output, end="")
 
-        elif args.command == "done":
-            msg = cmd_done(db, proc_mgr, name=args.name)
+        elif args.command == "discard":
+            msg = cmd_discard(db, proc_mgr, name=args.name)
             print(msg)
 
     except ActorError as e:

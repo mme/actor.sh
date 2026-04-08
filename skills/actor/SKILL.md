@@ -73,7 +73,7 @@ ACTOR config <name> model=opus            # update config
 
 ### Finish actors
 ```bash
-ACTOR done <name>                         # remove actor from DB (worktree stays on disk)
+ACTOR discard <name>                      # remove actor from DB (worktree stays on disk)
 ```
 
 ## Workflow Examples
@@ -108,7 +108,7 @@ ACTOR run fix-nav "Push your branch and create a pull request against main using
 ```
 After the actor finishes and reports the PR URL:
 ```bash
-ACTOR done fix-nav
+ACTOR discard fix-nav
 ```
 
 ### User: "merge fix-nav into main"
@@ -117,7 +117,7 @@ ACTOR run fix-nav "Merge main into your branch to check for conflicts, resolve a
 ```
 After the actor finishes:
 ```bash
-ACTOR done fix-nav
+ACTOR discard fix-nav
 ```
 
 ### Forking an actor (trying a different approach)

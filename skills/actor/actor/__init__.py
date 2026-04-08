@@ -59,7 +59,7 @@ from .commands import (
     cmd_stop,
     cmd_config,
     cmd_logs,
-    cmd_done,
+    cmd_discard,
     truncate,
     format_duration,
     worktree_path,

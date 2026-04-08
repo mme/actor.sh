@@ -203,7 +203,7 @@ def cmd_run(
     dir_path = Path(actor.dir)
     if not dir_path.is_dir():
         raise ActorError(
-            f"actor directory '{actor.dir}' does not exist \u2014 use 'actor done {name}' to clean up"
+            f"actor directory '{actor.dir}' does not exist \u2014 use 'actor discard {name}' to clean up"
         )
 
     # Merge config: actor defaults + run overrides
@@ -229,6 +229,9 @@ def cmd_run(
         finished_at=None,
     )
     run_id = db.insert_run(run)
+
+    # Expose actor name to the agent process
+    os.environ["ACTOR_NAME"] = name
 
     # Start or resume
     try:
@@ -473,9 +476,9 @@ def cmd_logs(db: Database, agent: Agent, name: str, verbose: bool, watch: bool) 
     return "\n".join(lines)
 
 
-# -- cmd_done --
+# -- cmd_discard --
 
-def cmd_done(
+def cmd_discard(
     db: Database,
     proc_mgr: ProcessManager,
     name: str,
@@ -488,7 +491,7 @@ def cmd_done(
         raise IsRunningError(name)
 
     db.delete_actor(name)
-    return f"{name} done"
+    return f"{name} discarded"
 
 
 
