@@ -76,21 +76,32 @@ Examples:
     # -- run --
     p_run = sub.add_parser(
         "run",
-        help="Execute a prompt against an actor",
+        help="Create and/or run an actor",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
-  actor run my-feature "fix the nav bar"            Run a prompt
-  actor run my-feature "fix it" --model opus         Override model for this run
-  actor run my-feature -i                            Resume interactively""",
+  actor run fix-nav -c "fix the nav bar"             Create actor and run
+  actor run fix-nav "continue fixing"                Resume existing actor
+  actor run fix-nav -c --model opus "fix it"         Create with specific model
+  actor run fix-nav -c --agent codex "fix it"        Create with Codex agent
+  actor run fix-nav --model opus "one-off override"  Override model for this run
+  actor run fix-nav -i                               Resume interactively
+  echo "fix it" | actor run fix-nav -c               Prompt from stdin""",
     )
     p_run.add_argument("name", help="Actor name")
-    p_run.add_argument("prompt", nargs="?", default=None, help="Prompt to send to the agent")
+    p_run.add_argument("prompt", nargs="?", default=None, help="Prompt (reads stdin if omitted and not interactive)")
+    p_run.add_argument("-c", "--create", action="store_true", help="Create the actor first (worktree from current repo)")
     p_run.add_argument("-i", "--interactive", action="store_true", help="Resume the actor in interactive mode")
-    p_run.add_argument("--model", default=None, help="Override model for this run")
-    p_run.add_argument("--strip-api-keys", action="store_true", default=None, dest="strip_api_keys", help="Strip API keys from environment for this run")
-    p_run.add_argument("--no-strip-api-keys", action="store_false", dest="strip_api_keys", help="Pass API keys through to the agent for this run")
-    p_run.add_argument("--config", dest="config", nargs="+", default=[], metavar="KEY=VALUE", help="Config overrides for this run")
+    # Shared flags (used for both creation and run overrides)
+    p_run.add_argument("--model", default=None, help="Model for the agent to use")
+    p_run.add_argument("--strip-api-keys", action="store_true", default=None, dest="strip_api_keys", help="Strip API keys from environment (default)")
+    p_run.add_argument("--no-strip-api-keys", action="store_false", dest="strip_api_keys", help="Pass API keys through to the agent")
+    p_run.add_argument("--config", dest="config", nargs="+", default=[], metavar="KEY=VALUE", help="Config key=value pairs")
+    # Creation-only flags (require -c)
+    p_run.add_argument("--agent", default="claude", help="Coding agent to use (requires -c)")
+    p_run.add_argument("--dir", default=None, help="Base directory (requires -c)")
+    p_run.add_argument("--base", default=None, help="Branch to create worktree from (requires -c)")
+    p_run.add_argument("--no-worktree", action="store_true", help="Skip worktree creation (requires -c)")
 
     # -- list --
     p_list = sub.add_parser(
@@ -212,13 +223,40 @@ def main(argv: Optional[List[str]] = None) -> None:
             print(f"{actor.name} created ({actor.dir})")
 
         elif args.command == "run":
+            # Validate creation-only flags
+            creation_only = {"dir": args.dir, "base": args.base}
+            if args.no_worktree:
+                creation_only["no-worktree"] = True
+            for flag, val in creation_only.items():
+                if val and not args.create:
+                    raise ActorError(f"--{flag} requires -c/--create")
+
+            # Build config pairs from flags
+            config_pairs = list(args.config)
+            if args.model is not None:
+                config_pairs.append(f"model={args.model}")
+            if args.strip_api_keys is not None:
+                config_pairs.append(f"strip-api-keys={'true' if args.strip_api_keys else 'false'}")
+
+            # Create actor if requested
+            if args.create:
+                cmd_new(
+                    db, git,
+                    name=args.name,
+                    dir=args.dir,
+                    no_worktree=args.no_worktree,
+                    base=args.base,
+                    agent_name=args.agent,
+                    config_pairs=config_pairs,
+                )
+
+            # Interactive mode
             if args.interactive:
                 actor = db.get_actor(args.name)
-                dir_path = actor.dir
                 session_id = actor.agent_session
                 if session_id is None:
                     raise ActorError(f"'{args.name}' has no session yet — run it non-interactively first")
-                os.chdir(dir_path)
+                os.chdir(actor.dir)
                 if actor.agent == AgentKind.CLAUDE:
                     cmd = ["claude", "--resume", session_id]
                 elif actor.agent == AgentKind.CODEX:
@@ -226,22 +264,22 @@ def main(argv: Optional[List[str]] = None) -> None:
                 else:
                     raise ActorError(f"interactive mode not supported for agent: {actor.agent}")
                 os.execvp(cmd[0], cmd)
-            else:
-                if args.prompt is None:
-                    print("error: prompt is required (or use -i for interactive mode)", file=sys.stderr)
-                    sys.exit(1)
-                config_pairs = list(args.config)
-                if args.model is not None:
-                    config_pairs.append(f"model={args.model}")
-                if args.strip_api_keys is not None:
-                    config_pairs.append(f"strip-api-keys={'true' if args.strip_api_keys else 'false'}")
-                agent = agent_for(args.name)
-                cmd_run(
-                    db, agent, proc_mgr,
-                    name=args.name,
-                    prompt=args.prompt,
-                    config_pairs=config_pairs,
-                )
+
+            # Resolve prompt: argument, stdin, or error
+            prompt = args.prompt
+            if prompt is None and not sys.stdin.isatty():
+                prompt = sys.stdin.read().strip()
+            if not prompt:
+                print("error: prompt is required (pass as argument or pipe via stdin, or use -i)", file=sys.stderr)
+                sys.exit(1)
+
+            agent = agent_for(args.name)
+            cmd_run(
+                db, agent, proc_mgr,
+                name=args.name,
+                prompt=prompt,
+                config_pairs=config_pairs if not args.create else [],
+            )
 
         elif args.command == "list":
             output = cmd_list(db, proc_mgr, status_filter=args.status)

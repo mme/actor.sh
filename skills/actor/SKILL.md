@@ -31,28 +31,29 @@ Refer to this as `ACTOR` in the instructions below. Use the exact path printed a
 
 ## Commands Reference
 
-### Create and run an actor
+### Run an actor
 ```bash
-ACTOR new <name>                          # worktree from current repo (default)
-ACTOR new <name> --model sonnet           # use a specific model
-ACTOR new <name> --agent codex            # use OpenAI Codex instead of Claude
-ACTOR new <name> --no-strip-api-keys      # pass API keys to the agent
-ACTOR new <name> --no-worktree            # run in current directory
-ACTOR new <name> --dir /path/to/repo      # worktree from another repo
-ACTOR new <name> --base develop           # branch off a specific branch
-ACTOR new <name> --config key=value       # set agent-specific config
-ACTOR run <name> "<prompt>"             # ALWAYS use run_in_background: true
+ACTOR run <name> -c "<prompt>"            # create and run (worktree from current repo)
+ACTOR run <name> "<prompt>"               # run existing actor (resumes session)
+ACTOR run <name> -c --model opus "<prompt>"       # create with specific model
+ACTOR run <name> -c --agent codex "<prompt>"      # create with Codex agent
+ACTOR run <name> -c --base develop "<prompt>"     # create from specific branch
+ACTOR run <name> -c --dir /path/to/repo "<prompt>"  # create from another repo
+ACTOR run <name> -c --no-worktree "<prompt>"      # create without worktree
 ACTOR run <name> -i                       # resume interactively (not for skill use)
 ```
 
-**Top-level flags:**
-- `--agent` selects the coding agent: `claude` (default), `codex`. Set at creation, applies to all runs.
-- `--model` sets the model. Can also be set via `--config model=<value>`.
-- `--strip-api-keys` (default: on) strips API keys from the environment so agents use subscription auth. Use `--no-strip-api-keys` to pass keys through.
+The `-c` flag creates the actor before running. Without `-c`, the actor must already exist.
 
-**Agent-specific config:** Use `--config key=value` for agent-specific options. See the config reference for your agent:
-- [Claude config](claude-config.md)
-- [Codex config](codex-config.md)
+**Prompt:** Pass as an argument or pipe via stdin (`echo "fix it" | ACTOR run name -c`).
+
+**Flags:**
+- `--model` sets the model. On `-c` it's saved for all runs; without `-c` it overrides this run only.
+- `--agent` selects the coding agent: `claude` (default), `codex`. Requires `-c`.
+- `--strip-api-keys` (default: on) strips API keys from the environment so agents use subscription auth. Use `--no-strip-api-keys` to pass keys through.
+- `--config key=value` sets agent-specific options. Bare keys (no `=`) are boolean flags. See the config reference for your agent:
+  - [Claude config](claude-config.md)
+  - [Codex config](codex-config.md)
 
 ### Monitor actors
 ```bash
@@ -68,7 +69,6 @@ ACTOR logs <name> --verbose               # full output with tool calls, thinkin
 ACTOR stop <name>                         # kill a running actor
 ACTOR config <name>                       # view config
 ACTOR config <name> model=opus            # update config
-ACTOR run <name> "<follow-up prompt>"   # resumes session (run_in_background: true)
 ```
 
 ### Finish actors
@@ -80,18 +80,14 @@ ACTOR done <name>                         # remove actor from DB (worktree stays
 
 ### User: "spin up an actor to refactor the auth module"
 ```bash
-ACTOR new refactor-auth
-ACTOR run refactor-auth "Refactor the auth module. Simplify the token validation logic, remove dead code, and make sure all tests pass."
+ACTOR run refactor-auth -c "Refactor the auth module. Simplify the token validation logic, remove dead code, and make sure all tests pass."
 ```
 
 ### User: "start three actors: fix the nav, update the tests, and rewrite the README"
 ```bash
-ACTOR new fix-nav
-ACTOR new update-tests
-ACTOR new rewrite-readme
-ACTOR run fix-nav "Fix the navigation bar — it's broken on mobile viewports"
-ACTOR run update-tests "Update all test files to use the new test utilities"
-ACTOR run rewrite-readme "Rewrite the README with proper setup instructions and examples"
+ACTOR run fix-nav -c "Fix the navigation bar — it's broken on mobile viewports"
+ACTOR run update-tests -c "Update all test files to use the new test utilities"
+ACTOR run rewrite-readme -c "Rewrite the README with proper setup instructions and examples"
 ```
 
 ### User: "what are my actors doing?"
@@ -131,20 +127,17 @@ ACTOR run feature "Commit all your changes with a descriptive message."
 ```
 After the actor commits:
 ```bash
-ACTOR new feature-v2 --base feature
-ACTOR run feature-v2 "Take a different approach to..."
+ACTOR run feature-v2 -c --base feature "Take a different approach to..."
 ```
 
 ### User: "start a codex actor to fix the API"
 ```bash
-ACTOR new fix-api --agent codex
-ACTOR run fix-api "Fix the /users API endpoint — it returns 500 on missing email field"
+ACTOR run fix-api -c --agent codex "Fix the /users API endpoint — it returns 500 on missing email field"
 ```
 
 ### User: "start an actor on the backend repo to fix the API"
 ```bash
-ACTOR new fix-api --dir /path/to/backend-repo
-ACTOR run fix-api "Fix the /users API endpoint — it returns 500 on missing email field"
+ACTOR run fix-api -c --dir /path/to/backend-repo "Fix the /users API endpoint — it returns 500 on missing email field"
 ```
 
 ## Crafting Prompts for Actors
@@ -162,4 +155,4 @@ Choose based on context. If the user gave clear requirements, tell the actor to 
 - Each actor gets its own git worktree by default, so multiple actors can work on the same repo without conflicts.
 - Actor sessions persist — you can `actor run` multiple prompts against the same actor and it remembers context.
 - If an actor errors, check `ACTOR logs <name> --verbose` to see what went wrong, then `ACTOR run <name> "fix the issue"` to retry.
-- When the user says something like "kick off", "spin up", "start", "launch", or "create an actor" — that means `actor new` + `actor run`.
+- When the user says something like "kick off", "spin up", "start", "launch", or "create an actor" — that means `actor run -c`.
