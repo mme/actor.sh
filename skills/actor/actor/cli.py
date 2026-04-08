@@ -56,16 +56,21 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog="""\
 Examples:
   actor new my-feature                              Worktree from current repo
+  actor new my-feature --model sonnet               Use a specific model
+  actor new my-feature --no-strip-api-keys          Pass API keys to the agent
   actor new my-feature --no-worktree                Use current directory directly
   actor new my-feature --dir /path/to/repo          Worktree from another repo
   actor new my-feature --base develop               Branch off develop
-  actor new my-feature --config model=sonnet        Set agent config at creation""",
+  actor new my-feature --config effort=max          Set agent config at creation""",
     )
     p_new.add_argument("name", help="Actor name")
     p_new.add_argument("--dir", default=None, help="Base directory (defaults to CWD)")
     p_new.add_argument("--no-worktree", action="store_true", help="Skip worktree creation, run in the directory directly")
     p_new.add_argument("--base", default=None, help="Branch to create the worktree from (defaults to current branch)")
     p_new.add_argument("--agent", default="claude", help="Coding agent to use")
+    p_new.add_argument("--model", default=None, help="Model for the agent to use")
+    p_new.add_argument("--strip-api-keys", action="store_true", default=True, dest="strip_api_keys", help="Strip API keys from environment (default)")
+    p_new.add_argument("--no-strip-api-keys", action="store_false", dest="strip_api_keys", help="Pass API keys through to the agent")
     p_new.add_argument("--config", dest="config", nargs="+", default=[], metavar="KEY=VALUE", help="Config key=value pairs")
 
     # -- run --
@@ -76,12 +81,15 @@ Examples:
         epilog="""\
 Examples:
   actor run my-feature "fix the nav bar"            Run a prompt
-  actor run my-feature "fix it" --config model=opus  Override config for this run
+  actor run my-feature "fix it" --model opus         Override model for this run
   actor run my-feature -i                            Resume interactively""",
     )
     p_run.add_argument("name", help="Actor name")
     p_run.add_argument("prompt", nargs="?", default=None, help="Prompt to send to the agent")
     p_run.add_argument("-i", "--interactive", action="store_true", help="Resume the actor in interactive mode")
+    p_run.add_argument("--model", default=None, help="Override model for this run")
+    p_run.add_argument("--strip-api-keys", action="store_true", default=None, dest="strip_api_keys", help="Strip API keys from environment for this run")
+    p_run.add_argument("--no-strip-api-keys", action="store_false", dest="strip_api_keys", help="Pass API keys through to the agent for this run")
     p_run.add_argument("--config", dest="config", nargs="+", default=[], metavar="KEY=VALUE", help="Config overrides for this run")
 
     # -- list --
@@ -187,6 +195,11 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     try:
         if args.command == "new":
+            config_pairs = list(args.config)
+            if args.model is not None:
+                config_pairs.append(f"model={args.model}")
+            if not args.strip_api_keys:
+                config_pairs.append("strip-api-keys=false")
             actor = cmd_new(
                 db, git,
                 name=args.name,
@@ -194,7 +207,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 no_worktree=args.no_worktree,
                 base=args.base,
                 agent_name=args.agent,
-                config_pairs=args.config,
+                config_pairs=config_pairs,
             )
             print(f"{actor.name} created ({actor.dir})")
 
@@ -217,12 +230,17 @@ def main(argv: Optional[List[str]] = None) -> None:
                 if args.prompt is None:
                     print("error: prompt is required (or use -i for interactive mode)", file=sys.stderr)
                     sys.exit(1)
+                config_pairs = list(args.config)
+                if args.model is not None:
+                    config_pairs.append(f"model={args.model}")
+                if args.strip_api_keys is not None:
+                    config_pairs.append(f"strip-api-keys={'true' if args.strip_api_keys else 'false'}")
                 agent = agent_for(args.name)
                 cmd_run(
                     db, agent, proc_mgr,
                     name=args.name,
                     prompt=args.prompt,
-                    config_pairs=args.config,
+                    config_pairs=config_pairs,
                 )
 
         elif args.command == "list":

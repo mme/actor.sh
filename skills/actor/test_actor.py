@@ -292,9 +292,9 @@ class TestParseConfig(unittest.TestCase):
         config = parse_config(["prompt=a=b=c"])
         self.assertEqual(config["prompt"], "a=b=c")
 
-    def test_parse_config_invalid(self):
-        with self.assertRaises(ConfigError):
-            parse_config(["noequals"])
+    def test_parse_config_bare_key(self):
+        config = parse_config(["verbose"])
+        self.assertEqual(config["verbose"], "")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1464,11 +1464,12 @@ class TestCmdConfig(unittest.TestCase):
         with self.assertRaises(NotFound):
             cmd_config(db, name="nonexistent", config_pairs=[])
 
-    def test_invalid_config_pair(self):
+    def test_bare_key_config_pair(self):
         db = self._db()
         db.insert_actor(make_actor("test"))
-        with self.assertRaises(ConfigError):
-            cmd_config(db, name="test", config_pairs=["no-equals-sign"])
+        cmd_config(db, name="test", config_pairs=["verbose"])
+        actor = db.get_actor("test")
+        self.assertEqual(actor.config["verbose"], "")
 
     def test_set_multiple_config_pairs_at_once(self):
         db = self._db()

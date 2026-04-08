@@ -27,25 +27,51 @@ class CodexAgent(Agent):
         self._children: Dict[int, _CodexChild] = {}
         self._lock = threading.Lock()
 
+    # Config keys that are handled specially and not passed as CLI flags
+    _INTERNAL_KEYS = {"strip-api-keys", "sandbox", "approval"}
+
     @staticmethod
     def _config_args(config: Config) -> List[str]:
         """Build config flags for Codex.
-        model key becomes -m <value>, all others become -c key=value.
+        model key becomes -m <value>, internal keys are skipped,
+        empty values become -c key=true (TOML boolean),
+        all others become -c key=value.
         """
         args: List[str] = []
         for key, value in sorted(config.items()):
+            if key in CodexAgent._INTERNAL_KEYS:
+                continue
             if key == "model":
                 args.append("-m")
                 args.append(value)
             else:
                 args.append("-c")
-                args.append(f"{key}={value}")
+                args.append(f"{key}={value if value else 'true'}")
+        return args
+
+    @staticmethod
+    def _permission_args(config: Config) -> List[str]:
+        """Build permission/sandbox flags from config."""
+        sandbox = config.get("sandbox")
+        approval = config.get("approval")
+        # If neither is set, use the dangerous bypass (default)
+        if sandbox is None and approval is None:
+            return ["--dangerously-bypass-approvals-and-sandbox"]
+        args: List[str] = []
+        if sandbox is not None:
+            args.extend(["--sandbox", sandbox])
+        if approval is not None:
+            args.extend(["-a", approval])
         return args
 
     def _spawn_and_capture(
-        self, args: List[str], cwd: Optional[Path]
+        self, args: List[str], cwd: Optional[Path], config: Config
     ) -> Tuple[int, Optional[str]]:
-        env = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
+        strip = config.get("strip-api-keys", "true") != "false"
+        if strip:
+            env = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
+        else:
+            env = dict(os.environ)
         kwargs: dict = dict(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -139,14 +165,14 @@ class CodexAgent(Agent):
         args = [
             "codex",
             "exec",
-            "--dangerously-bypass-approvals-and-sandbox",
+            *self._permission_args(config),
             "--json",
             "-C",
             str(dir),
             *self._config_args(config),
             prompt,
         ]
-        return self._spawn_and_capture(args, cwd=None)
+        return self._spawn_and_capture(args, cwd=None, config=config)
 
     def resume(self, dir: Path, session_id: str, prompt: str, config: Config) -> int:
         args = [
@@ -154,12 +180,12 @@ class CodexAgent(Agent):
             "exec",
             "resume",
             session_id,
-            "--dangerously-bypass-approvals-and-sandbox",
+            *self._permission_args(config),
             "--json",
             *self._config_args(config),
             prompt,
         ]
-        pid, _ = self._spawn_and_capture(args, cwd=dir)
+        pid, _ = self._spawn_and_capture(args, cwd=dir, config=config)
         return pid
 
     def wait(self, pid: int) -> int:

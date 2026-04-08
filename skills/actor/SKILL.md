@@ -34,15 +34,25 @@ Refer to this as `ACTOR` in the instructions below. Use the exact path printed a
 ### Create and run an actor
 ```bash
 ACTOR new <name>                          # worktree from current repo (default)
+ACTOR new <name> --model sonnet           # use a specific model
+ACTOR new <name> --agent codex            # use OpenAI Codex instead of Claude
+ACTOR new <name> --no-strip-api-keys      # pass API keys to the agent
 ACTOR new <name> --no-worktree            # run in current directory
 ACTOR new <name> --dir /path/to/repo      # worktree from another repo
 ACTOR new <name> --base develop           # branch off a specific branch
-ACTOR new <name> --agent codex            # use OpenAI Codex instead of Claude
-ACTOR new <name> --config model=sonnet    # set agent config
+ACTOR new <name> --config key=value       # set agent-specific config
 ACTOR run <name> "<prompt>"             # ALWAYS use run_in_background: true
+ACTOR run <name> -i                       # resume interactively (not for skill use)
 ```
 
-The `--agent` flag selects which coding agent to use. Options: `claude` (default), `codex`. The agent is set at creation time and applies to all runs for that actor.
+**Top-level flags:**
+- `--agent` selects the coding agent: `claude` (default), `codex`. Set at creation, applies to all runs.
+- `--model` sets the model. Can also be set via `--config model=<value>`.
+- `--strip-api-keys` (default: on) strips API keys from the environment so agents use subscription auth. Use `--no-strip-api-keys` to pass keys through.
+
+**Agent-specific config:** Use `--config key=value` for agent-specific options. See the config reference for your agent:
+- [Claude config](claude-config.md)
+- [Codex config](codex-config.md)
 
 ### Monitor actors
 ```bash
@@ -148,7 +158,7 @@ Choose based on context. If the user gave clear requirements, tell the actor to 
 
 ## Important Notes
 
-- Actors run `claude` under the hood with `--dangerously-skip-permissions` so they can work autonomously.
+- Actors run with full permissions by default (`--dangerously-skip-permissions` for Claude, `--dangerously-bypass-approvals-and-sandbox` for Codex). This can be changed via config — see the agent config reference.
 - Each actor gets its own git worktree by default, so multiple actors can work on the same repo without conflicts.
 - Actor sessions persist — you can `actor run` multiple prompts against the same actor and it remembers context.
 - If an actor errors, check `ACTOR logs <name> --verbose` to see what went wrong, then `ACTOR run <name> "fix the issue"` to retry.

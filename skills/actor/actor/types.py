@@ -104,15 +104,16 @@ def validate_name(name: str) -> None:
 
 
 def parse_config(pairs: List[str]) -> Config:
-    """Parse key=value config pairs into a dict."""
+    """Parse config pairs into a dict. Supports key=value and bare keys (boolean flags)."""
     config: Config = {}
     for pair in pairs:
         idx = pair.find("=")
         if idx == -1:
-            raise ConfigError(f"invalid config pair: {pair}")
-        key = pair[:idx]
-        value = pair[idx + 1:]
-        config[key] = value
+            config[pair] = ""
+        else:
+            key = pair[:idx]
+            value = pair[idx + 1:]
+            config[key] = value
     return _sorted_config(config)
 
 

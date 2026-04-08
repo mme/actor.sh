@@ -19,17 +19,36 @@ class ClaudeAgent(Agent):
         self._children: Dict[int, subprocess.Popen] = {}  # type: ignore[type-arg]
         self._lock = threading.Lock()
 
+    # Config keys that are handled specially and not passed as CLI flags
+    _INTERNAL_KEYS = {"strip-api-keys"}
+
     @staticmethod
     def _config_args(config: Config) -> List[str]:
-        """Build common config flags. Each key becomes --key value."""
+        """Build common config flags. Each key becomes --key value.
+        Empty values become bare flags (--key). Internal keys are skipped."""
         args: List[str] = []
         for key, value in sorted(config.items()):
+            if key in ClaudeAgent._INTERNAL_KEYS:
+                continue
             args.append(f"--{key}")
-            args.append(value)
+            if value:
+                args.append(value)
         return args
 
-    def _spawn_and_track(self, args: List[str], cwd: Path) -> int:
-        env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    @staticmethod
+    def _permission_args(config: Config) -> List[str]:
+        """Build permission flags from config."""
+        mode = config.get("permission-mode", "bypassPermissions")
+        if mode == "bypassPermissions":
+            return ["--dangerously-skip-permissions"]
+        return ["--permission-mode", mode]
+
+    def _spawn_and_track(self, args: List[str], cwd: Path, config: Config) -> int:
+        strip = config.get("strip-api-keys", "true") != "false"
+        if strip:
+            env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+        else:
+            env = dict(os.environ)
         proc = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
@@ -59,28 +78,28 @@ class ClaudeAgent(Agent):
         args = [
             "claude",
             "-p",
-            "--dangerously-skip-permissions",
+            *self._permission_args(config),
             "--session-id",
             session_id,
             *self._config_args(config),
             "--",
             prompt,
         ]
-        pid = self._spawn_and_track(args, dir)
+        pid = self._spawn_and_track(args, dir, config)
         return pid, session_id
 
     def resume(self, dir: Path, session_id: str, prompt: str, config: Config) -> int:
         args = [
             "claude",
             "-p",
-            "--dangerously-skip-permissions",
+            *self._permission_args(config),
             "--resume",
             session_id,
             *self._config_args(config),
             "--",
             prompt,
         ]
-        return self._spawn_and_track(args, dir)
+        return self._spawn_and_track(args, dir, config)
 
     def wait(self, pid: int) -> int:
         with self._lock:
