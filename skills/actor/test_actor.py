@@ -1642,7 +1642,7 @@ class TestCmdLogs(unittest.TestCase):
 
 
 # ──────────────────────────────────────────────────────────────────────
-#  Test: cmd_done  (13 tests from done.rs)
+#  Test: cmd_done
 # ──────────────────────────────────────────────────────────────────────
 
 class TestCmdDone(unittest.TestCase):
@@ -1653,86 +1653,20 @@ class TestCmdDone(unittest.TestCase):
     def test_done_no_worktree_just_deletes_metadata(self):
         db = self._db()
         create_actor(db, "test", config=[])
-        git = FakeGit()
         pm = FakeProcessManager()
-        cmd_done(db, git, pm, name="test", merge=False, pr=False, discard=False,
-                 title=None, body=None)
+        cmd_done(db, pm, name="test")
         with self.assertRaises(NotFound):
             db.get_actor("test")
+
+    def test_done_worktree_just_deletes_metadata(self):
+        db = self._db()
+        git = FakeGit()
+        create_actor_with_worktree(db, git, "feature")
+        git.calls.clear()
+        pm = FakeProcessManager()
+        cmd_done(db, pm, name="feature")
+        # No git operations — worktree stays on disk
         self.assertEqual(len(git.calls), 0)
-
-    def test_done_default_keeps_branch_removes_worktree(self):
-        db = self._db()
-        git = FakeGit()
-        create_actor_with_worktree(db, git, "feature")
-        git.calls.clear()
-        pm = FakeProcessManager()
-        cmd_done(db, git, pm, name="feature", merge=False, pr=False, discard=False,
-                 title=None, body=None)
-        self.assertEqual(len(git.calls), 1)
-        self.assertEqual(git.calls[0].op, "remove_worktree")
-        with self.assertRaises(NotFound):
-            db.get_actor("feature")
-
-    def test_done_merge(self):
-        db = self._db()
-        git = FakeGit()
-        create_actor_with_worktree(db, git, "feature")
-        git.calls.clear()
-        pm = FakeProcessManager()
-        cmd_done(db, git, pm, name="feature", merge=True, pr=False, discard=False,
-                 title=None, body=None)
-        self.assertEqual(len(git.calls), 3)
-        self.assertEqual(git.calls[0].op, "merge_branch")
-        self.assertEqual(git.calls[0].branch, "feature")
-        self.assertEqual(git.calls[0].into, "main")
-        self.assertEqual(git.calls[1].op, "remove_worktree")
-        self.assertEqual(git.calls[2].op, "delete_branch")
-        self.assertEqual(git.calls[2].branch, "feature")
-        with self.assertRaises(NotFound):
-            db.get_actor("feature")
-
-    def test_done_pr_default_title(self):
-        db = self._db()
-        git = FakeGit()
-        create_actor_with_worktree(db, git, "feature")
-        git.calls.clear()
-        pm = FakeProcessManager()
-        result = cmd_done(db, git, pm, name="feature", merge=False, pr=True, discard=False,
-                          title=None, body=None)
-        self.assertEqual(result, "feature done (PR: https://github.com/test/test/pull/1)")
-        self.assertEqual(len(git.calls), 3)
-        self.assertEqual(git.calls[0].op, "push_branch")
-        self.assertEqual(git.calls[0].branch, "feature")
-        self.assertEqual(git.calls[1].op, "create_pr")
-        self.assertEqual(git.calls[1].title, "feature")
-        self.assertEqual(git.calls[1].base, "main")
-        self.assertEqual(git.calls[2].op, "remove_worktree")
-
-    def test_done_pr_custom_title_and_body(self):
-        db = self._db()
-        git = FakeGit()
-        create_actor_with_worktree(db, git, "feature")
-        git.calls.clear()
-        pm = FakeProcessManager()
-        result = cmd_done(db, git, pm, name="feature", merge=False, pr=True, discard=False,
-                          title="Fix nav bug", body="Rewrote the nav component")
-        self.assertEqual(result, "feature done (PR: https://github.com/test/test/pull/1)")
-        self.assertEqual(git.calls[1].title, "Fix nav bug")
-        self.assertEqual(git.calls[1].body, "Rewrote the nav component")
-
-    def test_done_discard(self):
-        db = self._db()
-        git = FakeGit()
-        create_actor_with_worktree(db, git, "feature")
-        git.calls.clear()
-        pm = FakeProcessManager()
-        cmd_done(db, git, pm, name="feature", merge=False, pr=False, discard=True,
-                 title=None, body=None)
-        self.assertEqual(len(git.calls), 2)
-        self.assertEqual(git.calls[0].op, "remove_worktree")
-        self.assertEqual(git.calls[1].op, "delete_branch")
-        self.assertEqual(git.calls[1].branch, "feature")
         with self.assertRaises(NotFound):
             db.get_actor("feature")
 
@@ -1747,10 +1681,8 @@ class TestCmdDone(unittest.TestCase):
         )
         db.insert_run(run)
         pm.mark_alive(999)
-        git = FakeGit()
         with self.assertRaises(IsRunning):
-            cmd_done(db, git, pm, name="test", merge=False, pr=False, discard=False,
-                     title=None, body=None)
+            cmd_done(db, pm, name="test")
 
     def test_done_detects_stale_pid_and_proceeds(self):
         db = self._db()
@@ -1763,28 +1695,15 @@ class TestCmdDone(unittest.TestCase):
         )
         db.insert_run(run)
         # PID 888 is NOT alive
-        git = FakeGit()
-        cmd_done(db, git, pm, name="test", merge=False, pr=False, discard=False,
-                 title=None, body=None)
+        cmd_done(db, pm, name="test")
         with self.assertRaises(NotFound):
             db.get_actor("test")
 
     def test_done_not_found(self):
         db = self._db()
-        git = FakeGit()
         pm = FakeProcessManager()
         with self.assertRaises(NotFound):
-            cmd_done(db, git, pm, name="nope", merge=False, pr=False, discard=False,
-                     title=None, body=None)
-
-    def test_done_multiple_flags_errors(self):
-        db = self._db()
-        create_actor(db, "test", config=[])
-        git = FakeGit()
-        pm = FakeProcessManager()
-        with self.assertRaises(ActorError):
-            cmd_done(db, git, pm, name="test", merge=True, pr=True, discard=False,
-                     title=None, body=None)
+            cmd_done(db, pm, name="nope")
 
     def test_done_deletes_runs_too(self):
         db = self._db()
@@ -1796,36 +1715,9 @@ class TestCmdDone(unittest.TestCase):
             finished_at="2026-01-01T00:01:00Z",
         )
         db.insert_run(run)
-        git = FakeGit()
         pm = FakeProcessManager()
-        cmd_done(db, git, pm, name="test", merge=False, pr=False, discard=False,
-                 title=None, body=None)
+        cmd_done(db, pm, name="test")
         self.assertIsNone(db.latest_run("test"))
-
-    def test_done_merge_failure_preserves_actor(self):
-        db = self._db()
-        git = FakeGit()
-        create_actor_with_worktree(db, git, "feature")
-        git.calls.clear()
-        git.fail_next = "merge_branch"
-        pm = FakeProcessManager()
-        with self.assertRaises(GitError):
-            cmd_done(db, git, pm, name="feature", merge=True, pr=False, discard=False,
-                     title=None, body=None)
-        # Actor still exists
-        self.assertIsNotNone(db.get_actor("feature"))
-
-    def test_done_pr_push_failure_preserves_actor(self):
-        db = self._db()
-        git = FakeGit()
-        create_actor_with_worktree(db, git, "feature")
-        git.calls.clear()
-        git.fail_next = "push_branch"
-        pm = FakeProcessManager()
-        with self.assertRaises(GitError):
-            cmd_done(db, git, pm, name="feature", merge=False, pr=True, discard=False,
-                     title=None, body=None)
-        self.assertIsNotNone(db.get_actor("feature"))
 
 
 # ──────────────────────────────────────────────────────────────────────

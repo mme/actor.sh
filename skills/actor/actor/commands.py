@@ -80,6 +80,7 @@ def _create_agent(kind: AgentKind) -> Agent:
         raise ActorError(f"unknown agent kind: {kind}")
 
 
+
 def _format_log_timestamp(ts: Optional[str]) -> str:
     if ts is None:
         return ""
@@ -476,152 +477,19 @@ def cmd_logs(db: Database, agent: Agent, name: str, verbose: bool, watch: bool) 
 
 def cmd_done(
     db: Database,
-    git: GitOps,
     proc_mgr: ProcessManager,
     name: str,
-    merge: bool,
-    pr: bool,
-    discard: bool,
-    title: Optional[str],
-    body: Optional[str],
 ) -> str:
-    actor = db.get_actor(name)
+    db.get_actor(name)
 
     # Check not running (with stale PID detection)
     status = db.resolve_actor_status(name, proc_mgr)
     if status == Status.RUNNING:
         raise IsRunningError(name)
 
-    # Validate mutually exclusive flags
-    flag_count = sum([merge, pr, discard])
-    if flag_count > 1:
-        raise ActorError("only one of --merge, --pr, or --discard can be specified")
-
-    if actor.worktree:
-        source_repo = actor.source_repo
-        if source_repo is None:
-            raise ActorError("worktree actor missing source_repo")
-        repo_path = Path(source_repo)
-        wt_path = Path(actor.dir)
-
-        if merge:
-            base = actor.base_branch
-            if base is None:
-                raise ActorError("no base branch set \u2014 cannot merge")
-            git.merge_branch(repo_path, actor.name, base)
-            git.remove_worktree(repo_path, wt_path)
-            git.delete_branch(repo_path, actor.name)
-
-            db.delete_actor(name)
-            return f"{name} done (merged into {base})"
-
-        elif pr:
-            base = actor.base_branch
-            if base is None:
-                raise ActorError("no base branch set \u2014 cannot create PR")
-            pr_title = title if title is not None else actor.name
-            pr_body = body if body is not None else ""
-            git.push_branch(repo_path, actor.name)
-            url = git.create_pr(repo_path, actor.name, base, pr_title, pr_body)
-            try:
-                git.remove_worktree(repo_path, wt_path)
-            except Exception as e:
-                print(f"warning: failed to remove worktree at {wt_path}: {e}", file=sys.stderr)
-
-            db.delete_actor(name)
-            return f"{name} done (PR: {url})"
-
-        elif discard:
-            git.remove_worktree(repo_path, wt_path)
-            git.delete_branch(repo_path, actor.name)
-
-            db.delete_actor(name)
-            return f"{name} done (discarded)"
-
-        else:
-            # Default: keep branch, remove worktree
-            git.remove_worktree(repo_path, wt_path)
-
-    # Delete actor and all runs
     db.delete_actor(name)
-
-    if discard:
-        return f"{name} done (discarded)"
     return f"{name} done"
 
-
-# -- cmd_fork --
-
-def cmd_fork(
-    db: Database,
-    git: GitOps,
-    source_name: str,
-    new_name: str,
-) -> Actor:
-    """Fork an existing actor into a new actor branched from its current state."""
-    validate_name(new_name)
-
-    source = db.get_actor(source_name)
-
-    if not source.worktree:
-        raise ActorError(f"cannot fork '{source_name}' — only worktree actors can be forked")
-
-    source_dir = Path(source.dir)
-    if not source_dir.is_dir():
-        raise ActorError(f"actor directory '{source.dir}' does not exist")
-
-    source_repo = source.source_repo
-    if source_repo is None:
-        raise ActorError(f"worktree actor '{source_name}' missing source_repo")
-
-    # Commit any uncommitted changes in the source worktree
-    import subprocess
-    result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=str(source_dir),
-        capture_output=True,
-        text=True,
-    )
-    if result.stdout.strip():
-        subprocess.run(
-            ["git", "add", "-A"],
-            cwd=str(source_dir),
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "commit", "-m", f"actor fork: snapshot for {new_name}"],
-            cwd=str(source_dir),
-            capture_output=True,
-        )
-
-    # Create new worktree branched from the source actor's branch
-    wt_path = _worktree_path(new_name)
-    git.create_worktree(Path(source_repo), wt_path, new_name, source_name)
-
-    now = _now_iso()
-    actor = Actor(
-        name=new_name,
-        agent=source.agent,
-        agent_session=None,
-        dir=str(wt_path),
-        source_repo=source_repo,
-        base_branch=source.base_branch,
-        worktree=True,
-        config=dict(source.config),
-        created_at=now,
-        updated_at=now,
-    )
-
-    try:
-        db.insert_actor(actor)
-    except ActorError:
-        try:
-            git.remove_worktree(Path(source_repo), wt_path)
-        except Exception as cleanup_err:
-            print(f"warning: failed to clean up worktree at {wt_path}: {cleanup_err}", file=sys.stderr)
-        raise
-
-    return actor
 
 
 # ---------------------------------------------------------------------------

@@ -16,7 +16,6 @@ from .agents.codex import CodexAgent
 from .commands import (
     cmd_config,
     cmd_done,
-    cmd_fork,
     cmd_list,
     cmd_logs,
     cmd_new,
@@ -150,37 +149,16 @@ Examples:
     p_config.add_argument("name", help="Actor name")
     p_config.add_argument("pairs", nargs="*", default=[], metavar="KEY=VALUE", help="Config key=value pairs to set (omit to view)")
 
-    # -- fork --
-    p_fork = sub.add_parser(
-        "fork",
-        help="Fork an actor into a new actor branched from its current state",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""\
-Examples:
-  actor fork my-feature my-feature-v2       Fork with all changes committed""",
-    )
-    p_fork.add_argument("source", help="Source actor name")
-    p_fork.add_argument("name", help="New actor name")
-
     # -- done --
     p_done = sub.add_parser(
         "done",
-        help="Resolve and clean up an actor",
+        help="Remove an actor from the database (worktree stays on disk)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
-  actor done my-feature                             Keep branch, remove worktree
-  actor done my-feature --merge                     Merge into base branch
-  actor done my-feature --pr                        Create a pull request
-  actor done my-feature --pr --title "Fix nav"      PR with custom title
-  actor done my-feature --discard                   Delete branch and changes""",
+  actor done my-feature                             Remove actor from DB""",
     )
     p_done.add_argument("name", help="Actor name")
-    p_done.add_argument("--merge", action="store_true", help="Merge branch into base branch")
-    p_done.add_argument("--pr", action="store_true", help="Create a pull request")
-    p_done.add_argument("--discard", action="store_true", help="Discard branch and all changes")
-    p_done.add_argument("--title", default=None, help="PR title (defaults to actor name)")
-    p_done.add_argument("--body", default=None, help="PR body")
 
     return parser
 
@@ -257,20 +235,8 @@ def main(argv: Optional[List[str]] = None) -> None:
             if output:
                 print(output, end="")
 
-        elif args.command == "fork":
-            actor = cmd_fork(db, git, source_name=args.source, new_name=args.name)
-            print(f"{actor.name} forked from {args.source} ({actor.dir})")
-
         elif args.command == "done":
-            msg = cmd_done(
-                db, git, proc_mgr,
-                name=args.name,
-                merge=args.merge,
-                pr=args.pr,
-                discard=args.discard,
-                title=args.title,
-                body=args.body,
-            )
+            msg = cmd_done(db, proc_mgr, name=args.name)
             print(msg)
 
     except ActorError as e:

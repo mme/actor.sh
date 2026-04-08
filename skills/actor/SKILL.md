@@ -63,11 +63,7 @@ ACTOR run <name> "<follow-up prompt>"   # resumes session (run_in_background: tr
 
 ### Finish actors
 ```bash
-ACTOR done <name>                         # keep branch, clean up
-ACTOR done <name> --merge                 # merge into base branch
-ACTOR done <name> --pr                    # create a pull request
-ACTOR done <name> --pr --title "Fix X"    # PR with custom title
-ACTOR done <name> --discard               # delete branch and changes
+ACTOR done <name>                         # remove actor from DB (worktree stays on disk)
 ```
 
 ## Workflow Examples
@@ -102,7 +98,31 @@ Then summarize the key actions and results.
 
 ### User: "fix-nav looks good, make a PR"
 ```bash
-ACTOR done fix-nav --pr
+ACTOR run fix-nav "Push your branch and create a pull request against main using gh pr create. Write a clear title and description based on what you did. Report the PR URL when done."
+```
+After the actor finishes and reports the PR URL:
+```bash
+ACTOR done fix-nav
+```
+
+### User: "merge fix-nav into main"
+```bash
+ACTOR run fix-nav "Merge main into your branch to check for conflicts, resolve any issues, then merge your branch into main and push."
+```
+After the actor finishes:
+```bash
+ACTOR done fix-nav
+```
+
+### Forking an actor (trying a different approach)
+To fork an actor's work into a new direction, have the actor commit first, then create a new actor from its branch:
+```bash
+ACTOR run feature "Commit all your changes with a descriptive message."
+```
+After the actor commits:
+```bash
+ACTOR new feature-v2 --base feature
+ACTOR run feature-v2 "Take a different approach to..."
 ```
 
 ### User: "start a codex actor to fix the API"
