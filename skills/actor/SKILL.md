@@ -37,9 +37,12 @@ ACTOR new <name>                          # worktree from current repo (default)
 ACTOR new <name> --no-worktree            # run in current directory
 ACTOR new <name> --dir /path/to/repo      # worktree from another repo
 ACTOR new <name> --base develop           # branch off a specific branch
+ACTOR new <name> --agent codex            # use OpenAI Codex instead of Claude
 ACTOR new <name> --config model=sonnet    # set agent config
 ACTOR run <name> "<prompt>"             # ALWAYS use run_in_background: true
 ```
+
+The `--agent` flag selects which coding agent to use. Options: `claude` (default), `codex`. The agent is set at creation time and applies to all runs for that actor.
 
 ### Monitor actors
 ```bash
@@ -100,6 +103,12 @@ Then summarize the key actions and results.
 ### User: "fix-nav looks good, make a PR"
 ```bash
 ACTOR done fix-nav --pr
+```
+
+### User: "start a codex actor to fix the API"
+```bash
+ACTOR new fix-api --agent codex
+ACTOR run fix-api "Fix the /users API endpoint — it returns 500 on missing email field"
 ```
 
 ### User: "start an actor on the backend repo to fix the API"

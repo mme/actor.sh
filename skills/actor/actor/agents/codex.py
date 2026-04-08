@@ -88,11 +88,15 @@ class CodexAgent(Agent):
                         break
                     try:
                         v = json.loads(line.decode("utf-8", errors="replace").strip())
-                        if v.get("type") == "message.output_text.delta":
-                            delta = v.get("delta")
-                            if isinstance(delta, str):
-                                sys.stdout.write(delta)
-                                sys.stdout.flush()
+                        event_type = v.get("type")
+                        # Codex emits item.completed with agent_message items
+                        if event_type == "item.completed":
+                            item = v.get("item", {})
+                            if item.get("type") == "agent_message":
+                                text = item.get("text", "")
+                                if text:
+                                    sys.stdout.write(text + "\n")
+                                    sys.stdout.flush()
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         pass
             except Exception:
@@ -188,46 +192,52 @@ class CodexAgent(Agent):
             except json.JSONDecodeError:
                 continue
 
-            event_type = v.get("type")
-            if not isinstance(event_type, str):
-                continue
+            top_type = v.get("type")
+            payload = v.get("payload", {})
 
-            if event_type == "message.output_text.done":
-                text = v.get("text", "")
-                if isinstance(text, str) and text:
-                    entries.append(LogEntry(
-                        kind=LogEntryKind.ASSISTANT,
-                        text=text,
-                    ))
-            elif event_type in ("input_text", "message.input_text"):
-                text = v.get("text", "")
-                if isinstance(text, str) and text:
-                    entries.append(LogEntry(
-                        kind=LogEntryKind.USER,
-                        text=text,
-                    ))
-            elif event_type in ("function_call", "message.function_call"):
-                name = v.get("name", "unknown")
-                args_val = v.get("arguments")
-                args_str = json.dumps(args_val) if args_val is not None else ""
-                entries.append(LogEntry(
-                    kind=LogEntryKind.TOOL_USE,
-                    name=name if isinstance(name, str) else "unknown",
-                    input=args_str,
-                ))
-            elif event_type in ("function_call_output", "message.function_call_output"):
-                output = v.get("output", "")
-                entries.append(LogEntry(
-                    kind=LogEntryKind.TOOL_RESULT,
-                    content=output if isinstance(output, str) else "",
-                ))
-            elif event_type == "reasoning.summary_text.done":
-                text = v.get("text", "")
-                if isinstance(text, str) and text:
-                    entries.append(LogEntry(
-                        kind=LogEntryKind.THINKING,
-                        text=text,
-                    ))
+            if top_type == "event_msg":
+                msg_type = payload.get("type")
+                if msg_type == "agent_message":
+                    text = payload.get("message", "")
+                    if isinstance(text, str) and text:
+                        entries.append(LogEntry(
+                            kind=LogEntryKind.ASSISTANT,
+                            text=text,
+                        ))
+                elif msg_type == "user_message":
+                    text = payload.get("message", "")
+                    if isinstance(text, str) and text:
+                        entries.append(LogEntry(
+                            kind=LogEntryKind.USER,
+                            text=text,
+                        ))
+                elif msg_type == "exec_command":
+                    cmd = payload.get("command", {})
+                    cmd_str = cmd.get("command", "") if isinstance(cmd, dict) else ""
+                    if isinstance(cmd_str, str) and cmd_str:
+                        entries.append(LogEntry(
+                            kind=LogEntryKind.TOOL_USE,
+                            name="shell",
+                            input=cmd_str,
+                        ))
+                elif msg_type == "exec_command_output":
+                    output = payload.get("output", "")
+                    if isinstance(output, str) and output:
+                        entries.append(LogEntry(
+                            kind=LogEntryKind.TOOL_RESULT,
+                            content=output,
+                        ))
+            elif top_type == "response_item":
+                item_type = payload.get("type")
+                if item_type == "reasoning":
+                    summaries = payload.get("summary", [])
+                    for s in summaries:
+                        text = s.get("text", "") if isinstance(s, dict) else ""
+                        if isinstance(text, str) and text:
+                            entries.append(LogEntry(
+                                kind=LogEntryKind.THINKING,
+                                text=text,
+                            ))
 
         return entries
 
