@@ -45,6 +45,7 @@ class Database:
                 source_repo     TEXT,
                 base_branch     TEXT,
                 worktree        BOOLEAN NOT NULL DEFAULT FALSE,
+                parent          TEXT,
                 config          TEXT NOT NULL DEFAULT '{}',
                 created_at      TEXT NOT NULL,
                 updated_at      TEXT NOT NULL
@@ -64,6 +65,13 @@ class Database:
         """)
         conn.commit()
 
+        # Migrations
+        cur = conn.execute("PRAGMA table_info(actors)")
+        columns = {row[1] for row in cur.fetchall()}
+        if "parent" not in columns:
+            conn.execute("ALTER TABLE actors ADD COLUMN parent TEXT")
+            conn.commit()
+
         return cls(conn)
 
     # -- Actor CRUD --
@@ -74,8 +82,8 @@ class Database:
             self._conn.execute(
                 """INSERT INTO actors
                    (name, agent, agent_session, dir, source_repo, base_branch,
-                    worktree, config, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    worktree, parent, config, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     actor.name,
                     actor.agent.as_str(),
@@ -84,6 +92,7 @@ class Database:
                     actor.source_repo,
                     actor.base_branch,
                     actor.worktree,
+                    actor.parent,
                     config_json,
                     actor.created_at,
                     actor.updated_at,
@@ -96,7 +105,7 @@ class Database:
     def get_actor(self, name: str) -> Actor:
         cur = self._conn.execute(
             """SELECT name, agent, agent_session, dir, source_repo, base_branch,
-                      worktree, config, created_at, updated_at
+                      worktree, parent, config, created_at, updated_at
                FROM actors WHERE name = ?""",
             (name,),
         )
@@ -108,8 +117,17 @@ class Database:
     def list_actors(self) -> List[Actor]:
         cur = self._conn.execute(
             """SELECT name, agent, agent_session, dir, source_repo, base_branch,
-                      worktree, config, created_at, updated_at
+                      worktree, parent, config, created_at, updated_at
                FROM actors ORDER BY created_at DESC"""
+        )
+        return [self._row_to_actor(row) for row in cur.fetchall()]
+
+    def list_children(self, parent_name: str) -> List[Actor]:
+        cur = self._conn.execute(
+            """SELECT name, agent, agent_session, dir, source_repo, base_branch,
+                      worktree, parent, config, created_at, updated_at
+               FROM actors WHERE parent = ?""",
+            (parent_name,),
         )
         return [self._row_to_actor(row) for row in cur.fetchall()]
 
@@ -224,7 +242,7 @@ class Database:
 
     @staticmethod
     def _row_to_actor(row: tuple) -> Actor:
-        config: Config = json.loads(row[7]) if row[7] else {}
+        config: Config = json.loads(row[8]) if row[8] else {}
         return Actor(
             name=row[0],
             agent=AgentKind.from_str(row[1]),
@@ -233,9 +251,10 @@ class Database:
             source_repo=row[4],
             base_branch=row[5],
             worktree=bool(row[6]),
+            parent=row[7],
             config=_sorted_config(config),
-            created_at=row[8],
-            updated_at=row[9],
+            created_at=row[9],
+            updated_at=row[10],
         )
 
     @staticmethod

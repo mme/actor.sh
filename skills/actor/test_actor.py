@@ -183,6 +183,7 @@ def make_actor(name: str, **overrides) -> Actor:
         source_repo=None,
         base_branch=None,
         worktree=False,
+        parent=None,
         config={},
         created_at="2026-01-01T00:00:00Z",
         updated_at="2026-01-01T00:00:00Z",
@@ -1671,7 +1672,7 @@ class TestCmdDiscard(unittest.TestCase):
         with self.assertRaises(NotFound):
             db.get_actor("feature")
 
-    def test_discard_errors_if_running(self):
+    def test_discard_force_stops_running_actor(self):
         db = self._db()
         create_actor(db, "test", config=[])
         pm = FakeProcessManager()
@@ -1682,8 +1683,10 @@ class TestCmdDiscard(unittest.TestCase):
         )
         db.insert_run(run)
         pm.mark_alive(999)
-        with self.assertRaises(IsRunning):
-            cmd_discard(db, pm, name="test")
+        cmd_discard(db, pm, name="test")
+        self.assertFalse(pm.is_alive(999))
+        with self.assertRaises(NotFound):
+            db.get_actor("test")
 
     def test_discard_detects_stale_pid_and_proceeds(self):
         db = self._db()
@@ -1719,6 +1722,62 @@ class TestCmdDiscard(unittest.TestCase):
         pm = FakeProcessManager()
         cmd_discard(db, pm, name="test")
         self.assertIsNone(db.latest_run("test"))
+
+    def test_discard_cascades_to_children(self):
+        db = self._db()
+        create_actor(db, "parent", config=[])
+        # Manually insert children with parent set
+        child1 = make_actor("child1", parent="parent", dir="/tmp")
+        child2 = make_actor("child2", parent="parent", dir="/tmp")
+        db.insert_actor(child1)
+        db.insert_actor(child2)
+        pm = FakeProcessManager()
+        result = cmd_discard(db, pm, name="parent")
+        self.assertIn("child1 discarded", result)
+        self.assertIn("child2 discarded", result)
+        self.assertIn("parent discarded", result)
+        with self.assertRaises(NotFound):
+            db.get_actor("child1")
+        with self.assertRaises(NotFound):
+            db.get_actor("child2")
+        with self.assertRaises(NotFound):
+            db.get_actor("parent")
+
+    def test_discard_cascades_recursively(self):
+        db = self._db()
+        create_actor(db, "root", config=[])
+        child = make_actor("child", parent="root", dir="/tmp")
+        grandchild = make_actor("grandchild", parent="child", dir="/tmp")
+        db.insert_actor(child)
+        db.insert_actor(grandchild)
+        pm = FakeProcessManager()
+        result = cmd_discard(db, pm, name="root")
+        self.assertIn("grandchild discarded", result)
+        self.assertIn("child discarded", result)
+        self.assertIn("root discarded", result)
+        for name in ["root", "child", "grandchild"]:
+            with self.assertRaises(NotFound):
+                db.get_actor(name)
+
+    def test_discard_stops_running_children(self):
+        db = self._db()
+        create_actor(db, "parent", config=[])
+        child = make_actor("child", parent="parent", dir="/tmp")
+        db.insert_actor(child)
+        run = Run(
+            id=0, actor_name="child", prompt="go", status=Status.RUNNING,
+            exit_code=None, pid=777, config={},
+            started_at="2026-01-01T00:00:00Z", finished_at=None,
+        )
+        db.insert_run(run)
+        pm = FakeProcessManager()
+        pm.mark_alive(777)
+        cmd_discard(db, pm, name="parent")
+        self.assertFalse(pm.is_alive(777))
+        with self.assertRaises(NotFound):
+            db.get_actor("child")
+        with self.assertRaises(NotFound):
+            db.get_actor("parent")
 
 
 # ──────────────────────────────────────────────────────────────────────

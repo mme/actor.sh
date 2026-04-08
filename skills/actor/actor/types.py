@@ -69,6 +69,7 @@ class Actor:
     source_repo: Optional[str]
     base_branch: Optional[str]
     worktree: bool
+    parent: Optional[str]
     config: Config
     created_at: str
     updated_at: str

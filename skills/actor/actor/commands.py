@@ -150,6 +150,8 @@ def cmd_new(
         base_branch = branch_base
         worktree = True
 
+    parent = os.environ.get("ACTOR_NAME")
+
     now = _now_iso()
     actor = Actor(
         name=name,
@@ -159,6 +161,7 @@ def cmd_new(
         source_repo=source_repo,
         base_branch=base_branch,
         worktree=worktree,
+        parent=parent,
         config=config,
         created_at=now,
         updated_at=now,
@@ -478,6 +481,17 @@ def cmd_logs(db: Database, agent: Agent, name: str, verbose: bool, watch: bool) 
 
 # -- cmd_discard --
 
+def _force_stop(db: Database, proc_mgr: ProcessManager, name: str) -> None:
+    """Stop a running actor by killing its process."""
+    latest = db.latest_run(name)
+    if latest is None or latest.status != Status.RUNNING:
+        return
+    pid = latest.pid
+    if pid is not None and proc_mgr.is_alive(pid):
+        proc_mgr.kill(pid)
+    db.update_run_status(latest.id, Status.STOPPED, None)
+
+
 def cmd_discard(
     db: Database,
     proc_mgr: ProcessManager,
@@ -485,13 +499,21 @@ def cmd_discard(
 ) -> str:
     db.get_actor(name)
 
-    # Check not running (with stale PID detection)
+    # Recursively discard children first
+    children = db.list_children(name)
+    discarded = []
+    for child in children:
+        msg = cmd_discard(db, proc_mgr, name=child.name)
+        discarded.append(msg)
+
+    # Stop if running
     status = db.resolve_actor_status(name, proc_mgr)
     if status == Status.RUNNING:
-        raise IsRunningError(name)
+        _force_stop(db, proc_mgr, name)
 
     db.delete_actor(name)
-    return f"{name} discarded"
+    discarded.append(f"{name} discarded")
+    return "\n".join(discarded)
 
 
 
