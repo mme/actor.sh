@@ -322,6 +322,9 @@ class ActorWatchApp(App):
     .underline--bar {
         background: $foreground 30%;
     }
+    * {
+        scrollbar-background: $foreground 30%;
+    }
     #logs-content {
         padding: 0 1;
     }
