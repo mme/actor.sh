@@ -566,15 +566,21 @@ class ActorWatchApp(App):
                     (0, 1, 0, 2),
                 ))
             elif entry.kind == LogEntryKind.TOOL_USE:
-                warning = self.current_theme.warning if self.current_theme else "#E0AF68"
-                header = Text(f"  ⚡ {entry.name}", style=f"bold {warning}")
-                log.write(header)
-                if entry.input:
-                    body = entry.input[:200] + ("..." if len(entry.input) > 200 else "")
-                    log.write(Padding(
-                        Text(body, style="dim"),
-                        (0, 1, 0, 4),
-                    ))
+                from .diff_render import try_render_tool_diff
+                is_dark = self.current_theme.dark if self.current_theme else True
+                diff_renderable = try_render_tool_diff(entry.name, entry.input, dark=is_dark)
+                if diff_renderable:
+                    log.write(Padding(diff_renderable, (0, 1, 0, 2)))
+                else:
+                    warning = self.current_theme.warning if self.current_theme else "#E0AF68"
+                    header = Text(f"  ⚡ {entry.name}", style=f"bold {warning}")
+                    log.write(header)
+                    if entry.input:
+                        body = entry.input[:200] + ("..." if len(entry.input) > 200 else "")
+                        log.write(Padding(
+                            Text(body, style="dim"),
+                            (0, 1, 0, 4),
+                        ))
             elif entry.kind == LogEntryKind.TOOL_RESULT:
                 if entry.content:
                     body = entry.content[:300] + ("..." if len(entry.content) > 300 else "")
