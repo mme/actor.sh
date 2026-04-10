@@ -226,6 +226,23 @@ class ActorWatchApp(App):
     THEME = "textual-ansi"
 
     CSS = """
+    Screen, Horizontal, Vertical, VerticalScroll,
+    TabbedContent, TabPane, ContentSwitcher,
+    #actor-list, #detail-panel, #diff-scroll {
+        background: transparent;
+    }
+    Tabs {
+        background: transparent;
+    }
+    Tab {
+        background: transparent;
+    }
+    Tab.-active {
+        background: transparent;
+    }
+    Footer {
+        background: transparent;
+    }
     #actor-list {
         width: 28;
         border-right: solid $surface-lighten-2;
@@ -271,7 +288,6 @@ class ActorWatchApp(App):
         dock: bottom;
         height: 1;
         padding: 0 1;
-        background: $surface;
         color: $text-muted;
     }
     """
