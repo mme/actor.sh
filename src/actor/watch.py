@@ -12,6 +12,7 @@ from textual.content import Content
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
+from textual.theme import Theme
 from textual.widgets import (
     DataTable,
     Footer,
@@ -218,32 +219,31 @@ class ActorList(Vertical):
         return None
 
 
+# -- Theme -------------------------------------------------------------------
+
+ACTOR_DARK = Theme(
+    name="actor-dark",
+    primary="#BB9AF7",
+    secondary="#7AA2F7",
+    warning="#E0AF68",
+    error="#F7768E",
+    success="#9ECE6A",
+    accent="#FF9E64",
+    foreground="#a9b1d6",
+    background="#1A1B26",
+    surface="#24283B",
+    panel="#414868",
+    dark=True,
+    variables={"button-color-foreground": "#24283B"},
+)
+
+
 # -- Main App ----------------------------------------------------------------
 
 class ActorWatchApp(App):
     """Real-time dashboard for actor.sh."""
 
-    THEME = "textual-ansi"
-    ansi_color = True
-
     CSS = """
-    Screen, Horizontal, Vertical, VerticalScroll,
-    TabbedContent, TabPane, ContentSwitcher,
-    #actor-list, #detail-panel, #diff-scroll {
-        background: transparent;
-    }
-    Tabs {
-        background: transparent;
-    }
-    Tab {
-        background: transparent;
-    }
-    Tab.-active {
-        background: transparent;
-    }
-    Footer {
-        background: transparent;
-    }
     #actor-list {
         width: 28;
         border-right: solid $surface-lighten-2;
@@ -289,6 +289,7 @@ class ActorWatchApp(App):
         dock: bottom;
         height: 1;
         padding: 0 1;
+        background: $surface;
         color: $text-muted;
     }
     """
@@ -336,6 +337,9 @@ class ActorWatchApp(App):
         yield Footer()
 
     def on_ready(self) -> None:
+        self.register_theme(ACTOR_DARK)
+        self.theme = "actor-dark"
+
         # Do first poll synchronously so actors are visible immediately
         actors, statuses = self._fetch_actors()
         self._update_ui(actors, statuses)
