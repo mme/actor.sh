@@ -489,15 +489,18 @@ class ActorWatchApp(App):
         for entry in entries:
             if entry.kind == LogEntryKind.USER:
                 log.write(Text(""))
-                prompt = Text("❯ ", style="bold $accent")
+                accent = self.current_theme.accent if self.current_theme else "#FF9E64"
+                prompt = Text("❯ ", style=f"bold {accent}")
                 lines = entry.text.split("\n")
                 body = Text(lines[0])
                 for line in lines[1:]:
                     body.append("\n  " + line)
+                # Resolve theme color for background
+                surface = self.current_theme.surface if self.current_theme else "#24283B"
                 log.write(Padding(
                     Group(Text.assemble(prompt, body)),
                     (0, 1, 0, 0),
-                    style="on $surface",
+                    style=f"on {surface}",
                     expand=True,
                 ))
             elif entry.kind == LogEntryKind.ASSISTANT:
@@ -512,7 +515,8 @@ class ActorWatchApp(App):
                     (0, 1, 0, 2),
                 ))
             elif entry.kind == LogEntryKind.TOOL_USE:
-                header = Text(f"  ⚡ {entry.name}", style="bold $warning")
+                warning = self.current_theme.warning if self.current_theme else "#E0AF68"
+                header = Text(f"  ⚡ {entry.name}", style=f"bold {warning}")
                 log.write(header)
                 if entry.input:
                     body = entry.input[:200] + ("..." if len(entry.input) > 200 else "")
