@@ -200,8 +200,16 @@ class ActorTree(Tree[Actor]):
         super().__init__("Actors", id="actor-tree")
         self.show_root = False
         self.guide_depth = 3
+        self._last_snapshot: list[tuple[str, str]] = []  # [(name, status), ...]
 
     def update_actors(self, actors: list[Actor], statuses: dict[str, Status]) -> None:
+        # Build a snapshot to detect changes
+        snapshot = [(a.name, statuses.get(a.name, Status.IDLE).value) for a in actors]
+        snapshot.sort()
+        if snapshot == self._last_snapshot:
+            return  # nothing changed, skip rebuild
+        self._last_snapshot = snapshot
+
         # Remember current selection
         selected_name = None
         if self.cursor_node and self.cursor_node.data:
