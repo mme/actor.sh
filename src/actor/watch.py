@@ -14,7 +14,6 @@ from textual.reactive import reactive
 from textual.widgets import (
     DataTable,
     Footer,
-    Header,
     Label,
     Static,
     TabbedContent,
@@ -223,9 +222,6 @@ class ActorList(Vertical):
 class ActorWatchApp(App):
     """Real-time dashboard for actor.sh."""
 
-    TITLE = "actor.sh"
-    SUB_TITLE = ""
-
     CSS = """
     Screen {
         background: transparent;
@@ -287,9 +283,6 @@ class ActorWatchApp(App):
     VerticalScroll {
         background: transparent;
     }
-    Header {
-        background: transparent;
-    }
     """
 
     BINDINGS = [
@@ -310,7 +303,6 @@ class ActorWatchApp(App):
     _diff_loaded_for: str | None = None
 
     def compose(self) -> ComposeResult:
-        yield Header()
         with Horizontal():
             yield ActorList()
             with Vertical(id="detail-panel"):
