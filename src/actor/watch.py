@@ -223,6 +223,8 @@ class ActorList(Vertical):
 class ActorWatchApp(App):
     """Real-time dashboard for actor.sh."""
 
+    THEME = "textual-ansi"
+
     CSS = """
     #actor-list {
         width: 28;
