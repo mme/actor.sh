@@ -210,10 +210,9 @@ class ActorTree(Tree[Actor]):
             icon = STATUS_ICON.get(status, "?")
             new_snapshot[a.name] = f"{icon} {a.name}"
 
-        # Only rebuild if something changed
-        if new_snapshot == self._snapshot:
-            # Just update labels in place for status icon changes
-            return
+        # TODO: re-enable after testing cursor stability
+        # if new_snapshot == self._snapshot:
+        #     return
 
         # Check if only labels changed (same actors, same structure)
         if set(new_snapshot.keys()) == set(self._snapshot.keys()):
@@ -581,7 +580,7 @@ class ActorWatchApp(App):
         if tab_id == "diff":
             self._maybe_refresh_diff(force=True)
 
-def run_watch(serve: bool = True) -> None:
+def run_watch(serve: bool = False) -> None:
     """Entry point for `actor watch`."""
     if serve:
         try:
