@@ -224,9 +224,8 @@ class ActorTree(Tree[Actor]):
             icon = STATUS_ICON.get(status, "?")
             new_snapshot[a.name] = f"{icon} {a.name}"
 
-        # TODO: re-enable after testing cursor stability
-        # if new_snapshot == self._snapshot:
-        #     return
+        if new_snapshot == self._snapshot:
+            return
 
         # Check if only labels changed (same actors, same structure)
         if set(new_snapshot.keys()) == set(self._snapshot.keys()):
@@ -558,18 +557,10 @@ class ActorWatchApp(App):
             elif entry.kind == LogEntryKind.ASSISTANT:
                 text = entry.text.strip()
                 if text:
-                    import textwrap
-                    width = max(40, log.size.width - 4)
-                    lines = text.split("\n")
-                    result_lines: list[str] = []
-                    for j, line in enumerate(lines):
-                        if j == 0:
-                            wrapped = textwrap.fill(line, width=width, initial_indent="", subsequent_indent="  ")
-                        else:
-                            wrapped = textwrap.fill(line, width=width, initial_indent="  ", subsequent_indent="  ")
-                        result_lines.append(wrapped)
-                    body = Text.assemble(("⏺ ", "bold"), "\n".join(result_lines))
-                    log.write(body)
+                    log.write(Padding(
+                        RichMarkdown("**⏺** " + text),
+                        (0, 0, 0, 0),
+                    ))
             elif entry.kind == LogEntryKind.THINKING:
                 log.write(Padding(
                     Text(entry.text, style="dim italic"),
