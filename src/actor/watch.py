@@ -224,6 +224,7 @@ class ActorWatchApp(App):
     """Real-time dashboard for actor.sh."""
 
     THEME = "textual-ansi"
+    ansi_color = True
 
     CSS = """
     Screen, Horizontal, Vertical, VerticalScroll,
