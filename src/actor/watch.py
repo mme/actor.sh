@@ -344,6 +344,8 @@ class ActorWatchApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("p", "command_palette", "Palette"),
+        Binding("left", "prev_tab", "Prev Tab", show=False),
+        Binding("right", "next_tab", "Next Tab", show=False),
         Binding("l", "show_tab('logs')", "Logs"),
         Binding("d", "show_tab('diff')", "Diff"),
         Binding("r", "show_tab('runs')", "Runs"),
@@ -615,11 +617,36 @@ class ActorWatchApp(App):
         self._refresh_detail()
         self._maybe_refresh_diff()
 
+    def _focus_detail_content(self) -> None:
+        """Focus the first focusable widget inside the active tab pane."""
+        try:
+            log = self.query_one("#logs-content", RichLog)
+            log.focus()
+        except Exception:
+            pass
+
     def action_show_tab(self, tab_id: str) -> None:
         tabs = self.query_one("#tabs", TabbedContent)
         tabs.active = tab_id
         if tab_id == "diff":
             self._maybe_refresh_diff(force=True)
+        self._focus_detail_content()
+
+    TAB_ORDER = ["logs", "diff", "runs", "info"]
+
+    def action_prev_tab(self) -> None:
+        tabs = self.query_one("#tabs", TabbedContent)
+        current = tabs.active
+        if current in self.TAB_ORDER:
+            idx = (self.TAB_ORDER.index(current) - 1) % len(self.TAB_ORDER)
+            self.action_show_tab(self.TAB_ORDER[idx])
+
+    def action_next_tab(self) -> None:
+        tabs = self.query_one("#tabs", TabbedContent)
+        current = tabs.active
+        if current in self.TAB_ORDER:
+            idx = (self.TAB_ORDER.index(current) + 1) % len(self.TAB_ORDER)
+            self.action_show_tab(self.TAB_ORDER[idx])
 
 def run_watch(serve: bool = False) -> None:
     """Entry point for `actor watch`."""
