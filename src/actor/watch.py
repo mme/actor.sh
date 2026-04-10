@@ -360,8 +360,25 @@ class ActorWatchApp(App):
     * {
         scrollbar-background: $foreground 30%;
     }
-    #logs-content {
+    .log-user {
+        background: $surface;
         padding: 0 1;
+        margin: 1 0 0 0;
+    }
+    .log-assistant {
+        padding: 0 1;
+        margin: 1 0 0 0;
+    }
+    .log-thinking {
+        padding: 0 1 0 2;
+        margin: 1 0 0 0;
+    }
+    .log-tool {
+        padding: 0 1;
+        margin: 1 0 0 0;
+    }
+    .log-result {
+        padding: 0 1 0 4;
     }
     #info-content {
         padding: 1;
@@ -395,7 +412,7 @@ class ActorWatchApp(App):
             with Vertical(id="detail-panel"):
                 with TabbedContent(id="tabs"):
                     with TabPane("Logs", id="logs"):
-                        yield VerticalScroll(Static("Select an actor", id="logs-content"))
+                        yield VerticalScroll(id="logs-scroll")
                     with TabPane("Diff", id="diff"):
                         yield VerticalScroll(id="diff-scroll")
                     with TabPane("Runs", id="runs"):
@@ -510,7 +527,7 @@ class ActorWatchApp(App):
     _last_log_entries: list = []
 
     def _set_logs(self, entries: list) -> None:
-        log = self.query_one("#logs-content", Static)
+        scroll = self.query_one("#logs-scroll", VerticalScroll)
 
         # Only re-render if entry count changed
         if len(entries) == self._last_log_count:
@@ -518,8 +535,10 @@ class ActorWatchApp(App):
         self._last_log_count = len(entries)
         self._last_log_entries = entries
 
+        scroll.remove_children()
+
         if not entries:
-            log.update("No logs yet")
+            scroll.mount(Static("No logs yet"))
             return
 
         from .diff_render import try_render_tool_diff
@@ -528,50 +547,34 @@ class ActorWatchApp(App):
         warning = self.current_theme.warning if self.current_theme else "#E0AF68"
         is_dark = self.current_theme.dark if self.current_theme else True
 
-        output = Text()
         for entry in entries:
-            output.append("\n")
             if entry.kind == LogEntryKind.USER:
-                output.append("❯ ", style="bold")
+                prompt = Text("❯ ", style="bold")
                 lines = entry.text.split("\n")
-                output.append(lines[0])
+                body = Text(lines[0])
                 for line in lines[1:]:
-                    output.append("\n  " + line)
-                output.append("\n")
+                    body.append("\n  " + line)
+                scroll.mount(Static(Text.assemble(prompt, body), classes="log-user"))
             elif entry.kind == LogEntryKind.ASSISTANT:
                 text = entry.text.strip()
                 if text:
-                    output.append("⏺ ", style="bold")
-                    output.append(text)
-                    output.append("\n")
+                    scroll.mount(Static(RichMarkdown("**⏺** " + text), classes="log-assistant"))
             elif entry.kind == LogEntryKind.THINKING:
-                output.append("  ")
-                output.append(entry.text, style="dim italic")
-                output.append("\n")
+                scroll.mount(Static(Text(entry.text, style="dim italic"), classes="log-thinking"))
             elif entry.kind == LogEntryKind.TOOL_USE:
                 diff_renderable = try_render_tool_diff(entry.name, entry.input, dark=is_dark)
                 if diff_renderable:
-                    # Render diff to text for selection support
-                    from io import StringIO
-                    from rich.console import Console as RichConsole
-                    buf = StringIO()
-                    console = RichConsole(file=buf, force_terminal=False, width=200, no_color=True)
-                    console.print(diff_renderable)
-                    output.append(buf.getvalue())
+                    scroll.mount(Static(diff_renderable, classes="log-tool"))
                 else:
-                    output.append(f"  ⚡ {entry.name}", style=f"bold {warning}")
-                    output.append("\n")
+                    tool_text = Text(f"⚡ {entry.name}", style=f"bold {warning}")
                     if entry.input:
                         body = entry.input[:200] + ("..." if len(entry.input) > 200 else "")
-                        output.append(f"    {body}", style="dim")
-                        output.append("\n")
+                        tool_text.append(f"\n  {body}", style="dim")
+                    scroll.mount(Static(tool_text, classes="log-tool"))
             elif entry.kind == LogEntryKind.TOOL_RESULT:
                 if entry.content:
                     body = entry.content[:300] + ("..." if len(entry.content) > 300 else "")
-                    output.append(f"    {body}", style="dim")
-                    output.append("\n")
-
-        log.update(output)
+                    scroll.mount(Static(Text(body, style="dim"), classes="log-result"))
 
     def _maybe_refresh_diff(self, force: bool = False) -> None:
         actor = self.query_one(ActorTree).selected_actor
@@ -660,7 +663,7 @@ class ActorWatchApp(App):
             tab_id = tabs.active
 
         focus_map = {
-            "logs": "#logs-content",
+            "logs": "#logs-scroll",
             "diff": "#diff-scroll",
             "runs": "#runs-table",
             "info": "#info-content",
