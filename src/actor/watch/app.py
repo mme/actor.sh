@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from rich.console import Group
-from rich.markdown import Markdown as RichMarkdown
-from rich.padding import Padding
 from rich.text import Text
 
 from textual import work
@@ -21,7 +18,6 @@ from textual.widgets import (
 )
 
 from ..db import Database
-from ..interfaces import LogEntryKind
 from ..process import RealProcessManager
 from ..types import Actor, Status
 from ..cli import _db_path
@@ -29,6 +25,7 @@ from .patches import apply_patches
 from .themes import CLAUDE_DARK, CLAUDE_LIGHT
 from .tree import ActorTree
 from .helpers import read_log_entries, compute_diff
+from .log_renderer import render_log_entries, ThemeColors
 
 # Apply patches at import time
 apply_patches()
@@ -213,63 +210,12 @@ class ActorWatchApp(App):
 
         at_bottom = log.scroll_offset.y >= log.max_scroll_y - 1
 
-        log.clear()
-        if not entries:
-            log.write(Text("No logs yet", style="dim"))
-            return
-        for entry in entries:
-            log.write(Text(""))
-            if entry.kind == LogEntryKind.USER:
-                prompt = Text("❯ ", style="bold")
-                lines = entry.text.split("\n")
-                body = Text(lines[0])
-                for line in lines[1:]:
-                    body.append("\n  " + line)
-                surface = self.current_theme.surface if self.current_theme else "#24283B"
-                log.write(
-                    Padding(
-                        Group(Text.assemble(prompt, body)),
-                        (0, 1, 0, 0),
-                        style=f"on {surface}",
-                        expand=True,
-                    ),
-                    expand=True,
-                )
-            elif entry.kind == LogEntryKind.ASSISTANT:
-                text = entry.text.strip()
-                if text:
-                    log.write(Padding(
-                        RichMarkdown("**⏺** " + text),
-                        (0, 0, 0, 0),
-                    ))
-            elif entry.kind == LogEntryKind.THINKING:
-                log.write(Padding(
-                    Text(entry.text, style="dim italic"),
-                    (0, 1, 0, 2),
-                ))
-            elif entry.kind == LogEntryKind.TOOL_USE:
-                from ..diff_render import try_render_tool_diff
-                is_dark = self.current_theme.dark if self.current_theme else True
-                diff_renderable = try_render_tool_diff(entry.name, entry.input, dark=is_dark)
-                if diff_renderable:
-                    log.write(diff_renderable, expand=True)
-                else:
-                    warning = self.current_theme.warning if self.current_theme else "#E0AF68"
-                    header = Text(f"  ⚡ {entry.name}", style=f"bold {warning}")
-                    log.write(header)
-                    if entry.input:
-                        body = entry.input[:200] + ("..." if len(entry.input) > 200 else "")
-                        log.write(Padding(
-                            Text(body, style="dim"),
-                            (0, 1, 0, 4),
-                        ))
-            elif entry.kind == LogEntryKind.TOOL_RESULT:
-                if entry.content:
-                    body = entry.content[:300] + ("..." if len(entry.content) > 300 else "")
-                    log.write(Padding(
-                        Text(body, style="dim"),
-                        (0, 1, 0, 4),
-                    ))
+        colors = ThemeColors(
+            surface=self.current_theme.surface if self.current_theme else "#24283B",
+            warning=self.current_theme.warning if self.current_theme else "#E0AF68",
+            is_dark=self.current_theme.dark if self.current_theme else True,
+        )
+        render_log_entries(log, entries, colors)
 
         if at_bottom:
             log.scroll_end(animate=False)
