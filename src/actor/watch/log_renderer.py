@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from typing import NamedTuple
-
-from rich.console import Group, RenderableType
 from rich.markdown import Markdown as RichMarkdown
 from rich.padding import Padding
 from rich.text import Text
@@ -13,13 +10,9 @@ from textual.widgets import RichLog
 
 from ..interfaces import LogEntryKind
 from .diff_render import try_render_tool_diff
+from .render_user import render_user
+from .types import ThemeColors
 
-
-class ThemeColors(NamedTuple):
-    """Resolved theme colors needed for log rendering."""
-    surface: str
-    warning: str
-    is_dark: bool
 
 
 def render_log_entries(log: RichLog, entries: list, colors: ThemeColors) -> None:
@@ -40,7 +33,7 @@ def render_log_entries(log: RichLog, entries: list, colors: ThemeColors) -> None
         log.write(Text(""))
 
         if entry.kind == LogEntryKind.USER:
-            _render_user(log, entry, colors)
+            render_user(log, entry, colors)
         elif entry.kind == LogEntryKind.ASSISTANT:
             _render_assistant(log, entry)
         elif entry.kind == LogEntryKind.THINKING:
@@ -50,23 +43,6 @@ def render_log_entries(log: RichLog, entries: list, colors: ThemeColors) -> None
         elif entry.kind == LogEntryKind.TOOL_RESULT:
             _render_tool_result(log, entry)
 
-
-def _render_user(log: RichLog, entry, colors: ThemeColors) -> None:
-    """Render a user message with ❯ prefix and surface background."""
-    prompt = Text("❯ ", style="bold")
-    lines = entry.text.split("\n")
-    body = Text(lines[0])
-    for line in lines[1:]:
-        body.append("\n  " + line)
-    log.write(
-        Padding(
-            Group(Text.assemble(prompt, body)),
-            (0, 1, 0, 0),
-            style=f"on {colors.surface}",
-            expand=True,
-        ),
-        expand=True,
-    )
 
 
 def _render_assistant(log: RichLog, entry) -> None:

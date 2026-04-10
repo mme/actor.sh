@@ -25,7 +25,8 @@ from .patches import apply_patches
 from .themes import CLAUDE_DARK, CLAUDE_LIGHT
 from .tree import ActorTree
 from .helpers import read_log_entries, compute_diff
-from .log_renderer import render_log_entries, ThemeColors
+from .log_renderer import render_log_entries
+from .types import ThemeColors
 
 # Apply patches at import time
 apply_patches()
