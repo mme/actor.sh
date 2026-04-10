@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from rich.markdown import Markdown as RichMarkdown
 from rich.padding import Padding
 from rich.text import Text
 
@@ -10,6 +9,7 @@ from textual.widgets import RichLog
 
 from ..interfaces import LogEntryKind
 from .diff_render import try_render_tool_diff
+from .render_assistant import render_assistant
 from .render_user import render_user
 from .types import ThemeColors
 
@@ -35,7 +35,7 @@ def render_log_entries(log: RichLog, entries: list, colors: ThemeColors) -> None
         if entry.kind == LogEntryKind.USER:
             render_user(log, entry, colors)
         elif entry.kind == LogEntryKind.ASSISTANT:
-            _render_assistant(log, entry)
+            render_assistant(log, entry)
         elif entry.kind == LogEntryKind.THINKING:
             _render_thinking(log, entry)
         elif entry.kind == LogEntryKind.TOOL_USE:
@@ -44,15 +44,6 @@ def render_log_entries(log: RichLog, entries: list, colors: ThemeColors) -> None
             _render_tool_result(log, entry)
 
 
-
-def _render_assistant(log: RichLog, entry) -> None:
-    """Render an assistant message with ⏺ prefix and markdown."""
-    text = entry.text.strip()
-    if text:
-        log.write(Padding(
-            RichMarkdown("**⏺** " + text),
-            (0, 0, 0, 0),
-        ))
 
 
 def _render_thinking(log: RichLog, entry) -> None:
