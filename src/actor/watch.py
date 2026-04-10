@@ -3,33 +3,68 @@
 from __future__ import annotations
 
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
+
+from rich.color import Color as RichColor, ColorType
+from rich.markdown import Markdown as RichMarkdown
+from rich.panel import Panel
+from rich.style import Style as RichStyle
+from rich.text import Text
 
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.filter import ANSIToTruecolor
 from textual.reactive import reactive
 from textual.widgets import (
     DataTable,
     Footer,
-    Label,
     RichLog,
     Static,
     TabbedContent,
     TabPane,
+    Tree,
 )
-
-from rich.markdown import Markdown as RichMarkdown
-from rich.panel import Panel
-from rich.text import Text
 
 from .db import Database
 from .interfaces import LogEntryKind
 from .process import RealProcessManager
 from .types import Actor, Status
 from .cli import _db_path
+
+
+# -- Patch ANSIToTruecolor to preserve DEFAULT colors (SGR 49/39) -----------
+# Without this, the filter converts RichColor("default") to a concrete RGB
+# triplet, which prevents the terminal's own background from showing through.
+
+_original_truecolor_style = ANSIToTruecolor.__dict__[
+    "truecolor_style"
+].__wrapped__
+
+
+@lru_cache(1024)
+def _patched_truecolor_style(
+    self: ANSIToTruecolor, style: RichStyle, background: RichColor
+) -> RichStyle:
+    had_default_fg = style.color is not None and style.color.type == ColorType.DEFAULT
+    had_default_bg = (
+        style.bgcolor is not None and style.bgcolor.type == ColorType.DEFAULT
+    )
+    result = _original_truecolor_style(self, style, background)
+    if had_default_fg or had_default_bg:
+        overrides: dict[str, RichColor] = {}
+        if had_default_fg:
+            overrides["color"] = RichColor.parse("default")
+        if had_default_bg:
+            overrides["bgcolor"] = RichColor.parse("default")
+        result = result + RichStyle(**overrides)
+    return result
+
+
+ANSIToTruecolor.truecolor_style = _patched_truecolor_style  # type: ignore[assignment]
 
 
 # -- Status icons -----------------------------------------------------------
@@ -43,64 +78,39 @@ STATUS_ICON = {
 }
 
 
-# -- Helper: build tree display ---------------------------------------------
+# -- Helper: group actors by parent ------------------------------------------
 
-def _build_tree(actors: list[Actor], statuses: dict[str, Status]) -> list[tuple[str, Actor]]:
-    """Build a display list with tree indentation. Returns (display_prefix, actor) pairs."""
+def _group_by_parent(actors: list[Actor], statuses: dict[str, Status]) -> dict[str | None, list[Actor]]:
+    """Group actors by parent, handling cycles and missing parents."""
     actor_names = {a.name for a in actors}
 
-    # Detect which actors are reachable from a None root.
-    # Actors in cycles or whose ancestor chain never reaches None are promoted to top-level.
-    def _find_root(a: Actor) -> str | None:
-        """Walk parent chain; return None if it reaches a root, actor name if it cycles."""
+    def _has_cycle(a: Actor) -> bool:
         seen: set[str] = set()
         cur = a.parent
         while cur is not None and cur in actor_names:
             if cur in seen:
-                return a.name  # cycle detected
+                return True
             seen.add(cur)
             parent_actor = next((x for x in actors if x.name == cur), None)
             cur = parent_actor.parent if parent_actor else None
-        return None  # reached a true root
+        return False
 
-    by_parent: dict[str | None, list[Actor]] = {}
-    for a in actors:
-        parent = a.parent if a.parent in actor_names else None
-        # Break cycles: if this actor's ancestor chain cycles, treat it as top-level
-        if parent is not None and _find_root(a) is not None:
-            parent = None
-        by_parent.setdefault(parent, []).append(a)
-
-    # Sort: running first, then by created_at
     def sort_key(a: Actor) -> tuple[int, str]:
         s = statuses.get(a.name, Status.IDLE)
         order = {Status.RUNNING: 0, Status.ERROR: 1, Status.IDLE: 2, Status.DONE: 3, Status.STOPPED: 4}
         return (order.get(s, 9), a.created_at or "")
 
-    result: list[tuple[str, Actor]] = []
-    visited: set[str] = set()
+    by_parent: dict[str | None, list[Actor]] = {}
+    for a in actors:
+        parent = a.parent if a.parent in actor_names else None
+        if parent is not None and _has_cycle(a):
+            parent = None
+        by_parent.setdefault(parent, []).append(a)
 
-    def _walk(parent: str | None, is_last_stack: list[bool]) -> None:
-        children = by_parent.get(parent, [])
+    for children in by_parent.values():
         children.sort(key=sort_key)
-        for i, child in enumerate(children):
-            if child.name in visited:
-                continue  # prevent cycles
-            visited.add(child.name)
-            is_last = i == len(children) - 1
-            if parent is None:
-                display_prefix = ""
-            else:
-                connector = "└─ " if is_last else "├─ "
-                indent = ""
-                for il in is_last_stack[:-1]:
-                    indent += "   " if il else "│  "
-                display_prefix = indent + connector
-            result.append((display_prefix, child))
-            _walk(child.name, is_last_stack + [is_last])
 
-    _walk(None, [])
-    return result
+    return by_parent
 
 
 # -- Helper: read log entries ------------------------------------------------
@@ -174,52 +184,70 @@ def _compute_diff(actor: Actor) -> tuple[str, str, str, str] | None:
         return None
 
 
-# -- Actor List Widget -------------------------------------------------------
+# -- Actor Tree Widget -------------------------------------------------------
 
-class ActorList(Vertical):
-    """Left panel showing all actors with tree indentation."""
+class ActorTree(Tree[Actor]):
+    """Left panel showing all actors as a tree."""
 
-    selected_index: reactive[int] = reactive(0)
+    DEFAULT_CSS = """
+    ActorTree {
+        width: 28;
+        border-right: solid $surface-lighten-2;
+    }
+    """
 
     def __init__(self) -> None:
-        super().__init__(id="actor-list")
-        self._entries: list[tuple[str, Actor]] = []
-        self._statuses: dict[str, Status] = {}
-
-    def compose(self) -> ComposeResult:
-        yield Static("ACTORS", classes="panel-title")
-        yield Static("", id="actor-list-content")
+        super().__init__("Actors", id="actor-tree")
+        self.show_root = False
+        self.guide_depth = 3
 
     def update_actors(self, actors: list[Actor], statuses: dict[str, Status]) -> None:
-        self._statuses = statuses
-        self._entries = _build_tree(actors, statuses)
-        self._render_list()
+        # Remember current selection
+        selected_name = None
+        if self.cursor_node and self.cursor_node.data:
+            selected_name = self.cursor_node.data.name
 
-    def _render_list(self) -> None:
-        lines = []
-        for i, (prefix, actor) in enumerate(self._entries):
-            status = self._statuses.get(actor.name, Status.IDLE)
-            icon = STATUS_ICON.get(status, "?")
-            marker = ">" if i == self.selected_index else " "
-            lines.append(f"{marker} {icon} {prefix}{actor.name}")
-        content = self.query_one("#actor-list-content", Static)
-        content.update("\n".join(lines) if lines else "(no actors)")
+        self.clear()
+        by_parent = _group_by_parent(actors, statuses)
+        visited: set[str] = set()
 
-    def watch_selected_index(self, new_value: int) -> None:
-        self._render_list()
+        def _add_children(parent_node, parent_key: str | None) -> None:
+            for actor in by_parent.get(parent_key, []):
+                if actor.name in visited:
+                    continue
+                visited.add(actor.name)
+                status = statuses.get(actor.name, Status.IDLE)
+                icon = STATUS_ICON.get(status, "?")
+                label = f"{icon} {actor.name}"
+                has_children = actor.name in by_parent
+                if has_children:
+                    node = parent_node.add(label, data=actor, expand=True)
+                    _add_children(node, actor.name)
+                else:
+                    parent_node.add_leaf(label, data=actor)
 
-    def move_up(self) -> None:
-        if self._entries and self.selected_index > 0:
-            self.selected_index -= 1
+        _add_children(self.root, None)
 
-    def move_down(self) -> None:
-        if self._entries and self.selected_index < len(self._entries) - 1:
-            self.selected_index += 1
+        # Restore selection
+        if selected_name:
+            for node in self.root.children:
+                if self._select_by_name(node, selected_name):
+                    break
+
+    def _select_by_name(self, node, name: str) -> bool:
+        if node.data and node.data.name == name:
+            self.select_node(node)
+            return True
+        for child in node.children:
+            if self._select_by_name(child, name):
+                return True
+        return False
 
     @property
     def selected_actor(self) -> Actor | None:
-        if 0 <= self.selected_index < len(self._entries):
-            return self._entries[self.selected_index][1]
+        node = self.cursor_node
+        if node and node.data:
+            return node.data
         return None
 
 
@@ -229,38 +257,6 @@ class ActorWatchApp(App):
     """Real-time dashboard for actor.sh."""
 
     CSS = """
-    #actor-list {
-        width: 28;
-        border-right: solid $surface-lighten-2;
-    }
-    .panel-title {
-        text-style: bold;
-        padding: 0 1;
-        color: $text-muted;
-    }
-    .actor-entry {
-        padding: 0 1;
-    }
-    .actor-entry.selected {
-        background: $accent;
-        color: $text;
-        text-style: bold;
-    }
-    .status-running {
-        color: $success;
-    }
-    .status-done {
-        color: $text-muted;
-    }
-    .status-error {
-        color: $error;
-    }
-    .status-idle {
-        color: $text-disabled;
-    }
-    .status-stopped {
-        color: $warning;
-    }
     #detail-panel {
         width: 1fr;
     }
@@ -280,8 +276,6 @@ class ActorWatchApp(App):
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
-        Binding("k,up,ctrl+p", "move_up", "Up", show=False),
-        Binding("j,down,ctrl+n", "move_down", "Down", show=False),
         Binding("p", "command_palette", "Palette"),
         Binding("l", "show_tab('logs')", "Logs"),
         Binding("d", "show_tab('diff')", "Diff"),
@@ -295,7 +289,7 @@ class ActorWatchApp(App):
 
     def compose(self) -> ComposeResult:
         with Horizontal():
-            yield ActorList()
+            yield ActorTree()
             with Vertical(id="detail-panel"):
                 with TabbedContent(id="tabs"):
                     with TabPane("Logs", id="logs"):
@@ -351,7 +345,7 @@ class ActorWatchApp(App):
         self._current_actors = actors
 
         # Update actor list
-        actor_list = self.query_one(ActorList)
+        actor_list = self.query_one(ActorTree)
         actor_list.update_actors(actors, statuses)
 
         # Update status bar
@@ -369,7 +363,7 @@ class ActorWatchApp(App):
         self._refresh_detail()
 
     def _refresh_detail(self) -> None:
-        actor_list = self.query_one(ActorList)
+        actor_list = self.query_one(ActorTree)
         actor = actor_list.selected_actor
         if actor is None:
             return
@@ -458,7 +452,7 @@ class ActorWatchApp(App):
             log.scroll_end(animate=False)
 
     def _maybe_refresh_diff(self, force: bool = False) -> None:
-        actor = self.query_one(ActorList).selected_actor
+        actor = self.query_one(ActorTree).selected_actor
         if actor is None:
             return
         if not force and self._diff_loaded_for == actor.name:
@@ -532,13 +526,8 @@ class ActorWatchApp(App):
 
     # -- Actions -------------------------------------------------------------
 
-    def action_move_up(self) -> None:
-        self.query_one(ActorList).move_up()
-        self._refresh_detail()
-        self._maybe_refresh_diff()
-
-    def action_move_down(self) -> None:
-        self.query_one(ActorList).move_down()
+    def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
+        """Refresh detail panel when tree selection changes."""
         self._refresh_detail()
         self._maybe_refresh_diff()
 
