@@ -504,15 +504,22 @@ def cmd_discard(
     db: Database,
     proc_mgr: ProcessManager,
     name: str,
+    _visited: set[str] | None = None,
 ) -> str:
     db.get_actor(name)
+
+    # Track visited to prevent infinite recursion on circular parent chains
+    if _visited is None:
+        _visited = set()
+    _visited.add(name)
 
     # Recursively discard children first
     children = db.list_children(name)
     discarded = []
     for child in children:
-        msg = cmd_discard(db, proc_mgr, name=child.name)
-        discarded.append(msg)
+        if child.name not in _visited:
+            msg = cmd_discard(db, proc_mgr, name=child.name, _visited=_visited)
+            discarded.append(msg)
 
     # Stop if running
     status = db.resolve_actor_status(name, proc_mgr)
