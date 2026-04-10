@@ -222,9 +222,12 @@ class ActorList(Vertical):
 class ActorWatchApp(App):
     """Real-time dashboard for actor.sh."""
 
+    ANSI_COLOR = True
+
     CSS = """
     Screen {
-        background: transparent;
+        background: ansi_default;
+        color: ansi_default;
     }
     #actor-list {
         width: 28;
