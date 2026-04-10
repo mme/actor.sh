@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Optional
 
 from rich.color import Color as RichColor, ColorType
+from rich.console import Group
 from rich.markdown import Markdown as RichMarkdown
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.style import Style as RichStyle
 from rich.text import Text
@@ -487,34 +489,44 @@ class ActorWatchApp(App):
         for entry in entries:
             if entry.kind == LogEntryKind.USER:
                 log.write(Text(""))
-                log.write(Panel(
-                    RichMarkdown(entry.text),
-                    title="User",
-                    title_align="left",
-                    border_style="bold cyan",
+                prompt = Text("❯ ", style="bold $accent")
+                lines = entry.text.split("\n")
+                body = Text(lines[0])
+                for line in lines[1:]:
+                    body.append("\n  " + line)
+                log.write(Padding(
+                    Group(Text.assemble(prompt, body)),
+                    (0, 1, 0, 0),
+                    style="on $surface",
+                    expand=True,
                 ))
             elif entry.kind == LogEntryKind.ASSISTANT:
                 log.write(Text(""))
-                log.write(Panel(
+                log.write(Padding(
                     RichMarkdown(entry.text),
-                    title="Assistant",
-                    title_align="left",
-                    border_style="bold green",
+                    (0, 1, 0, 2),
                 ))
             elif entry.kind == LogEntryKind.THINKING:
-                log.write(Panel(
+                log.write(Padding(
                     Text(entry.text, style="dim italic"),
-                    title="Thinking",
-                    title_align="left",
-                    border_style="dim",
+                    (0, 1, 0, 2),
                 ))
             elif entry.kind == LogEntryKind.TOOL_USE:
-                label = Text(f"Tool: {entry.name}", style="bold yellow")
-                body = Text(entry.input[:200] + ("..." if len(entry.input) > 200 else ""), style="dim")
-                log.write(Panel(body, title=label, title_align="left", border_style="yellow"))
+                header = Text(f"  ⚡ {entry.name}", style="bold $warning")
+                log.write(header)
+                if entry.input:
+                    body = entry.input[:200] + ("..." if len(entry.input) > 200 else "")
+                    log.write(Padding(
+                        Text(body, style="dim"),
+                        (0, 1, 0, 4),
+                    ))
             elif entry.kind == LogEntryKind.TOOL_RESULT:
-                body = Text(entry.content[:300] + ("..." if len(entry.content) > 300 else ""), style="dim")
-                log.write(Panel(body, title="Result", title_align="left", border_style="dim"))
+                if entry.content:
+                    body = entry.content[:300] + ("..." if len(entry.content) > 300 else "")
+                    log.write(Padding(
+                        Text(body, style="dim"),
+                        (0, 1, 0, 4),
+                    ))
 
         # Only scroll to bottom if we were already there
         if at_bottom:
