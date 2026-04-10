@@ -222,12 +222,9 @@ class ActorList(Vertical):
 class ActorWatchApp(App):
     """Real-time dashboard for actor.sh."""
 
-    ANSI_COLOR = True
-
     CSS = """
     Screen {
-        background: ansi_default;
-        color: ansi_default;
+        background: transparent;
     }
     #actor-list {
         width: 28;
@@ -312,17 +309,17 @@ class ActorWatchApp(App):
             yield ActorList()
             with Vertical(id="detail-panel"):
                 with TabbedContent(id="tabs"):
-                    with TabPane("[L]ogs", id="logs"):
+                    with TabPane("Logs", id="logs"):
                         yield VerticalScroll(
                             Static("Select an actor", id="logs-content"),
                         )
-                    with TabPane("[D]iff", id="diff"):
+                    with TabPane("Diff", id="diff"):
                         yield VerticalScroll(id="diff-scroll")
-                    with TabPane("[R]uns", id="runs"):
+                    with TabPane("Runs", id="runs"):
                         yield VerticalScroll(
                             DataTable(id="runs-table"),
                         )
-                    with TabPane("[I]nfo", id="info"):
+                    with TabPane("Info", id="info"):
                         yield VerticalScroll(
                             Static("Select an actor", id="info-content"),
                         )
