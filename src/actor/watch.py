@@ -128,38 +128,40 @@ def _compute_diff(actor: Actor) -> tuple[str, str, str, str] | None:
     if not actor.source_repo or not actor.base_branch or not actor.worktree:
         return None
 
+    worktree_dir = actor.dir
+
     try:
-        # Get list of changed files
+        # Get changed files: committed + uncommitted vs base branch
         result = subprocess.run(
-            ["git", "diff", "--name-only", f"{actor.base_branch}...{actor.name}"],
-            capture_output=True, text=True, cwd=actor.source_repo,
+            ["git", "diff", "--name-only", actor.base_branch],
+            capture_output=True, text=True, cwd=worktree_dir,
         )
         if result.returncode != 0 or not result.stdout.strip():
             return None
 
         files = result.stdout.strip().split("\n")
 
-        # Concatenate all diffs as original vs modified
         orig_parts = []
         mod_parts = []
         for f in files:
             # Original from base branch
             orig_result = subprocess.run(
                 ["git", "show", f"{actor.base_branch}:{f}"],
-                capture_output=True, text=True, cwd=actor.source_repo,
+                capture_output=True, text=True, cwd=worktree_dir,
             )
             orig_parts.append(f"# {f}\n" + (orig_result.stdout if orig_result.returncode == 0 else ""))
 
-            # Modified from actor branch
-            mod_result = subprocess.run(
-                ["git", "show", f"{actor.name}:{f}"],
-                capture_output=True, text=True, cwd=actor.source_repo,
-            )
-            mod_parts.append(f"# {f}\n" + (mod_result.stdout if mod_result.returncode == 0 else ""))
+            # Modified: read from working tree (includes uncommitted changes)
+            file_path = Path(worktree_dir) / f
+            try:
+                mod_content = file_path.read_text()
+            except (FileNotFoundError, OSError):
+                mod_content = ""
+            mod_parts.append(f"# {f}\n" + mod_content)
 
         return (
-            f"{actor.base_branch}",
-            f"{actor.name}",
+            actor.base_branch,
+            f"{actor.name} (working tree)",
             "\n".join(orig_parts),
             "\n".join(mod_parts),
         )
@@ -412,6 +414,9 @@ class ActorWatchApp(App):
 
         # Update logs
         self._refresh_logs(actor)
+
+        # Update diff
+        self._refresh_diff(actor)
 
     @work(thread=True)
     def _refresh_logs(self, actor: Actor) -> None:
