@@ -558,13 +558,10 @@ class ActorWatchApp(App):
             elif entry.kind == LogEntryKind.ASSISTANT:
                 text = entry.text.strip()
                 if text:
-                    log.write(Text.assemble(("⏺ ", "bold"), text.split("\n")[0]))
-                    rest = "\n".join(text.split("\n")[1:]).strip()
-                    if rest:
-                        log.write(Padding(
-                            RichMarkdown(rest),
-                            (0, 0, 0, 2),
-                        ))
+                    log.write(Padding(
+                        RichMarkdown("**⏺** " + text),
+                        (0, 0, 0, 0),
+                    ))
             elif entry.kind == LogEntryKind.THINKING:
                 log.write(Padding(
                     Text(entry.text, style="dim italic"),
