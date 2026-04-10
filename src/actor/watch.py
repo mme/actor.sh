@@ -257,6 +257,9 @@ class ActorWatchApp(App):
     """Real-time dashboard for actor.sh."""
 
     CSS = """
+    Screen {
+        background: ansi_default;
+    }
     #detail-panel {
         width: 1fr;
     }
