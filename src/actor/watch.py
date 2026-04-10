@@ -8,6 +8,7 @@ from typing import Optional
 
 from textual import work
 from textual.app import App, ComposeResult
+from textual.content import Content
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
@@ -309,17 +310,18 @@ class ActorWatchApp(App):
             yield ActorList()
             with Vertical(id="detail-panel"):
                 with TabbedContent(id="tabs"):
-                    with TabPane("Logs", id="logs"):
+                    hl = "$footer-key-foreground on $footer-key-background bold"
+                    with TabPane(Content.from_markup(f"[{hl}]L[/]ogs"), id="logs"):
                         yield VerticalScroll(
                             Static("Select an actor", id="logs-content"),
                         )
-                    with TabPane("Diff", id="diff"):
+                    with TabPane(Content.from_markup(f"[{hl}]D[/]iff"), id="diff"):
                         yield VerticalScroll(id="diff-scroll")
-                    with TabPane("Runs", id="runs"):
+                    with TabPane(Content.from_markup(f"[{hl}]R[/]uns"), id="runs"):
                         yield VerticalScroll(
                             DataTable(id="runs-table"),
                         )
-                    with TabPane("Info", id="info"):
+                    with TabPane(Content.from_markup(f"[{hl}]I[/]nfo"), id="info"):
                         yield VerticalScroll(
                             Static("Select an actor", id="info-content"),
                         )
