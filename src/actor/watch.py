@@ -196,6 +196,9 @@ class ActorTree(Tree[Actor]):
         width: 28;
         border-right: solid $surface-lighten-2;
     }
+    ActorTree:focus {
+        border: solid $accent;
+    }
     """
 
     def __init__(self) -> None:
