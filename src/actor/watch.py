@@ -197,7 +197,7 @@ class ActorTree(Tree[Actor]):
         border-right: solid $surface-lighten-2;
     }
     ActorTree:focus {
-        border: solid $accent;
+        border: round $accent;
     }
     """
 
