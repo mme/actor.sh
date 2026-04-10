@@ -31,8 +31,30 @@ from textual.widgets import (
     Tree,
 )
 
+from textual.content import Content
+from textual.selection import Selection
+
 from .db import Database
 from .interfaces import LogEntryKind
+
+
+class SelectableStatic(Static):
+    """Static that supports text selection even when rendering non-Text content."""
+
+    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
+        visual = self._render()
+        if isinstance(visual, (Text, Content)):
+            text = str(visual)
+        else:
+            # Render to plain text via Rich console
+            from io import StringIO
+            from rich.console import Console
+            console = Console(file=StringIO(), force_terminal=True, width=200)
+            console.print(visual)
+            text = console.file.getvalue()
+        if not text:
+            return None
+        return selection.extract(text), "\n"
 from .process import RealProcessManager
 from .types import Actor, Status
 from .cli import _db_path
@@ -395,7 +417,7 @@ class ActorWatchApp(App):
             with Vertical(id="detail-panel"):
                 with TabbedContent(id="tabs"):
                     with TabPane("Logs", id="logs"):
-                        yield VerticalScroll(Static("Select an actor", id="logs-content"))
+                        yield VerticalScroll(SelectableStatic("Select an actor", id="logs-content"))
                     with TabPane("Diff", id="diff"):
                         yield VerticalScroll(id="diff-scroll")
                     with TabPane("Runs", id="runs"):
@@ -510,7 +532,7 @@ class ActorWatchApp(App):
     _last_log_entries: list = []
 
     def _set_logs(self, entries: list) -> None:
-        log = self.query_one("#logs-content", Static)
+        log = self.query_one("#logs-content", SelectableStatic)
 
         # Only re-render if entry count changed
         if len(entries) == self._last_log_count:
