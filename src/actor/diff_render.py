@@ -10,8 +10,28 @@ from typing import NamedTuple
 
 from pygments.lexers import get_lexer_for_filename, TextLexer
 from pygments.token import Token
-from rich.console import Group
+from rich.console import Console, ConsoleOptions, Group, RenderResult
+from rich.measure import Measurement
 from rich.text import Text
+
+
+class FullWidthText:
+    """A Text renderable that pads to the full console width with a background style."""
+
+    def __init__(self, text: Text, bg_style: str = "") -> None:
+        self.text = text
+        self.bg_style = bg_style
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        width = options.max_width
+        text = self.text.copy()
+        padding = width - text.cell_len
+        if padding > 0 and self.bg_style:
+            text.append(" " * padding, style=self.bg_style)
+        yield text
+
+    def __rich_measure__(self, console: Console, options: ConsoleOptions) -> Measurement:
+        return Measurement(self.text.cell_len, options.max_width)
 
 
 # -- Colors ------------------------------------------------------------------
@@ -248,7 +268,7 @@ def render_edit_diff(
     removed = sum(1 for e in entries if e["type"] == "del")
 
     # Build output
-    output: list[Text] = []
+    output: list = []
 
     # Header
     header = Text()
@@ -277,11 +297,13 @@ def render_edit_diff(
         num = entry["num"]
         marker = entry["marker"]
         code = entry["code"]
+        bg_style = ""
 
         # Line number
         num_str = f" {num:>{num_width}} "
 
         if entry["type"] == "add":
+            bg_style = f"on {colors.added_bg}"
             line_text.append(num_str, style=f"{colors.added_marker} on {colors.added_bg}")
             line_text.append("+", style=f"bold {colors.added_marker} on {colors.added_bg}")
 
@@ -291,13 +313,11 @@ def render_edit_diff(
                     line_text.append(token, style=f"on {bg}")
             else:
                 highlighted = _highlight_line(code, lexer)
-                for span_text, span_style, _ in highlighted._spans:
-                    pass
-                # Simpler: just apply bg to highlighted text
                 highlighted.stylize(f"on {colors.added_bg}")
                 line_text.append_text(highlighted)
 
         elif entry["type"] == "del":
+            bg_style = f"on {colors.removed_bg}"
             line_text.append(num_str, style=f"{colors.removed_marker} on {colors.removed_bg}")
             line_text.append("-", style=f"bold {colors.removed_marker} on {colors.removed_bg}")
 
@@ -316,7 +336,10 @@ def render_edit_diff(
             highlighted.stylize("dim")
             line_text.append_text(highlighted)
 
-        output.append(line_text)
+        if bg_style:
+            output.append(FullWidthText(line_text, bg_style))
+        else:
+            output.append(line_text)
 
     return Group(*output)
 
