@@ -12,7 +12,7 @@ from rich.text import Text
 from textual.widgets import RichLog
 
 from ..interfaces import LogEntryKind
-from ..diff_render import try_render_tool_diff
+from .diff_render import try_render_tool_diff
 
 
 class ThemeColors(NamedTuple):
