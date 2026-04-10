@@ -322,11 +322,6 @@ class ActorWatchApp(App):
     .underline--bar {
         background: $foreground 30%;
     }
-    Tabs .-active {
-        text-style: $block-cursor-text-style;
-        color: $block-cursor-foreground;
-        background: $block-cursor-background;
-    }
     #logs-content {
         padding: 0 1;
     }
