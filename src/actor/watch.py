@@ -558,25 +558,18 @@ class ActorWatchApp(App):
             elif entry.kind == LogEntryKind.ASSISTANT:
                 text = entry.text.strip()
                 if text:
-                    from rich.segment import Segment
-                    from rich.style import Style as RS
-                    console = log.app.console
-                    md = RichMarkdown(text)
+                    import textwrap
                     width = max(40, log.size.width - 4)
-                    options = console.options.update_width(width)
-                    rendered_lines = console.render_lines(md, options)
-                    for j, segments in enumerate(rendered_lines):
-                        line = Text()
+                    lines = text.split("\n")
+                    result_lines: list[str] = []
+                    for j, line in enumerate(lines):
                         if j == 0:
-                            line.append("⏺ ", style="bold")
+                            wrapped = textwrap.fill(line, width=width, initial_indent="", subsequent_indent="  ")
                         else:
-                            line.append("  ")
-                        for seg in segments:
-                            if seg.text and seg.style:
-                                line.append(seg.text.rstrip(), style=seg.style)
-                            elif seg.text:
-                                line.append(seg.text.rstrip())
-                        log.write(line)
+                            wrapped = textwrap.fill(line, width=width, initial_indent="  ", subsequent_indent="  ")
+                        result_lines.append(wrapped)
+                    body = Text.assemble(("⏺ ", "bold"), "\n".join(result_lines))
+                    log.write(body)
             elif entry.kind == LogEntryKind.THINKING:
                 log.write(Padding(
                     Text(entry.text, style="dim italic"),
