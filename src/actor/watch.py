@@ -197,7 +197,7 @@ class ActorTree(Tree[Actor]):
         border: blank;
     }
     ActorTree:focus {
-        border: round $accent;
+        border: round $secondary;
     }
     """
 
@@ -309,6 +309,10 @@ class ActorWatchApp(App):
     }
     #detail-panel {
         width: 1fr;
+        border: blank;
+    }
+    #detail-panel:focus-within {
+        border: round $secondary;
     }
     #logs-content {
         padding: 0 1;
