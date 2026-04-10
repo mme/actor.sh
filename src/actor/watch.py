@@ -364,6 +364,10 @@ class ActorWatchApp(App):
     def on_ready(self) -> None:
         self.theme = "tokyo-night"
 
+        # Only actor tree and detail content should be tab stops
+        for widget in self.query("Tabs, Tab, Footer, DataTable"):
+            widget.can_focus = False
+
         # Do first poll synchronously so actors are visible immediately
         actors, statuses = self._fetch_actors()
         self._update_ui(actors, statuses)
