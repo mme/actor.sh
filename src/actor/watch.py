@@ -199,6 +199,11 @@ class ActorTree(Tree[Actor]):
     ActorTree:focus {
         border: round $secondary;
     }
+    ActorTree > .tree--cursor {
+        background: $secondary;
+        color: $text;
+        text-style: bold;
+    }
     """
 
     def __init__(self) -> None:
