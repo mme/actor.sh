@@ -44,7 +44,7 @@ def _db_path() -> str:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="actor",
-        description="Fork reality, create in parallel",
+        description="Manage coding agents in parallel",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -175,6 +175,13 @@ Examples:
         help="Start MCP server (stdio transport, used by Claude Code)",
     )
 
+    # -- watch --
+    p_watch = sub.add_parser(
+        "watch",
+        help="Open real-time dashboard (browser + terminal)",
+    )
+    p_watch.add_argument("--no-serve", action="store_true", help="Run in terminal only, no browser")
+
     # -- discard --
     p_discard = sub.add_parser(
         "discard",
@@ -200,6 +207,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.command == "mcp":
         from .server import main as mcp_main
         mcp_main()
+        return
+
+    if args.command == "watch":
+        from .watch import run_watch
+        run_watch(serve=not args.no_serve)
         return
 
     try:

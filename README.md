@@ -1,6 +1,6 @@
 # actor.sh
 
-Fork reality, create in parallel. Manages multiple Claude/Codex agents running in isolated git worktrees.
+Manages multiple Claude/Codex agents running in isolated git worktrees.
 
 ## Setup
 
