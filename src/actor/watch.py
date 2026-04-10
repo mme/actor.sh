@@ -307,6 +307,7 @@ class ActorWatchApp(App):
     verbose: reactive[bool] = reactive(False)
     _prev_statuses: dict[str, Status] = {}
     _current_actors: list[Actor] = []
+    _diff_loaded_for: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -319,9 +320,7 @@ class ActorWatchApp(App):
                             Static("Select an actor", id="logs-content"),
                         )
                     with TabPane("[D]iff", id="diff"):
-                        yield VerticalScroll(
-                            Static("Select an actor", id="diff-content"),
-                        )
+                        yield VerticalScroll(id="diff-scroll")
                     with TabPane("[R]uns", id="runs"):
                         yield VerticalScroll(
                             DataTable(id="runs-table"),
@@ -415,8 +414,7 @@ class ActorWatchApp(App):
         # Update logs
         self._refresh_logs(actor)
 
-        # Update diff
-        self._refresh_diff(actor)
+        # Diff is only refreshed on actor change or explicit tab switch, not every poll
 
     @work(thread=True)
     def _refresh_logs(self, actor: Actor) -> None:
@@ -427,36 +425,53 @@ class ActorWatchApp(App):
         logs = self.query_one("#logs-content", Static)
         logs.update(text)
 
-    @work(thread=True)
-    def _refresh_diff(self, actor: Actor) -> None:
-        diff_data = _compute_diff(actor)
-        self.call_from_thread(self._set_diff, actor, diff_data)
-
-    def _set_diff(self, actor: Actor, diff_data: tuple[str, str, str, str] | None) -> None:
-        container = self.query_one("#diff-content", Static)
-        if diff_data is None:
-            container.update("No diff available (no worktree or no changes)")
+    def _maybe_refresh_diff(self, force: bool = False) -> None:
+        actor = self.query_one(ActorList).selected_actor
+        if actor is None:
             return
+        if not force and self._diff_loaded_for == actor.name:
+            return
+        self._diff_loaded_for = actor.name
+        self._refresh_diff(actor)
+
+    @work(thread=True, exclusive=True, group="diff")
+    def _refresh_diff(self, actor: Actor) -> None:
+        from textual_diff_view import DiffView
+
+        diff_data = _compute_diff(actor)
+
+        if diff_data is None:
+            self.call_from_thread(self._set_diff_text, "No diff available (no worktree or no changes)")
+            return
+
         path_orig, path_mod, orig, mod = diff_data
         if orig == mod:
-            container.update("No changes")
+            self.call_from_thread(self._set_diff_text, "No changes")
             return
-        # Replace with DiffView widget
+
         try:
-            from textual_diff_view import DiffView
-            parent = container.parent
-            if parent is not None:
-                container.remove()
-                dv = DiffView(
-                    path_original=path_orig,
-                    path_modified=path_mod,
-                    code_original=orig,
-                    code_modified=mod,
-                    id="diff-content",
-                )
-                parent.mount(dv)
+            dv = DiffView(
+                path_original=path_orig,
+                path_modified=path_mod,
+                code_original=orig,
+                code_modified=mod,
+            )
+            # Do expensive diff/highlight work in this thread, not the UI thread
+            dv.grouped_opcodes
+            dv.highlighted_code_lines
+            self.call_from_thread(self._set_diff_widget, dv)
         except Exception as e:
-            container.update(f"Diff error: {e}")
+            self.call_from_thread(self._set_diff_text, f"Diff error: {e}")
+
+    def _set_diff_text(self, text: str) -> None:
+        scroll = self.query_one("#diff-scroll", VerticalScroll)
+        scroll.remove_children()
+        scroll.mount(Static(text))
+
+    def _set_diff_widget(self, dv: object) -> None:
+        scroll = self.query_one("#diff-scroll", VerticalScroll)
+        scroll.remove_children()
+        scroll.mount(dv)
 
     def _refresh_runs(self, actor: Actor) -> None:
         db = Database.open(_db_path())
@@ -488,19 +503,18 @@ class ActorWatchApp(App):
     def action_move_up(self) -> None:
         self.query_one(ActorList).move_up()
         self._refresh_detail()
+        self._maybe_refresh_diff()
 
     def action_move_down(self) -> None:
         self.query_one(ActorList).move_down()
         self._refresh_detail()
+        self._maybe_refresh_diff()
 
     def action_show_tab(self, tab_id: str) -> None:
         tabs = self.query_one("#tabs", TabbedContent)
         tabs.active = tab_id
-        # Trigger diff refresh when switching to diff tab
         if tab_id == "diff":
-            actor = self.query_one(ActorList).selected_actor
-            if actor:
-                self._refresh_diff(actor)
+            self._maybe_refresh_diff(force=True)
 
     def action_toggle_verbose(self) -> None:
         self.verbose = not self.verbose
