@@ -198,9 +198,10 @@ class ActorTree(Tree[Actor]):
     ActorTree {
         width: 28;
         border: blank;
+        padding: 0 1;
     }
     ActorTree:focus {
-        border: round $accent;
+        border: round $primary;
     }
     ActorTree > .tree--cursor {
         background: $primary;
@@ -353,7 +354,7 @@ class ActorWatchApp(App):
         border: blank;
     }
     #detail-panel:focus-within {
-        border: round $accent;
+        border: round $primary;
     }
     .underline--bar {
         background: $foreground 30%;
