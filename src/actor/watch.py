@@ -570,7 +570,7 @@ class ActorWatchApp(App):
                 is_dark = self.current_theme.dark if self.current_theme else True
                 diff_renderable = try_render_tool_diff(entry.name, entry.input, dark=is_dark)
                 if diff_renderable:
-                    log.write(Padding(diff_renderable, (0, 1, 0, 2)), expand=True)
+                    log.write(diff_renderable, expand=True)
                 else:
                     warning = self.current_theme.warning if self.current_theme else "#E0AF68"
                     header = Text(f"  ⚡ {entry.name}", style=f"bold {warning}")
