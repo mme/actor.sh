@@ -224,47 +224,42 @@ class ActorWatchApp(App):
     """Real-time dashboard for actor.sh."""
 
     CSS = """
-    Screen {
-        background: transparent;
-    }
     #actor-list {
         width: 28;
-        border-right: solid gray;
-        background: transparent;
+        border-right: solid $surface-lighten-2;
     }
     .panel-title {
         text-style: bold;
         padding: 0 1;
+        color: $text-muted;
     }
     .actor-entry {
         padding: 0 1;
     }
     .actor-entry.selected {
-        text-style: reverse bold;
+        background: $accent;
+        color: $text;
+        text-style: bold;
     }
     .status-running {
-        color: green;
+        color: $success;
     }
     .status-done {
-        color: gray;
+        color: $text-muted;
     }
     .status-error {
-        color: red;
+        color: $error;
     }
     .status-idle {
-        color: gray;
+        color: $text-disabled;
     }
     .status-stopped {
-        color: yellow;
+        color: $warning;
     }
     #detail-panel {
         width: 1fr;
-        background: transparent;
     }
     #logs-content {
-        padding: 1;
-    }
-    #diff-content {
         padding: 1;
     }
     #info-content {
@@ -274,15 +269,8 @@ class ActorWatchApp(App):
         dock: bottom;
         height: 1;
         padding: 0 1;
-    }
-    TabbedContent {
-        background: transparent;
-    }
-    TabPane {
-        background: transparent;
-    }
-    VerticalScroll {
-        background: transparent;
+        background: $surface;
+        color: $text-muted;
     }
     """
 
