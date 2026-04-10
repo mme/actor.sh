@@ -305,7 +305,7 @@ def render_edit_diff(
         if entry["type"] == "add":
             bg_style = f"on {colors.added_bg}"
             line_text.append(num_str, style=f"{colors.added_marker} on {colors.added_bg}")
-            line_text.append("+", style=f"bold {colors.added_marker} on {colors.added_bg}")
+            line_text.append("+ ", style=f"bold {colors.added_marker} on {colors.added_bg}")
 
             if i in word_diffs:
                 for token, changed in word_diffs[i]:
@@ -319,7 +319,7 @@ def render_edit_diff(
         elif entry["type"] == "del":
             bg_style = f"on {colors.removed_bg}"
             line_text.append(num_str, style=f"{colors.removed_marker} on {colors.removed_bg}")
-            line_text.append("-", style=f"bold {colors.removed_marker} on {colors.removed_bg}")
+            line_text.append("- ", style=f"bold {colors.removed_marker} on {colors.removed_bg}")
 
             # Deleted lines: no syntax highlighting (matches Claude Code)
             if i in word_diffs:
