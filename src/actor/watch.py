@@ -95,10 +95,15 @@ def _group_by_parent(actors: list[Actor], statuses: dict[str, Status]) -> dict[s
             cur = parent_actor.parent if parent_actor else None
         return False
 
-    def sort_key(a: Actor) -> tuple[int, str]:
+    def sort_key(a: Actor) -> tuple:
         s = statuses.get(a.name, Status.IDLE)
         order = {Status.RUNNING: 0, Status.ERROR: 1, Status.IDLE: 2, Status.DONE: 3, Status.STOPPED: 4}
-        return (order.get(s, 9), a.created_at or "")
+        return order.get(s, 9)
+
+    # Sort by status group, then most recent first within each group
+    for children in by_parent.values():
+        children.sort(key=lambda a: a.updated_at or a.created_at or "", reverse=True)
+        children.sort(key=sort_key)
 
     by_parent: dict[str | None, list[Actor]] = {}
     for a in actors:
@@ -106,9 +111,6 @@ def _group_by_parent(actors: list[Actor], statuses: dict[str, Status]) -> dict[s
         if parent is not None and _has_cycle(a):
             parent = None
         by_parent.setdefault(parent, []).append(a)
-
-    for children in by_parent.values():
-        children.sort(key=sort_key)
 
     return by_parent
 
