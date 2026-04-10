@@ -489,8 +489,7 @@ class ActorWatchApp(App):
         for entry in entries:
             if entry.kind == LogEntryKind.USER:
                 log.write(Text(""))
-                accent = self.current_theme.accent if self.current_theme else "#FF9E64"
-                prompt = Text("❯ ", style=f"bold {accent}")
+                prompt = Text("❯ ", style="bold")
                 lines = entry.text.split("\n")
                 body = Text(lines[0])
                 for line in lines[1:]:
