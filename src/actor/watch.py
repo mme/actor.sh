@@ -25,48 +25,14 @@ from textual.theme import Theme
 from textual.widgets import (
     DataTable,
     Footer,
-    RichLog,
     Static,
     TabbedContent,
     TabPane,
     Tree,
 )
 
-from textual.selection import Selection
-from textual.strip import Strip
-
 from .db import Database
 from .interfaces import LogEntryKind
-
-
-# -- Selectable RichLog ------------------------------------------------------
-
-class SelectableRichLog(RichLog):
-    """RichLog subclass that supports text selection."""
-
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self._plain_lines: list[str] = []
-
-    def write(self, content, width=None, expand=False, shrink=True, scroll_end=None, animate=False):
-        lines_before = len(self.lines)
-        result = super().write(content, width=width, expand=expand, shrink=shrink, scroll_end=scroll_end, animate=animate)
-        new_count = len(self.lines) - lines_before
-        if new_count > 0:
-            for i in range(len(self.lines) - new_count, len(self.lines)):
-                self._plain_lines.append(self.lines[i].text)
-        if self.max_lines is not None and len(self._plain_lines) > self.max_lines:
-            self._plain_lines = self._plain_lines[-self.max_lines:]
-        return result
-
-    def clear(self):
-        self._plain_lines.clear()
-        return super().clear()
-
-    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
-        if not self._plain_lines:
-            return None
-        return selection.extract("\n".join(self._plain_lines)), "\n"
 from .process import RealProcessManager
 from .types import Actor, Status
 from .cli import _db_path
@@ -377,7 +343,7 @@ class ActorWatchApp(App):
 
     CSS = """
     Screen, Tabs, Tab, TabbedContent, TabPane,
-    ContentSwitcher, VerticalScroll, RichLog,
+    ContentSwitcher, VerticalScroll,
     DataTable, Tree, #detail-panel, #status-bar {
         background: ansi_default;
     }
@@ -429,7 +395,7 @@ class ActorWatchApp(App):
             with Vertical(id="detail-panel"):
                 with TabbedContent(id="tabs"):
                     with TabPane("Logs", id="logs"):
-                        yield SelectableRichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False)
+                        yield VerticalScroll(Static("Select an actor", id="logs-content"))
                     with TabPane("Diff", id="diff"):
                         yield VerticalScroll(id="diff-scroll")
                     with TabPane("Runs", id="runs"):
@@ -541,91 +507,69 @@ class ActorWatchApp(App):
         self.call_from_thread(self._set_logs, entries)
 
     _last_log_count: int = 0
-    _last_log_width: int = 0
     _last_log_entries: list = []
 
-    def on_resize(self) -> None:
-        """Force log re-render on resize."""
-        log = self.query_one("#logs-content", SelectableRichLog)
-        if log.size.width != self._last_log_width and self._last_log_entries:
-            self._last_log_count = 0  # force re-render
-            self._set_logs(self._last_log_entries)
-
     def _set_logs(self, entries: list) -> None:
-        log = self.query_one("#logs-content", SelectableRichLog)
+        log = self.query_one("#logs-content", Static)
 
-        # Only re-render if entry count or width changed
-        if len(entries) == self._last_log_count and log.size.width == self._last_log_width:
+        # Only re-render if entry count changed
+        if len(entries) == self._last_log_count:
             return
         self._last_log_count = len(entries)
-        self._last_log_width = log.size.width
         self._last_log_entries = entries
 
-        # Check if scrolled to bottom before clearing
-        at_bottom = log.scroll_offset.y >= log.max_scroll_y - 1
-
-        log.clear()
         if not entries:
-            log.write(Text("No logs yet", style="dim"))
+            log.update("No logs yet")
             return
+
+        from .diff_render import try_render_tool_diff
+
+        parts: list = []
+        surface = self.current_theme.surface if self.current_theme else "#24283B"
+        warning = self.current_theme.warning if self.current_theme else "#E0AF68"
+        is_dark = self.current_theme.dark if self.current_theme else True
+
         for entry in entries:
-            log.write(Text(""))
+            parts.append(Text(""))
             if entry.kind == LogEntryKind.USER:
                 prompt = Text("❯ ", style="bold")
                 lines = entry.text.split("\n")
                 body = Text(lines[0])
                 for line in lines[1:]:
                     body.append("\n  " + line)
-                # Resolve theme color for background
-                surface = self.current_theme.surface if self.current_theme else "#24283B"
-                log.write(
-                    Padding(
-                        Group(Text.assemble(prompt, body)),
-                        (0, 1, 0, 0),
-                        style=f"on {surface}",
-                        expand=True,
-                    ),
+                parts.append(Padding(
+                    Group(Text.assemble(prompt, body)),
+                    (0, 1, 0, 0),
+                    style=f"on {surface}",
                     expand=True,
-                )
+                ))
             elif entry.kind == LogEntryKind.ASSISTANT:
                 text = entry.text.strip()
                 if text:
-                    log.write(Padding(
+                    parts.append(Padding(
                         RichMarkdown("**⏺** " + text),
                         (0, 0, 0, 0),
                     ))
             elif entry.kind == LogEntryKind.THINKING:
-                log.write(Padding(
+                parts.append(Padding(
                     Text(entry.text, style="dim italic"),
                     (0, 1, 0, 2),
                 ))
             elif entry.kind == LogEntryKind.TOOL_USE:
-                from .diff_render import try_render_tool_diff
-                is_dark = self.current_theme.dark if self.current_theme else True
                 diff_renderable = try_render_tool_diff(entry.name, entry.input, dark=is_dark)
                 if diff_renderable:
-                    log.write(diff_renderable, expand=True)
+                    parts.append(diff_renderable)
                 else:
-                    warning = self.current_theme.warning if self.current_theme else "#E0AF68"
-                    header = Text(f"  ⚡ {entry.name}", style=f"bold {warning}")
-                    log.write(header)
+                    parts.append(Text(f"  ⚡ {entry.name}", style=f"bold {warning}"))
                     if entry.input:
                         body = entry.input[:200] + ("..." if len(entry.input) > 200 else "")
-                        log.write(Padding(
-                            Text(body, style="dim"),
-                            (0, 1, 0, 4),
-                        ))
+                        parts.append(Padding(Text(body, style="dim"), (0, 1, 0, 4)))
             elif entry.kind == LogEntryKind.TOOL_RESULT:
                 if entry.content:
                     body = entry.content[:300] + ("..." if len(entry.content) > 300 else "")
-                    log.write(Padding(
-                        Text(body, style="dim"),
-                        (0, 1, 0, 4),
-                    ))
+                    parts.append(Padding(Text(body, style="dim"), (0, 1, 0, 4)))
 
-        # Only scroll to bottom if we were already there
-        if at_bottom:
-            log.scroll_end(animate=False)
+        log.update(Group(*parts))
 
     def _maybe_refresh_diff(self, force: bool = False) -> None:
         actor = self.query_one(ActorTree).selected_actor
