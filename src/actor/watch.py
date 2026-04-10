@@ -8,7 +8,6 @@ from typing import Optional
 
 from textual import work
 from textual.app import App, ComposeResult
-from textual.content import Content
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
@@ -314,10 +313,8 @@ class ActorWatchApp(App):
         Binding("d", "show_tab('diff')", "Diff"),
         Binding("r", "show_tab('runs')", "Runs"),
         Binding("i", "show_tab('info')", "Info"),
-        Binding("v", "toggle_verbose", "Verbose", show=False),
     ]
 
-    verbose: reactive[bool] = reactive(False)
     _prev_statuses: dict[str, Status] = {}
     _current_actors: list[Actor] = []
     _diff_loaded_for: str | None = None
@@ -327,16 +324,15 @@ class ActorWatchApp(App):
             yield ActorList()
             with Vertical(id="detail-panel"):
                 with TabbedContent(id="tabs"):
-                    hl = "$footer-key-foreground on $footer-key-background bold"
-                    with TabPane(Content.from_markup(f"[{hl}]L[/]ogs"), id="logs"):
-                        yield RichLog(id="logs-content", wrap=True, markup=False)
-                    with TabPane(Content.from_markup(f"[{hl}]D[/]iff"), id="diff"):
+                    with TabPane("Logs", id="logs"):
+                        yield RichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False)
+                    with TabPane("Diff", id="diff"):
                         yield VerticalScroll(id="diff-scroll")
-                    with TabPane(Content.from_markup(f"[{hl}]R[/]uns"), id="runs"):
+                    with TabPane("Runs", id="runs"):
                         yield VerticalScroll(
                             DataTable(id="runs-table"),
                         )
-                    with TabPane(Content.from_markup(f"[{hl}]I[/]nfo"), id="info"):
+                    with TabPane("Info", id="info"):
                         yield VerticalScroll(
                             Static("Select an actor", id="info-content"),
                         )
@@ -435,8 +431,19 @@ class ActorWatchApp(App):
         entries = _read_log_entries(actor)
         self.call_from_thread(self._set_logs, entries)
 
+    _last_log_count: int = 0
+
     def _set_logs(self, entries: list) -> None:
         log = self.query_one("#logs-content", RichLog)
+
+        # Only re-render if entry count changed
+        if len(entries) == self._last_log_count:
+            return
+        self._last_log_count = len(entries)
+
+        # Check if scrolled to bottom before clearing
+        at_bottom = log.scroll_offset.y >= log.max_scroll_y - 1
+
         log.clear()
         if not entries:
             log.write(Text("No logs yet", style="dim"))
@@ -459,22 +466,23 @@ class ActorWatchApp(App):
                     border_style="bold green",
                 ))
             elif entry.kind == LogEntryKind.THINKING:
-                if self.verbose:
-                    log.write(Panel(
-                        Text(entry.text, style="dim italic"),
-                        title="Thinking",
-                        title_align="left",
-                        border_style="dim",
-                    ))
+                log.write(Panel(
+                    Text(entry.text, style="dim italic"),
+                    title="Thinking",
+                    title_align="left",
+                    border_style="dim",
+                ))
             elif entry.kind == LogEntryKind.TOOL_USE:
-                if self.verbose:
-                    label = Text(f"Tool: {entry.name}", style="bold yellow")
-                    body = Text(entry.input[:200] + ("..." if len(entry.input) > 200 else ""), style="dim")
-                    log.write(Panel(body, title=label, title_align="left", border_style="yellow"))
+                label = Text(f"Tool: {entry.name}", style="bold yellow")
+                body = Text(entry.input[:200] + ("..." if len(entry.input) > 200 else ""), style="dim")
+                log.write(Panel(body, title=label, title_align="left", border_style="yellow"))
             elif entry.kind == LogEntryKind.TOOL_RESULT:
-                if self.verbose:
-                    body = Text(entry.content[:300] + ("..." if len(entry.content) > 300 else ""), style="dim")
-                    log.write(Panel(body, title="Result", title_align="left", border_style="dim"))
+                body = Text(entry.content[:300] + ("..." if len(entry.content) > 300 else ""), style="dim")
+                log.write(Panel(body, title="Result", title_align="left", border_style="dim"))
+
+        # Only scroll to bottom if we were already there
+        if at_bottom:
+            log.scroll_end(animate=False)
 
     def _maybe_refresh_diff(self, force: bool = False) -> None:
         actor = self.query_one(ActorList).selected_actor
@@ -569,13 +577,6 @@ class ActorWatchApp(App):
         tabs.active = tab_id
         if tab_id == "diff":
             self._maybe_refresh_diff(force=True)
-
-    def action_toggle_verbose(self) -> None:
-        self.verbose = not self.verbose
-        actor = self.query_one(ActorList).selected_actor
-        if actor:
-            self._refresh_logs(actor)
-
 
 def run_watch(serve: bool = True) -> None:
     """Entry point for `actor watch`."""
