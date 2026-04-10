@@ -88,8 +88,8 @@ class FakeAgent(Agent):
         self.calls.append(FakeAgentCall(dir, prompt, dict(config), session_id=session_id))
         return pid
 
-    def wait(self, pid: int) -> int:
-        return self.next_exit_code
+    def wait(self, pid: int) -> tuple[int, str]:
+        return (self.next_exit_code, "fake output")
 
     def read_logs(self, dir: str, session_id: str) -> list[LogEntry]:
         self.log_calls.append((dir, session_id))

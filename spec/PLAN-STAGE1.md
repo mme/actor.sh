@@ -1,38 +1,37 @@
-# Stage 1: Minimal MCP Server
+# Stage 1: Daemon + MCP Proxy
 
 ## Goal
 
-Get a working MCP server that Claude Code can spawn and call tools on. No channels, no dashboard — just MCP tools wrapping the existing `commands.py` logic.
+Get a working daemon + stdio proxy that Claude Code can spawn and call tools on. Validate the full loop: Claude Code → `actor mcp` (proxy) → daemon → `commands.py` → response. No channels, no dashboard.
 
 ## Steps
 
-### 1. Create the MCP server entry point
+### 1. Add `mcp` dependency
 
-Create `skills/actor/actor/server.py` — a minimal Python MCP server using `modelcontextprotocol/python-sdk` over stdio. Start with a single tool (`list_actors`) to validate the plumbing.
+Add `mcp` to `[project.dependencies]` in `pyproject.toml`. Run `uv sync`.
 
-### 2. Add console script
+### 2. Create the daemon
 
-Add `actor-mcp` to `[project.scripts]` in `pyproject.toml`:
+Create `src/actor/daemon.py` — a long-running process that:
+- Listens on `~/.actor/actor.sock` (unix socket)
+- Exposes MCP tools (start with `list_actors` only)
+- Uses FastMCP `@mcp.tool` for tool definitions
+- Calls existing `commands.py` functions
 
-```toml
-[project.scripts]
-actor = "actor.cli:main"
-actor-mcp = "actor.server:main"
-```
+Subcommand: `actor daemon`
 
-Re-run `pip install -e .` to register the new entry point.
+### 3. Create the MCP proxy
 
-### 3. Add `mcp` dependency
+Create `src/actor/mcp.py` — a thin stdio-to-socket proxy that:
+- Connects to `~/.actor/actor.sock`
+- Auto-starts the daemon if it's not running
+- Forwards MCP messages between stdio (Claude Code) and the daemon
 
-Add `mcp` to `[project.dependencies]` in `pyproject.toml`.
+Subcommand: `actor mcp`
 
-### 4. Smoke test
+### 4. Wire up CLI subcommands
 
-```bash
-echo '{}' | actor-mcp
-```
-
-Verify the server starts and speaks MCP over stdio.
+Add `mcp` and `daemon` subcommands to `cli.py`.
 
 ### 5. Register with Claude Code
 
@@ -41,14 +40,19 @@ Create `.mcp.json` in the project root:
 ```json
 {
   "mcpServers": {
-    "actor": { "command": "actor-mcp" }
+    "actor": { "command": "actor", "args": ["mcp"] }
   }
 }
 ```
 
-Restart Claude Code. It spawns the MCP server. Call `list_actors` from a conversation to verify.
+### 6. Smoke test
 
-### 6. Add remaining tools incrementally
+Restart Claude Code. Call `list_actors` from a conversation. Verify:
+- `actor mcp` starts the daemon automatically
+- The tool returns actor list from the DB
+- Daemon stays running after the session ends
+
+### 7. Add remaining tools incrementally
 
 One at a time, test each before moving on:
 
@@ -61,7 +65,7 @@ One at a time, test each before moving on:
 - `pr_actor`
 - `config_actor`
 
-Each tool calls existing functions in `commands.py`. Fast iteration — editable pip install means code changes are live on MCP server restart (`/mcp` restart in Claude Code).
+Each tool calls existing functions in `commands.py`. Fast iteration — editable install means code changes in the daemon are live after daemon restart.
 
 ## What's NOT in Stage 1
 
