@@ -280,9 +280,9 @@ class ActorWatchApp(App):
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
-        Binding("k,up", "move_up", "Up", show=False),
-        Binding("j,down", "move_down", "Down", show=False),
-        Binding("ctrl+p", "command_palette", "Command Palette"),
+        Binding("k,up,ctrl+p", "move_up", "Up", show=False),
+        Binding("j,down,ctrl+n", "move_down", "Down", show=False),
+        Binding("p", "command_palette", "Palette"),
         Binding("l", "show_tab('logs')", "Logs"),
         Binding("d", "show_tab('diff')", "Diff"),
         Binding("r", "show_tab('runs')", "Runs"),
