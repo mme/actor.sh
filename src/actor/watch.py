@@ -253,9 +253,11 @@ class ActorTree(Tree[Actor]):
 
         _add_children(self.root, None)
 
-        # Restore selection
+        # Restore selection, or select first item
         if selected_name:
             self._select_by_name(self.root, selected_name)
+        elif self.root.children:
+            self.select_node(self.root.children[0])
 
     def _update_labels(self, node, snapshot: dict[str, str]) -> None:
         """Update labels in place without rebuilding the tree."""
