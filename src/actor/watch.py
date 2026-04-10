@@ -537,8 +537,8 @@ class ActorWatchApp(App):
             log.write(Text("No logs yet", style="dim"))
             return
         for entry in entries:
+            log.write(Text(""))
             if entry.kind == LogEntryKind.USER:
-                log.write(Text(""))
                 prompt = Text("❯ ", style="bold")
                 lines = entry.text.split("\n")
                 body = Text(lines[0])
@@ -556,7 +556,6 @@ class ActorWatchApp(App):
                     expand=True,
                 )
             elif entry.kind == LogEntryKind.ASSISTANT:
-                log.write(Text(""))
                 log.write(Padding(
                     RichMarkdown(entry.text),
                     (0, 1, 0, 2),
