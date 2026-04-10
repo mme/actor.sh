@@ -135,7 +135,7 @@ def _find_adjacent_pairs(markers: list[str]) -> list[tuple[int, int]]:
 def _get_lexer(file_path: str):
     """Get Pygments lexer for a file path."""
     try:
-        return get_lexer_for_filename(file_path, stripall=True)
+        return get_lexer_for_filename(file_path, stripall=False)
     except Exception:
         return TextLexer()
 
