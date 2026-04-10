@@ -42,9 +42,29 @@ STATUS_ICON = {
 
 def _build_tree(actors: list[Actor], statuses: dict[str, Status]) -> list[tuple[str, Actor]]:
     """Build a display list with tree indentation. Returns (display_prefix, actor) pairs."""
+    actor_names = {a.name for a in actors}
+
+    # Detect which actors are reachable from a None root.
+    # Actors in cycles or whose ancestor chain never reaches None are promoted to top-level.
+    def _find_root(a: Actor) -> str | None:
+        """Walk parent chain; return None if it reaches a root, actor name if it cycles."""
+        seen: set[str] = set()
+        cur = a.parent
+        while cur is not None and cur in actor_names:
+            if cur in seen:
+                return a.name  # cycle detected
+            seen.add(cur)
+            parent_actor = next((x for x in actors if x.name == cur), None)
+            cur = parent_actor.parent if parent_actor else None
+        return None  # reached a true root
+
     by_parent: dict[str | None, list[Actor]] = {}
     for a in actors:
-        by_parent.setdefault(a.parent, []).append(a)
+        parent = a.parent if a.parent in actor_names else None
+        # Break cycles: if this actor's ancestor chain cycles, treat it as top-level
+        if parent is not None and _find_root(a) is not None:
+            parent = None
+        by_parent.setdefault(parent, []).append(a)
 
     # Sort: running first, then by created_at
     def sort_key(a: Actor) -> tuple[int, str]:
@@ -53,11 +73,15 @@ def _build_tree(actors: list[Actor], statuses: dict[str, Status]) -> list[tuple[
         return (order.get(s, 9), a.created_at or "")
 
     result: list[tuple[str, Actor]] = []
+    visited: set[str] = set()
 
-    def _walk(parent: str | None, prefix: str, is_last_stack: list[bool]) -> None:
+    def _walk(parent: str | None, is_last_stack: list[bool]) -> None:
         children = by_parent.get(parent, [])
         children.sort(key=sort_key)
         for i, child in enumerate(children):
+            if child.name in visited:
+                continue  # prevent cycles
+            visited.add(child.name)
             is_last = i == len(children) - 1
             if parent is None:
                 display_prefix = ""
@@ -68,9 +92,9 @@ def _build_tree(actors: list[Actor], statuses: dict[str, Status]) -> list[tuple[
                     indent += "   " if il else "│  "
                 display_prefix = indent + connector
             result.append((display_prefix, child))
-            _walk(child.name, prefix, is_last_stack + [is_last])
+            _walk(child.name, is_last_stack + [is_last])
 
-    _walk(None, "", [])
+    _walk(None, [])
     return result
 
 
@@ -157,7 +181,7 @@ class ActorList(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Static("ACTORS", classes="panel-title")
-        yield VerticalScroll(id="actor-scroll")
+        yield Static("", id="actor-list-content")
 
     def update_actors(self, actors: list[Actor], statuses: dict[str, Status]) -> None:
         self._statuses = statuses
@@ -165,18 +189,14 @@ class ActorList(Vertical):
         self._render_list()
 
     def _render_list(self) -> None:
-        scroll = self.query_one("#actor-scroll", VerticalScroll)
-        scroll.remove_children()
+        lines = []
         for i, (prefix, actor) in enumerate(self._entries):
             status = self._statuses.get(actor.name, Status.IDLE)
             icon = STATUS_ICON.get(status, "?")
-            selected = "selected" if i == self.selected_index else ""
-            label = Label(
-                f"{icon} {prefix}{actor.name}",
-                classes=f"actor-entry {selected} status-{status.value}",
-                id=f"actor-{i}",
-            )
-            scroll.mount(label)
+            marker = ">" if i == self.selected_index else " "
+            lines.append(f"{marker} {icon} {prefix}{actor.name}")
+        content = self.query_one("#actor-list-content", Static)
+        content.update("\n".join(lines) if lines else "(no actors)")
 
     def watch_selected_index(self, new_value: int) -> None:
         self._render_list()
@@ -205,40 +225,42 @@ class ActorWatchApp(App):
     SUB_TITLE = ""
 
     CSS = """
+    Screen {
+        background: transparent;
+    }
     #actor-list {
         width: 28;
-        border-right: solid $surface-lighten-2;
+        border-right: solid gray;
+        background: transparent;
     }
     .panel-title {
         text-style: bold;
         padding: 0 1;
-        background: $surface;
     }
     .actor-entry {
         padding: 0 1;
     }
     .actor-entry.selected {
-        background: $accent;
-        color: $text;
-        text-style: bold;
+        text-style: reverse bold;
     }
     .status-running {
-        color: $success;
+        color: green;
     }
     .status-done {
-        color: $text-muted;
+        color: gray;
     }
     .status-error {
-        color: $error;
+        color: red;
     }
     .status-idle {
-        color: $text-muted;
+        color: gray;
     }
     .status-stopped {
-        color: $warning;
+        color: yellow;
     }
     #detail-panel {
         width: 1fr;
+        background: transparent;
     }
     #logs-content {
         padding: 1;
@@ -252,8 +274,19 @@ class ActorWatchApp(App):
     #status-bar {
         dock: bottom;
         height: 1;
-        background: $surface;
         padding: 0 1;
+    }
+    TabbedContent {
+        background: transparent;
+    }
+    TabPane {
+        background: transparent;
+    }
+    VerticalScroll {
+        background: transparent;
+    }
+    Header {
+        background: transparent;
     }
     """
 
@@ -298,18 +331,25 @@ class ActorWatchApp(App):
         yield Static("Loading...", id="status-bar")
         yield Footer()
 
-    def on_mount(self) -> None:
-        self._poll_actors()
-        self.set_interval(2.0, self._poll_actors)
+    def on_ready(self) -> None:
+        # Do first poll synchronously so actors are visible immediately
+        actors, statuses = self._fetch_actors()
+        self._update_ui(actors, statuses)
+        self.set_interval(2.0, self._poll_actors_async)
 
-    @work(thread=True)
-    def _poll_actors(self) -> None:
+    @staticmethod
+    def _fetch_actors() -> tuple[list[Actor], dict[str, Status]]:
         db = Database.open(_db_path())
         pm = RealProcessManager()
         actors = db.list_actors()
         statuses = {}
         for a in actors:
             statuses[a.name] = db.resolve_actor_status(a.name, pm)
+        return actors, statuses
+
+    @work(thread=True)
+    def _poll_actors_async(self) -> None:
+        actors, statuses = self._fetch_actors()
         self.call_from_thread(self._update_ui, actors, statuses)
 
     def _update_ui(self, actors: list[Actor], statuses: dict[str, Status]) -> None:
