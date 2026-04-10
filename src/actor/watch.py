@@ -250,6 +250,9 @@ class ActorWatchApp(App):
     """Real-time dashboard for actor.sh."""
 
     CSS = """
+    Screen {
+        background: ansi_default;
+    }
     #actor-list {
         width: 28;
         border-right: solid $surface-lighten-2;
