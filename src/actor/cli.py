@@ -7,7 +7,7 @@ from typing import List, Optional
 
 from .errors import ActorError
 from .interfaces import Agent
-from .types import AgentKind
+from .types import AgentKind, Status
 from .db import Database
 from .git import RealGit
 from .process import RealProcessManager
@@ -44,7 +44,7 @@ def _db_path() -> str:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="actor",
-        description="Orchestrate coding agents in parallel",
+        description="Fork reality, create in parallel",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -169,6 +169,12 @@ Examples:
     p_config.add_argument("name", help="Actor name")
     p_config.add_argument("pairs", nargs="*", default=[], metavar="KEY=VALUE", help="Config key=value pairs to set (omit to view)")
 
+    # -- mcp --
+    sub.add_parser(
+        "mcp",
+        help="Start MCP server (stdio transport, used by Claude Code)",
+    )
+
     # -- discard --
     p_discard = sub.add_parser(
         "discard",
@@ -190,6 +196,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.command is None:
         parser.print_help()
         sys.exit(1)
+
+    if args.command == "mcp":
+        from .server import main as mcp_main
+        mcp_main()
+        return
 
     try:
         db = Database.open(_db_path())
@@ -253,6 +264,9 @@ def main(argv: Optional[List[str]] = None) -> None:
             # Interactive mode
             if args.interactive:
                 actor = db.get_actor(args.name)
+                status = db.resolve_actor_status(args.name, proc_mgr)
+                if status == Status.RUNNING:
+                    raise ActorError(f"'{args.name}' is currently running — stop it first")
                 session_id = actor.agent_session
                 if session_id is None:
                     raise ActorError(f"'{args.name}' has no session yet — run it non-interactively first")

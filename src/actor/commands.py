@@ -190,7 +190,7 @@ def cmd_run(
     name: str,
     prompt: str,
     config_pairs: List[str],
-) -> None:
+) -> str:
     actor = db.get_actor(name)
 
     # Check if already running (with stale PID detection)
@@ -256,15 +256,16 @@ def cmd_run(
         db.update_actor_session(name, new_session)
 
     # Block until agent exits
-    exit_code = agent.wait(pid)
+    exit_code, output = agent.wait(pid)
 
     # Check if stop command already updated this run (race condition)
     current_run = db.latest_run(name)
     if current_run is not None and current_run.id == run_id and current_run.status == Status.STOPPED:
-        return
+        return output
 
     status = Status.DONE if exit_code == 0 else Status.ERROR
     db.update_run_status(run_id, status, exit_code)
+    return output
 
 
 # -- cmd_list --

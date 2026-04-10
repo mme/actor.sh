@@ -52,6 +52,8 @@ class ClaudeAgent(Agent):
         proc = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             cwd=str(cwd),
             env=env,
         )
@@ -101,13 +103,15 @@ class ClaudeAgent(Agent):
         ]
         return self._spawn_and_track(args, dir, config)
 
-    def wait(self, pid: int) -> int:
+    def wait(self, pid: int) -> Tuple[int, str]:
         with self._lock:
             proc = self._children.pop(pid, None)
         if proc is None:
             raise ActorError(f"no tracked process with pid {pid}")
-        returncode = proc.wait()
-        return returncode if returncode is not None else -1
+        stdout, _ = proc.communicate()
+        output = stdout.decode("utf-8", errors="replace") if stdout else ""
+        returncode = proc.returncode
+        return (returncode if returncode is not None else -1, output)
 
     def read_logs(self, dir: Path, session_id: str) -> List[LogEntry]:
         path = self._session_file_path(dir, session_id)

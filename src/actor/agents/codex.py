@@ -20,6 +20,7 @@ class _CodexChild:
     def __init__(self, proc: subprocess.Popen, relay: Optional[threading.Thread]) -> None:  # type: ignore[type-arg]
         self.proc = proc
         self.relay = relay
+        self.output_lines: List[str] = []
 
 
 class CodexAgent(Agent):
@@ -105,6 +106,8 @@ class CodexAgent(Agent):
             except (json.JSONDecodeError, UnicodeDecodeError):
                 pass
 
+        child = _CodexChild(proc, None)
+
         # Spawn a thread to relay remaining stdout
         def _relay() -> None:
             try:
@@ -121,6 +124,7 @@ class CodexAgent(Agent):
                             if item.get("type") == "agent_message":
                                 text = item.get("text", "")
                                 if text:
+                                    child.output_lines.append(text)
                                     sys.stdout.write(text + "\n")
                                     sys.stdout.flush()
                     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -130,9 +134,10 @@ class CodexAgent(Agent):
 
         relay_thread = threading.Thread(target=_relay, daemon=True)
         relay_thread.start()
+        child.relay = relay_thread
 
         with self._lock:
-            self._children[pid] = _CodexChild(proc, relay_thread)
+            self._children[pid] = child
 
         return pid, thread_id
 
@@ -188,7 +193,7 @@ class CodexAgent(Agent):
         pid, _ = self._spawn_and_capture(args, cwd=dir, config=config)
         return pid
 
-    def wait(self, pid: int) -> int:
+    def wait(self, pid: int) -> Tuple[int, str]:
         with self._lock:
             entry = self._children.pop(pid, None)
         if entry is None:
@@ -196,7 +201,8 @@ class CodexAgent(Agent):
         returncode = entry.proc.wait()
         if entry.relay is not None:
             entry.relay.join(timeout=5)
-        return returncode if returncode is not None else -1
+        output = "\n".join(entry.output_lines)
+        return (returncode if returncode is not None else -1, output)
 
     def read_logs(self, dir: Path, session_id: str) -> List[LogEntry]:
         rollout_path = self._find_rollout_path(session_id)

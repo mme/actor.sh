@@ -38,8 +38,8 @@ class Agent(abc.ABC):
         """Resume an existing session with a new prompt. Returns pid."""
 
     @abc.abstractmethod
-    def wait(self, pid: int) -> int:
-        """Wait for the agent process to exit. Returns exit code."""
+    def wait(self, pid: int) -> Tuple[int, str]:
+        """Wait for the agent process to exit. Returns (exit_code, output)."""
 
     @abc.abstractmethod
     def read_logs(self, dir: Path, session_id: str) -> List[LogEntry]:
