@@ -558,21 +558,25 @@ class ActorWatchApp(App):
             elif entry.kind == LogEntryKind.ASSISTANT:
                 text = entry.text.strip()
                 if text:
-                    import textwrap
-                    width = max(40, log.size.width - 2)
-                    lines = text.split("\n")
-                    wrapped: list[str] = []
-                    for j, line in enumerate(lines):
+                    from rich.segment import Segment
+                    from rich.style import Style as RS
+                    console = log.app.console
+                    md = RichMarkdown(text)
+                    width = max(40, log.size.width - 4)
+                    options = console.options.update_width(width)
+                    rendered_lines = console.render_lines(md, options)
+                    for j, segments in enumerate(rendered_lines):
+                        line = Text()
                         if j == 0:
-                            # First line: ⏺ prefix takes 2 chars
-                            w = textwrap.fill(line, width=width, initial_indent="", subsequent_indent="  ")
-                            wrapped.append(w)
+                            line.append("⏺ ", style="bold")
                         else:
-                            w = textwrap.fill(line, width=width - 2, initial_indent="", subsequent_indent="")
-                            # Indent all lines by 2
-                            wrapped.append("\n".join("  " + l for l in w.split("\n")))
-                    body = Text.assemble(("⏺ ", "bold"), "\n".join(wrapped))
-                    log.write(body)
+                            line.append("  ")
+                        for seg in segments:
+                            if seg.text and seg.style:
+                                line.append(seg.text.rstrip(), style=seg.style)
+                            elif seg.text:
+                                line.append(seg.text.rstrip())
+                        log.write(line)
             elif entry.kind == LogEntryKind.THINKING:
                 log.write(Padding(
                     Text(entry.text, style="dim italic"),
