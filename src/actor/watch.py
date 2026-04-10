@@ -343,9 +343,9 @@ class ActorWatchApp(App):
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
+        Binding("left", "prev_tab", "Prev Tab", show=False, priority=True),
+        Binding("right", "next_tab", "Next Tab", show=False, priority=True),
         Binding("p", "command_palette", "Palette"),
-        Binding("left", "prev_tab", "Prev Tab", show=False),
-        Binding("right", "next_tab", "Next Tab", show=False),
         Binding("l", "show_tab('logs')", "Logs"),
         Binding("d", "show_tab('diff')", "Diff"),
         Binding("r", "show_tab('runs')", "Runs"),
