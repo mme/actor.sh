@@ -674,20 +674,33 @@ class ActorWatchApp(App):
         self._refresh_detail()
         self._maybe_refresh_diff()
 
-    def _focus_detail_content(self) -> None:
-        """Focus the first focusable widget inside the active tab pane."""
-        try:
-            log = self.query_one("#logs-content", RichLog)
-            log.focus()
-        except Exception:
-            pass
+    def _focus_detail_content(self, tab_id: str | None = None) -> None:
+        """Focus the content widget inside the given or active tab pane."""
+        if tab_id is None:
+            tabs = self.query_one("#tabs", TabbedContent)
+            tab_id = tabs.active
+
+        focus_map = {
+            "logs": "#logs-content",
+            "diff": "#diff-scroll",
+            "runs": "#runs-table",
+            "info": "#info-content",
+        }
+        selector = focus_map.get(tab_id)
+        if selector:
+            try:
+                widget = self.query_one(selector)
+                widget.can_focus = True
+                widget.focus()
+            except Exception:
+                pass
 
     def action_show_tab(self, tab_id: str) -> None:
         tabs = self.query_one("#tabs", TabbedContent)
         tabs.active = tab_id
         if tab_id == "diff":
             self._maybe_refresh_diff(force=True)
-        self._focus_detail_content()
+        self._focus_detail_content(tab_id)
 
     TAB_ORDER = ["logs", "diff", "runs", "info"]
 
