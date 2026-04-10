@@ -558,10 +558,21 @@ class ActorWatchApp(App):
             elif entry.kind == LogEntryKind.ASSISTANT:
                 text = entry.text.strip()
                 if text:
-                    log.write(Padding(
-                        RichMarkdown("**⏺** " + text),
-                        (0, 0, 0, 0),
-                    ))
+                    import textwrap
+                    width = max(40, log.size.width - 2)
+                    lines = text.split("\n")
+                    wrapped: list[str] = []
+                    for j, line in enumerate(lines):
+                        if j == 0:
+                            # First line: ⏺ prefix takes 2 chars
+                            w = textwrap.fill(line, width=width, initial_indent="", subsequent_indent="  ")
+                            wrapped.append(w)
+                        else:
+                            w = textwrap.fill(line, width=width - 2, initial_indent="", subsequent_indent="")
+                            # Indent all lines by 2
+                            wrapped.append("\n".join("  " + l for l in w.split("\n")))
+                    body = Text.assemble(("⏺ ", "bold"), "\n".join(wrapped))
+                    log.write(body)
             elif entry.kind == LogEntryKind.THINKING:
                 log.write(Padding(
                     Text(entry.text, style="dim italic"),
