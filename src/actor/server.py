@@ -43,7 +43,7 @@ class ActorMCP(FastMCP):
 
 
 mcp = ActorMCP(
-    "actor",
+    "actor.sh",
     instructions=(
         "Events from the actor channel arrive as <channel source=\"actor\" ...>. "
         "They notify you when an actor finishes. Read the event and report the result to the user."
@@ -199,7 +199,6 @@ def run_actor(
 
     def _run() -> None:
         thread_db = Database.open(_db_path())
-        status = "done"
         output = ""
         try:
             output = cmd_run(
@@ -209,13 +208,17 @@ def run_actor(
                 config_pairs=config_pairs if not create else [],
             )
         except Exception as e:
-            status = "error"
             output = str(e)
             print(f"[actor-mcp] run_actor '{name}' failed: {e}", file=sys.stderr)
 
+        # Read actual status from DB
+        resolved = thread_db.resolve_actor_status(name, pm)
+        status = resolved.value  # "done", "error", "running", etc.
+
         # Push channel notification
         if session and loop:
-            content = output or f"Actor '{name}' finished with status: {status}."
+            body = output or f"Finished with status: {status}."
+            content = f"[{name}] {body}"
             meta = {"actor": name, "status": status}
             future = asyncio.run_coroutine_threadsafe(
                 _send_channel_notification(session, content, meta),

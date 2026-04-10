@@ -233,7 +233,8 @@ def cmd_run(
     )
     run_id = db.insert_run(run)
 
-    # Expose actor name to the agent process
+    # Expose actor name to the agent process (set for child, cleaned up after)
+    prev_actor_name = os.environ.get("ACTOR_NAME")
     os.environ["ACTOR_NAME"] = name
 
     # Start or resume
@@ -247,6 +248,12 @@ def cmd_run(
         # Agent failed to start — mark run as error
         db.update_run_status(run_id, Status.ERROR, -1)
         raise
+    finally:
+        # Restore ACTOR_NAME so the MCP server process isn't polluted
+        if prev_actor_name is None:
+            os.environ.pop("ACTOR_NAME", None)
+        else:
+            os.environ["ACTOR_NAME"] = prev_actor_name
 
     # Update PID on the run row
     db.update_run_pid(run_id, pid)
