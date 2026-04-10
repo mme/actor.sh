@@ -21,6 +21,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.filter import ANSIToTruecolor
 from textual.reactive import reactive
+from textual.theme import Theme
 from textual.widgets import (
     DataTable,
     Footer,
@@ -303,6 +304,39 @@ class ActorTree(Tree[Actor]):
         return None
 
 
+# -- Themes ------------------------------------------------------------------
+
+CLAUDE_DARK = Theme(
+    name="claude-dark",
+    primary="#B1B9F9",
+    secondary="#D77757",
+    warning="#FFC107",
+    error="#FF6B80",
+    success="#4EBA65",
+    accent="#00CCCC",
+    foreground="#FFFFFF",
+    background="#1A1A1A",
+    surface="#373737",
+    panel="#2C323E",
+    dark=True,
+)
+
+CLAUDE_LIGHT = Theme(
+    name="claude-light",
+    primary="#5769F7",
+    secondary="#D77757",
+    warning="#966C1E",
+    error="#AB2B3F",
+    success="#2C7A39",
+    accent="#009999",
+    foreground="#000000",
+    background="#FFFFFF",
+    surface="#F0F0F0",
+    panel="#E8ECF4",
+    dark=False,
+)
+
+
 # -- Main App ----------------------------------------------------------------
 
 class ActorWatchApp(App):
@@ -377,7 +411,9 @@ class ActorWatchApp(App):
         yield Footer()
 
     def on_ready(self) -> None:
-        self.theme = "tokyo-night"
+        self.register_theme(CLAUDE_DARK)
+        self.register_theme(CLAUDE_LIGHT)
+        self.theme = "claude-dark"
 
         # Only actor tree and detail content should be tab stops
         for widget in self.query("Tabs, Tab, Footer, DataTable"):
