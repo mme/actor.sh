@@ -31,30 +31,8 @@ from textual.widgets import (
     Tree,
 )
 
-from textual.content import Content
-from textual.selection import Selection
-
 from .db import Database
 from .interfaces import LogEntryKind
-
-
-class SelectableStatic(Static):
-    """Static that supports text selection even when rendering non-Text content."""
-
-    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
-        visual = self._render()
-        if isinstance(visual, (Text, Content)):
-            text = str(visual)
-        else:
-            # Render to plain text via Rich console
-            from io import StringIO
-            from rich.console import Console
-            console = Console(file=StringIO(), force_terminal=True, width=200)
-            console.print(visual)
-            text = console.file.getvalue()
-        if not text:
-            return None
-        return selection.extract(text), "\n"
 from .process import RealProcessManager
 from .types import Actor, Status
 from .cli import _db_path
@@ -417,7 +395,7 @@ class ActorWatchApp(App):
             with Vertical(id="detail-panel"):
                 with TabbedContent(id="tabs"):
                     with TabPane("Logs", id="logs"):
-                        yield VerticalScroll(SelectableStatic("Select an actor", id="logs-content"))
+                        yield VerticalScroll(Static("Select an actor", id="logs-content"))
                     with TabPane("Diff", id="diff"):
                         yield VerticalScroll(id="diff-scroll")
                     with TabPane("Runs", id="runs"):
@@ -532,7 +510,7 @@ class ActorWatchApp(App):
     _last_log_entries: list = []
 
     def _set_logs(self, entries: list) -> None:
-        log = self.query_one("#logs-content", SelectableStatic)
+        log = self.query_one("#logs-content", Static)
 
         # Only re-render if entry count changed
         if len(entries) == self._last_log_count:
@@ -546,52 +524,54 @@ class ActorWatchApp(App):
 
         from .diff_render import try_render_tool_diff
 
-        parts: list = []
         surface = self.current_theme.surface if self.current_theme else "#24283B"
         warning = self.current_theme.warning if self.current_theme else "#E0AF68"
         is_dark = self.current_theme.dark if self.current_theme else True
 
+        output = Text()
         for entry in entries:
-            parts.append(Text(""))
+            output.append("\n")
             if entry.kind == LogEntryKind.USER:
-                prompt = Text("❯ ", style="bold")
+                output.append("❯ ", style="bold")
                 lines = entry.text.split("\n")
-                body = Text(lines[0])
+                output.append(lines[0])
                 for line in lines[1:]:
-                    body.append("\n  " + line)
-                parts.append(Padding(
-                    Group(Text.assemble(prompt, body)),
-                    (0, 1, 0, 0),
-                    style=f"on {surface}",
-                    expand=True,
-                ))
+                    output.append("\n  " + line)
+                output.append("\n")
             elif entry.kind == LogEntryKind.ASSISTANT:
                 text = entry.text.strip()
                 if text:
-                    parts.append(Padding(
-                        RichMarkdown("**⏺** " + text),
-                        (0, 0, 0, 0),
-                    ))
+                    output.append("⏺ ", style="bold")
+                    output.append(text)
+                    output.append("\n")
             elif entry.kind == LogEntryKind.THINKING:
-                parts.append(Padding(
-                    Text(entry.text, style="dim italic"),
-                    (0, 1, 0, 2),
-                ))
+                output.append("  ")
+                output.append(entry.text, style="dim italic")
+                output.append("\n")
             elif entry.kind == LogEntryKind.TOOL_USE:
                 diff_renderable = try_render_tool_diff(entry.name, entry.input, dark=is_dark)
                 if diff_renderable:
-                    parts.append(diff_renderable)
+                    # Render diff to text for selection support
+                    from io import StringIO
+                    from rich.console import Console as RichConsole
+                    buf = StringIO()
+                    console = RichConsole(file=buf, force_terminal=False, width=200, no_color=True)
+                    console.print(diff_renderable)
+                    output.append(buf.getvalue())
                 else:
-                    parts.append(Text(f"  ⚡ {entry.name}", style=f"bold {warning}"))
+                    output.append(f"  ⚡ {entry.name}", style=f"bold {warning}")
+                    output.append("\n")
                     if entry.input:
                         body = entry.input[:200] + ("..." if len(entry.input) > 200 else "")
-                        parts.append(Padding(Text(body, style="dim"), (0, 1, 0, 4)))
+                        output.append(f"    {body}", style="dim")
+                        output.append("\n")
             elif entry.kind == LogEntryKind.TOOL_RESULT:
                 if entry.content:
                     body = entry.content[:300] + ("..." if len(entry.content) > 300 else "")
-                    parts.append(Padding(Text(body, style="dim"), (0, 1, 0, 4)))
+                    output.append(f"    {body}", style="dim")
+                    output.append("\n")
 
-        log.update(Group(*parts))
+        log.update(output)
 
     def _maybe_refresh_diff(self, force: bool = False) -> None:
         actor = self.query_one(ActorTree).selected_actor
