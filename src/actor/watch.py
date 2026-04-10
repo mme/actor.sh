@@ -708,8 +708,12 @@ class ActorWatchApp(App):
         tabs = self.query_one("#tabs", TabbedContent)
         current = tabs.active
         if current in self.TAB_ORDER:
-            idx = (self.TAB_ORDER.index(current) - 1) % len(self.TAB_ORDER)
-            self.action_show_tab(self.TAB_ORDER[idx])
+            idx = self.TAB_ORDER.index(current)
+            if idx == 0:
+                # First tab — go back to actor list
+                self.query_one(ActorTree).focus()
+            else:
+                self.action_show_tab(self.TAB_ORDER[idx - 1])
 
     def action_next_tab(self) -> None:
         tabs = self.query_one("#tabs", TabbedContent)
