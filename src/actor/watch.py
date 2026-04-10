@@ -200,22 +200,39 @@ class ActorTree(Tree[Actor]):
         super().__init__("Actors", id="actor-tree")
         self.show_root = False
         self.guide_depth = 3
-        self._last_snapshot: list[tuple[str, str]] = []  # [(name, status), ...]
+        self._snapshot: dict[str, str] = {}  # name -> "icon name"
 
     def update_actors(self, actors: list[Actor], statuses: dict[str, Status]) -> None:
-        # Build a snapshot to detect changes
-        snapshot = [(a.name, statuses.get(a.name, Status.IDLE).value) for a in actors]
-        snapshot.sort()
-        if snapshot == self._last_snapshot:
-            return  # nothing changed, skip rebuild
-        self._last_snapshot = snapshot
+        # Build a snapshot of what the tree should look like
+        new_snapshot: dict[str, str] = {}
+        for a in actors:
+            status = statuses.get(a.name, Status.IDLE)
+            icon = STATUS_ICON.get(status, "?")
+            new_snapshot[a.name] = f"{icon} {a.name}"
 
-        # Remember current selection
+        # Only rebuild if something changed
+        if new_snapshot == self._snapshot:
+            # Just update labels in place for status icon changes
+            return
+
+        # Check if only labels changed (same actors, same structure)
+        if set(new_snapshot.keys()) == set(self._snapshot.keys()):
+            # Same actors — just update labels in place
+            self._update_labels(self.root, new_snapshot)
+            self._snapshot = new_snapshot
+            return
+
+        # Structure changed — full rebuild needed
         selected_name = None
         if self.cursor_node and self.cursor_node.data:
             selected_name = self.cursor_node.data.name
 
+        # Remember expanded state
+        expanded: set[str] = set()
+        self._collect_expanded(self.root, expanded)
+
         self.clear()
+        self._snapshot = new_snapshot
         by_parent = _group_by_parent(actors, statuses)
         visited: set[str] = set()
 
@@ -224,12 +241,11 @@ class ActorTree(Tree[Actor]):
                 if actor.name in visited:
                     continue
                 visited.add(actor.name)
-                status = statuses.get(actor.name, Status.IDLE)
-                icon = STATUS_ICON.get(status, "?")
-                label = f"{icon} {actor.name}"
+                label = new_snapshot[actor.name]
                 has_children = actor.name in by_parent
                 if has_children:
-                    node = parent_node.add(label, data=actor, expand=True)
+                    should_expand = actor.name in expanded or actor.name not in self._snapshot
+                    node = parent_node.add(label, data=actor, expand=should_expand)
                     _add_children(node, actor.name)
                 else:
                     parent_node.add_leaf(label, data=actor)
@@ -238,17 +254,32 @@ class ActorTree(Tree[Actor]):
 
         # Restore selection
         if selected_name:
-            for node in self.root.children:
-                if self._select_by_name(node, selected_name):
-                    break
+            self._select_by_name(self.root, selected_name)
+
+    def _update_labels(self, node, snapshot: dict[str, str]) -> None:
+        """Update labels in place without rebuilding the tree."""
+        for child in node.children:
+            if child.data and child.data.name in snapshot:
+                new_label = snapshot[child.data.name]
+                if str(child.label) != new_label:
+                    child.set_label(new_label)
+            self._update_labels(child, snapshot)
+
+    def _collect_expanded(self, node, expanded: set[str]) -> None:
+        """Collect names of expanded nodes."""
+        for child in node.children:
+            if child.data and child.is_expanded:
+                expanded.add(child.data.name)
+            self._collect_expanded(child, expanded)
 
     def _select_by_name(self, node, name: str) -> bool:
-        if node.data and node.data.name == name:
-            self.select_node(node)
-            return True
         for child in node.children:
+            if child.data and child.data.name == name:
+                self.select_node(child)
+                return True
             if self._select_by_name(child, name):
                 return True
+        return False
         return False
 
     @property
