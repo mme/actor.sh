@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from rich.console import Group
-from rich.padding import Padding
+from rich.table import Table
 from rich.text import Text
 
 from textual.widgets import RichLog
@@ -13,17 +12,17 @@ from .types import ThemeColors
 
 def render_user(log: RichLog, entry, colors: ThemeColors) -> None:
     """Render a user message with ❯ prefix and surface background."""
-    prompt = Text("❯ ", style="bold")
-    lines = entry.text.split("\n")
-    body = Text(lines[0])
-    for line in lines[1:]:
-        body.append("\n  " + line)
-    log.write(
-        Padding(
-            Group(Text.assemble(prompt, body)),
-            (0, 1, 0, 0),
-            style=f"on {colors.surface}",
-            expand=True,
-        ),
+    table = Table(
+        show_header=False,
+        box=None,
+        padding=0,
         expand=True,
+        style=f"on {colors.surface}",
     )
+    table.add_column(width=2, no_wrap=True)
+    table.add_column(ratio=1)
+    table.add_row(
+        Text("❯ ", style="bold"),
+        Text(entry.text),
+    )
+    log.write(table, expand=True)
