@@ -282,8 +282,6 @@ class ActorWatchApp(App):
         Binding("q", "quit", "Quit"),
         Binding("k,up", "move_up", "Up", show=False),
         Binding("j,down", "move_down", "Down", show=False),
-        Binding("left", "noop", "", show=False, priority=True),
-        Binding("right", "noop", "", show=False, priority=True),
         Binding("ctrl+p", "command_palette", "Command Palette"),
         Binding("l", "show_tab('logs')", "Logs"),
         Binding("d", "show_tab('diff')", "Diff"),
@@ -533,9 +531,6 @@ class ActorWatchApp(App):
             )
 
     # -- Actions -------------------------------------------------------------
-
-    def action_noop(self) -> None:
-        pass
 
     def action_move_up(self) -> None:
         self.query_one(ActorList).move_up()
