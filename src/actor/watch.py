@@ -17,12 +17,18 @@ from textual.widgets import (
     DataTable,
     Footer,
     Label,
+    RichLog,
     Static,
     TabbedContent,
     TabPane,
 )
 
+from rich.markdown import Markdown as RichMarkdown
+from rich.panel import Panel
+from rich.text import Text
+
 from .db import Database
+from .interfaces import LogEntryKind
 from .process import RealProcessManager
 from .types import Actor, Status
 from .cli import _db_path
@@ -99,14 +105,13 @@ def _build_tree(actors: list[Actor], statuses: dict[str, Status]) -> list[tuple[
     return result
 
 
-# -- Helper: read logs ------------------------------------------------------
+# -- Helper: read log entries ------------------------------------------------
 
-def _read_logs(actor: Actor, verbose: bool = False) -> str:
-    """Read actor session logs. Returns formatted text."""
+def _read_log_entries(actor: Actor) -> list:
+    """Read raw LogEntry list for an actor."""
     from .agents.claude import ClaudeAgent
     from .agents.codex import CodexAgent
-    from .commands import cmd_logs
-    from .interfaces import Agent
+    from .interfaces import Agent, LogEntry
 
     agent: Agent
     from .types import AgentKind
@@ -115,11 +120,12 @@ def _read_logs(actor: Actor, verbose: bool = False) -> str:
     else:
         agent = CodexAgent()
 
-    db = Database.open(_db_path())
+    if actor.agent_session is None:
+        return []
     try:
-        return cmd_logs(db, agent, name=actor.name, verbose=verbose, watch=False)
+        return agent.read_logs(Path(actor.dir), actor.agent_session)
     except Exception:
-        return ""
+        return []
 
 
 # -- Helper: compute git diff -----------------------------------------------
@@ -280,7 +286,7 @@ class ActorWatchApp(App):
         width: 1fr;
     }
     #logs-content {
-        padding: 1;
+        padding: 0 1;
     }
     #info-content {
         padding: 1;
@@ -320,9 +326,7 @@ class ActorWatchApp(App):
                 with TabbedContent(id="tabs"):
                     hl = "$footer-key-foreground on $footer-key-background bold"
                     with TabPane(Content.from_markup(f"[{hl}]L[/]ogs"), id="logs"):
-                        yield VerticalScroll(
-                            Static("Select an actor", id="logs-content"),
-                        )
+                        yield RichLog(id="logs-content", wrap=True, markup=False)
                     with TabPane(Content.from_markup(f"[{hl}]D[/]iff"), id="diff"):
                         yield VerticalScroll(id="diff-scroll")
                     with TabPane(Content.from_markup(f"[{hl}]R[/]uns"), id="runs"):
@@ -423,14 +427,51 @@ class ActorWatchApp(App):
 
         # Diff is only refreshed on actor change or explicit tab switch, not every poll
 
-    @work(thread=True)
+    @work(thread=True, exclusive=True, group="logs")
     def _refresh_logs(self, actor: Actor) -> None:
-        log_text = _read_logs(actor, verbose=self.verbose)
-        self.call_from_thread(self._set_logs, log_text or "No logs yet")
+        entries = _read_log_entries(actor)
+        self.call_from_thread(self._set_logs, entries)
 
-    def _set_logs(self, text: str) -> None:
-        logs = self.query_one("#logs-content", Static)
-        logs.update(text)
+    def _set_logs(self, entries: list) -> None:
+        log = self.query_one("#logs-content", RichLog)
+        log.clear()
+        if not entries:
+            log.write(Text("No logs yet", style="dim"))
+            return
+        for entry in entries:
+            if entry.kind == LogEntryKind.USER:
+                log.write(Text(""))
+                log.write(Panel(
+                    RichMarkdown(entry.text),
+                    title="User",
+                    title_align="left",
+                    border_style="bold cyan",
+                ))
+            elif entry.kind == LogEntryKind.ASSISTANT:
+                log.write(Text(""))
+                log.write(Panel(
+                    RichMarkdown(entry.text),
+                    title="Assistant",
+                    title_align="left",
+                    border_style="bold green",
+                ))
+            elif entry.kind == LogEntryKind.THINKING:
+                if self.verbose:
+                    log.write(Panel(
+                        Text(entry.text, style="dim italic"),
+                        title="Thinking",
+                        title_align="left",
+                        border_style="dim",
+                    ))
+            elif entry.kind == LogEntryKind.TOOL_USE:
+                if self.verbose:
+                    label = Text(f"Tool: {entry.name}", style="bold yellow")
+                    body = Text(entry.input[:200] + ("..." if len(entry.input) > 200 else ""), style="dim")
+                    log.write(Panel(body, title=label, title_align="left", border_style="yellow"))
+            elif entry.kind == LogEntryKind.TOOL_RESULT:
+                if self.verbose:
+                    body = Text(entry.content[:300] + ("..." if len(entry.content) > 300 else ""), style="dim")
+                    log.write(Panel(body, title="Result", title_align="left", border_style="dim"))
 
     def _maybe_refresh_diff(self, force: bool = False) -> None:
         actor = self.query_one(ActorList).selected_actor
