@@ -194,7 +194,7 @@ class ActorTree(Tree[Actor]):
     DEFAULT_CSS = """
     ActorTree {
         width: 28;
-        border-right: solid $surface-lighten-2;
+        border: blank;
     }
     ActorTree:focus {
         border: round $accent;
