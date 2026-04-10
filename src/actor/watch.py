@@ -32,8 +32,41 @@ from textual.widgets import (
     Tree,
 )
 
+from textual.selection import Selection
+from textual.strip import Strip
+
 from .db import Database
 from .interfaces import LogEntryKind
+
+
+# -- Selectable RichLog ------------------------------------------------------
+
+class SelectableRichLog(RichLog):
+    """RichLog subclass that supports text selection."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._plain_lines: list[str] = []
+
+    def write(self, content, width=None, expand=False, shrink=True, scroll_end=None, animate=False):
+        lines_before = len(self.lines)
+        result = super().write(content, width=width, expand=expand, shrink=shrink, scroll_end=scroll_end, animate=animate)
+        new_count = len(self.lines) - lines_before
+        if new_count > 0:
+            for i in range(len(self.lines) - new_count, len(self.lines)):
+                self._plain_lines.append(self.lines[i].text)
+        if self.max_lines is not None and len(self._plain_lines) > self.max_lines:
+            self._plain_lines = self._plain_lines[-self.max_lines:]
+        return result
+
+    def clear(self):
+        self._plain_lines.clear()
+        return super().clear()
+
+    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
+        if not self._plain_lines:
+            return None
+        return selection.extract("\n".join(self._plain_lines)), "\n"
 from .process import RealProcessManager
 from .types import Actor, Status
 from .cli import _db_path
@@ -396,7 +429,7 @@ class ActorWatchApp(App):
             with Vertical(id="detail-panel"):
                 with TabbedContent(id="tabs"):
                     with TabPane("Logs", id="logs"):
-                        yield RichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False)
+                        yield SelectableRichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False)
                     with TabPane("Diff", id="diff"):
                         yield VerticalScroll(id="diff-scroll")
                     with TabPane("Runs", id="runs"):
@@ -513,13 +546,13 @@ class ActorWatchApp(App):
 
     def on_resize(self) -> None:
         """Force log re-render on resize."""
-        log = self.query_one("#logs-content", RichLog)
+        log = self.query_one("#logs-content", SelectableRichLog)
         if log.size.width != self._last_log_width and self._last_log_entries:
             self._last_log_count = 0  # force re-render
             self._set_logs(self._last_log_entries)
 
     def _set_logs(self, entries: list) -> None:
-        log = self.query_one("#logs-content", RichLog)
+        log = self.query_one("#logs-content", SelectableRichLog)
 
         # Only re-render if entry count or width changed
         if len(entries) == self._last_log_count and log.size.width == self._last_log_width:
