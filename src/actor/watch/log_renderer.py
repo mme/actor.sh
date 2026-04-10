@@ -41,7 +41,7 @@ def render_log_entries(log: RichLog, entries: list, colors: ThemeColors) -> None
         elif entry.kind == LogEntryKind.TOOL_USE:
             _render_tool_use(log, entry, colors)
         elif entry.kind == LogEntryKind.TOOL_RESULT:
-            _render_tool_result(log, entry)
+            pass
 
 
 
@@ -70,11 +70,3 @@ def _render_tool_use(log: RichLog, entry, colors: ThemeColors) -> None:
             ))
 
 
-def _render_tool_result(log: RichLog, entry) -> None:
-    """Render a tool result in dim text."""
-    if entry.content:
-        body = entry.content[:300] + ("..." if len(entry.content) > 300 else "")
-        log.write(Padding(
-            Text(body, style="dim"),
-            (0, 1, 0, 4),
-        ))
