@@ -257,7 +257,9 @@ class ActorWatchApp(App):
     """Real-time dashboard for actor.sh."""
 
     CSS = """
-    Screen {
+    Screen, Tabs, Tab, TabbedContent, TabPane,
+    ContentSwitcher, VerticalScroll, RichLog,
+    DataTable, Tree, #detail-panel, #status-bar {
         background: ansi_default;
     }
     #detail-panel {
