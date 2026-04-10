@@ -200,7 +200,7 @@ class ActorTree(Tree[Actor]):
         border: round $secondary;
     }
     ActorTree > .tree--cursor {
-        background: $secondary;
+        background: $primary;
         color: $text;
         text-style: bold;
     }
