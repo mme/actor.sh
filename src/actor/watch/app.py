@@ -72,8 +72,10 @@ class ActorWatchApp(App):
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
-        Binding("left", "prev_tab", "Prev Tab", show=False, priority=True),
-        Binding("right", "next_tab", "Next Tab", show=False, priority=True),
+        Binding("left,ctrl+b", "navigate_left", show=False, priority=True),
+        Binding("right,ctrl+f", "navigate_right", show=False, priority=True),
+        Binding("up,ctrl+p", "navigate_up", show=False, priority=True),
+        Binding("down,ctrl+n", "navigate_down", show=False, priority=True),
         Binding("p", "command_palette", "Palette"),
         Binding("l", "show_tab('logs')", "Logs"),
         Binding("d", "show_tab('diff')", "Diff"),
@@ -363,7 +365,12 @@ class ActorWatchApp(App):
 
     TAB_ORDER = ["logs", "diff", "runs", "info"]
 
-    def action_prev_tab(self) -> None:
+    def _tree_has_focus(self) -> bool:
+        return self.query_one(ActorTree).has_focus
+
+    def action_navigate_left(self) -> None:
+        if self._tree_has_focus():
+            return  # already on actor list
         tabs = self.query_one("#tabs", TabbedContent)
         current = tabs.active
         if current in self.TAB_ORDER:
@@ -373,12 +380,34 @@ class ActorWatchApp(App):
             else:
                 self.action_show_tab(self.TAB_ORDER[idx - 1])
 
-    def action_next_tab(self) -> None:
-        tabs = self.query_one("#tabs", TabbedContent)
-        current = tabs.active
-        if current in self.TAB_ORDER:
-            idx = (self.TAB_ORDER.index(current) + 1) % len(self.TAB_ORDER)
-            self.action_show_tab(self.TAB_ORDER[idx])
+    def action_navigate_right(self) -> None:
+        if self._tree_has_focus():
+            # Move from tree to detail panel
+            self._focus_detail_content()
+        else:
+            tabs = self.query_one("#tabs", TabbedContent)
+            current = tabs.active
+            if current in self.TAB_ORDER:
+                idx = self.TAB_ORDER.index(current)
+                if idx < len(self.TAB_ORDER) - 1:
+                    self.action_show_tab(self.TAB_ORDER[idx + 1])
+
+    def action_navigate_up(self) -> None:
+        if self._tree_has_focus():
+            self.query_one(ActorTree).action_cursor_up()
+        else:
+            # Scroll up in the detail view
+            focused = self.focused
+            if focused and hasattr(focused, 'scroll_up'):
+                focused.scroll_up()
+
+    def action_navigate_down(self) -> None:
+        if self._tree_has_focus():
+            self.query_one(ActorTree).action_cursor_down()
+        else:
+            focused = self.focused
+            if focused and hasattr(focused, 'scroll_down'):
+                focused.scroll_down()
 
 
 def run_watch(serve: bool = False) -> None:
