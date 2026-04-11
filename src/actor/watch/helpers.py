@@ -88,14 +88,23 @@ class DiffResult:
 
 def compute_diff(actor: Actor) -> DiffResult:
     """Compute diff for an actor."""
-    if not actor.source_repo or not actor.base_branch or not actor.worktree:
+    worktree_dir = actor.dir
+
+    # Check if the directory is a git repo at all
+    check = subprocess.run(
+        ["git", "rev-parse", "--git-dir"],
+        capture_output=True, text=True, cwd=worktree_dir,
+    )
+    if check.returncode != 0:
         return DiffResult(reason="no repository")
 
-    worktree_dir = actor.dir
+    base_branch = actor.base_branch
+    if not base_branch:
+        base_branch = "HEAD"
 
     try:
         result = subprocess.run(
-            ["git", "diff", "--name-only", actor.base_branch],
+            ["git", "diff", "--name-only", base_branch],
             capture_output=True, text=True, cwd=worktree_dir,
         )
         if result.returncode != 0 or not result.stdout.strip():
@@ -107,7 +116,7 @@ def compute_diff(actor: Actor) -> DiffResult:
         mod_parts = []
         for f in files:
             orig_result = subprocess.run(
-                ["git", "show", f"{actor.base_branch}:{f}"],
+                ["git", "show", f"{base_branch}:{f}"],
                 capture_output=True, text=True, cwd=worktree_dir,
             )
             orig_parts.append(f"# {f}\n" + (orig_result.stdout if orig_result.returncode == 0 else ""))
@@ -120,7 +129,7 @@ def compute_diff(actor: Actor) -> DiffResult:
             mod_parts.append(f"# {f}\n" + mod_content)
 
         return DiffResult(data=(
-            actor.base_branch,
+            base_branch,
             f"{actor.name} (working tree)",
             "\n".join(orig_parts),
             "\n".join(mod_parts),
