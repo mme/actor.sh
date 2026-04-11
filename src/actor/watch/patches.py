@@ -59,7 +59,14 @@ def _patch_markdown_list_numbers() -> None:
     ListItem.render_number = render_number
 
 
+def _patch_command_palette_icon() -> None:
+    """Replace the command palette search icon with a Nerd Font icon."""
+    from textual.command import SearchIcon
+    SearchIcon._default_icon = "󰍉"  # nf-md-magnify
+
+
 def apply_patches() -> None:
     """Apply all monkey-patches. Call once at import time."""
     ANSIToTruecolor.truecolor_style = _patched_truecolor_style  # type: ignore[assignment]
     _patch_markdown_list_numbers()
+    _patch_command_palette_icon()
