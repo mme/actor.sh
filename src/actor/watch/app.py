@@ -371,7 +371,14 @@ class ActorWatchApp(App):
     def _tree_has_focus(self) -> bool:
         return self.query_one(ActorTree).has_focus
 
+    def _has_overlay(self) -> bool:
+        """Check if a modal/overlay (like command palette) is active."""
+        from textual.command import CommandPalette
+        return bool(self.query(CommandPalette))
+
     def action_navigate_left(self) -> None:
+        if self._has_overlay():
+            return
         if self._tree_has_focus():
             return  # already on actor list
         tabs = self.query_one("#tabs", TabbedContent)
@@ -384,6 +391,8 @@ class ActorWatchApp(App):
                 self.action_show_tab(self.TAB_ORDER[idx - 1])
 
     def action_navigate_right(self) -> None:
+        if self._has_overlay():
+            return
         if self._tree_has_focus():
             # Move from tree to detail panel
             self._focus_detail_content()
@@ -396,6 +405,8 @@ class ActorWatchApp(App):
                     self.action_show_tab(self.TAB_ORDER[idx + 1])
 
     def action_navigate_up(self) -> None:
+        if self._has_overlay():
+            return
         if self._tree_has_focus():
             self.query_one(ActorTree).action_cursor_up()
         else:
@@ -405,6 +416,8 @@ class ActorWatchApp(App):
                 focused.scroll_up()
 
     def action_navigate_down(self) -> None:
+        if self._has_overlay():
+            return
         if self._tree_has_focus():
             self.query_one(ActorTree).action_cursor_down()
         else:
