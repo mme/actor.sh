@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from rich.text import Text
+from rich.theme import Theme as RichTheme
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -109,12 +110,41 @@ class ActorWatchApp(App):
         self.register_theme(CLAUDE_LIGHT)
         self.theme = "claude-dark"
 
+        # Apply Claude Code markdown styles to the app console
+        self._apply_markdown_styles()
+
         for widget in self.query("Tabs, Tab, Footer, DataTable"):
             widget.can_focus = False
 
         actors, statuses = self._fetch_actors()
         self._update_ui(actors, statuses)
         self.set_interval(2.0, self._poll_actors_async)
+
+    def _apply_markdown_styles(self) -> None:
+        """Override Rich console markdown styles to match Claude Code."""
+        is_dark = self.current_theme.dark if self.current_theme else True
+        code_color = "#B1B9F9" if is_dark else "#5769F7"
+        self.console.push_theme(RichTheme({
+            "markdown.code": code_color,
+            "markdown.code_block": "none",
+            "markdown.h1": "bold italic underline",
+            "markdown.h1.border": "none",
+            "markdown.h2": "bold",
+            "markdown.h3": "bold",
+            "markdown.h4": "bold",
+            "markdown.h5": "bold",
+            "markdown.h6": "dim",
+            "markdown.em": "italic",
+            "markdown.strong": "bold",
+            "markdown.link": "blue",
+            "markdown.link_url": "blue",
+            "markdown.block_quote": "dim italic",
+            "markdown.hr": "dim",
+            "markdown.item.bullet": "bold",
+            "markdown.paragraph": "none",
+            "markdown.text": "none",
+            "markdown.s": "strike",
+        }))
 
     @staticmethod
     def _fetch_actors() -> tuple[list[Actor], dict[str, Status]]:
