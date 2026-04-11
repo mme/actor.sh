@@ -10,3 +10,6 @@ class ThemeColors(NamedTuple):
     surface: str
     warning: str
     is_dark: bool
+    success_color: str = "#4EBA65"
+    error_color: str = "#FF6B80"
+    inactive: str = "#999999"

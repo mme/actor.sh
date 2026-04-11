@@ -212,10 +212,14 @@ class ActorWatchApp(App):
 
         at_bottom = log.scroll_offset.y >= log.max_scroll_y - 1
 
+        t = self.current_theme
         colors = ThemeColors(
-            surface=self.current_theme.surface if self.current_theme else "#24283B",
-            warning=self.current_theme.warning if self.current_theme else "#E0AF68",
-            is_dark=self.current_theme.dark if self.current_theme else True,
+            surface=t.surface if t else "#24283B",
+            warning=t.warning if t else "#E0AF68",
+            is_dark=t.dark if t else True,
+            success_color=t.success if t else "#4EBA65",
+            error_color=t.error if t else "#FF6B80",
+            inactive="#999999" if (t and t.dark) else "#666666",
         )
         render_log_entries(log, entries, colors)
 

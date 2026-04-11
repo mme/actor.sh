@@ -8,8 +8,8 @@ from rich.text import Text
 from textual.widgets import RichLog
 
 from ..interfaces import LogEntryKind
-from .diff_render import try_render_tool_diff
 from .render_assistant import render_assistant
+from .render_tool import render_tool
 from .render_user import render_user
 from .types import ThemeColors
 
@@ -39,11 +39,9 @@ def render_log_entries(log: RichLog, entries: list, colors: ThemeColors) -> None
         elif entry.kind == LogEntryKind.THINKING:
             _render_thinking(log, entry)
         elif entry.kind == LogEntryKind.TOOL_USE:
-            _render_tool_use(log, entry, colors)
+            render_tool(log, entry, colors)
         elif entry.kind == LogEntryKind.TOOL_RESULT:
             pass
-
-
 
 
 def _render_thinking(log: RichLog, entry) -> None:
@@ -52,21 +50,5 @@ def _render_thinking(log: RichLog, entry) -> None:
         Text(entry.text, style="dim italic"),
         (0, 1, 0, 2),
     ))
-
-
-def _render_tool_use(log: RichLog, entry, colors: ThemeColors) -> None:
-    """Render a tool use — diff for Edit/Write, fallback for others."""
-    diff_renderable = try_render_tool_diff(entry.name, entry.input, dark=colors.is_dark)
-    if diff_renderable:
-        log.write(diff_renderable, expand=True)
-    else:
-        header = Text(f"  ⚡ {entry.name}", style=f"bold {colors.warning}")
-        log.write(header)
-        if entry.input:
-            body = entry.input[:200] + ("..." if len(entry.input) > 200 else "")
-            log.write(Padding(
-                Text(body, style="dim"),
-                (0, 1, 0, 4),
-            ))
 
 
