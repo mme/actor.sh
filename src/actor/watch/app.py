@@ -275,15 +275,15 @@ class ActorWatchApp(App):
     def _refresh_diff(self, actor: Actor) -> None:
         from .diff_render import render_edit_diff
 
-        diff_data = compute_diff(actor)
+        result = compute_diff(actor)
 
-        if diff_data is None:
-            self.call_from_thread(self._set_diff_text, "No diff available (no worktree or no changes)")
+        if result.data is None:
+            self.call_from_thread(self._set_diff_text, f"No diff available ({result.reason})")
             return
 
-        path_orig, path_mod, orig, mod = diff_data
+        path_orig, path_mod, orig, mod = result.data
         if orig == mod:
-            self.call_from_thread(self._set_diff_text, "No changes")
+            self.call_from_thread(self._set_diff_text, "No diff available (no changes)")
             return
 
         try:

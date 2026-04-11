@@ -79,10 +79,17 @@ def read_log_entries(actor: Actor) -> list:
 
 # -- Compute git diff --------------------------------------------------------
 
-def compute_diff(actor: Actor) -> tuple[str, str, str, str] | None:
-    """Compute diff for an actor. Returns (path_orig, path_mod, orig_content, mod_content) or None."""
+class DiffResult:
+    """Result of compute_diff."""
+    def __init__(self, data: tuple[str, str, str, str] | None = None, reason: str = "") -> None:
+        self.data = data
+        self.reason = reason
+
+
+def compute_diff(actor: Actor) -> DiffResult:
+    """Compute diff for an actor."""
     if not actor.source_repo or not actor.base_branch or not actor.worktree:
-        return None
+        return DiffResult(reason="no repository")
 
     worktree_dir = actor.dir
 
@@ -92,7 +99,7 @@ def compute_diff(actor: Actor) -> tuple[str, str, str, str] | None:
             capture_output=True, text=True, cwd=worktree_dir,
         )
         if result.returncode != 0 or not result.stdout.strip():
-            return None
+            return DiffResult(reason="no changes")
 
         files = result.stdout.strip().split("\n")
 
@@ -112,11 +119,11 @@ def compute_diff(actor: Actor) -> tuple[str, str, str, str] | None:
                 mod_content = ""
             mod_parts.append(f"# {f}\n" + mod_content)
 
-        return (
+        return DiffResult(data=(
             actor.base_branch,
             f"{actor.name} (working tree)",
             "\n".join(orig_parts),
             "\n".join(mod_parts),
-        )
+        ))
     except Exception:
-        return None
+        return DiffResult(reason="error")
