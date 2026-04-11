@@ -63,6 +63,9 @@ def _patch_command_palette_icon() -> None:
     """Replace the command palette search icon with a Nerd Font icon."""
     from textual.command import SearchIcon
     SearchIcon._default_icon = "󰍉"  # nf-md-magnify
+    # Also patch the render method directly
+    from rich.text import Text
+    SearchIcon.render = lambda self: Text("󰍉")
 
 
 def apply_patches() -> None:

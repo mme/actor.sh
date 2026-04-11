@@ -62,6 +62,9 @@ class ActorWatchApp(App):
     #info-content {
         padding: 1;
     }
+    SearchIcon {
+        color: $text;
+    }
     #status-bar {
         dock: bottom;
         height: 1;
