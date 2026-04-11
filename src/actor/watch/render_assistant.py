@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
+from rich.markdown import Markdown as RichMarkdown
 from rich.table import Table
 from rich.text import Text
 
 from textual.widgets import RichLog
 
-from .render_markdown import ThemedMarkdown
-from .types import ThemeColors
 
-
-def render_assistant(log: RichLog, entry, colors: ThemeColors) -> None:
+def render_assistant(log: RichLog, entry) -> None:
     """Render an assistant message with ⏺ prefix and markdown."""
     text = entry.text.strip()
     if text:
@@ -25,6 +23,6 @@ def render_assistant(log: RichLog, entry, colors: ThemeColors) -> None:
         table.add_column(ratio=1)
         table.add_row(
             Text("⏺ ", style="bold"),
-            ThemedMarkdown(text, dark=colors.is_dark),
+            RichMarkdown(text),
         )
         log.write(table, expand=True)
