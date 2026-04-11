@@ -141,6 +141,8 @@ class ActorWatchApp(App):
             "markdown.block_quote": "dim italic",
             "markdown.hr": "dim",
             "markdown.item.bullet": "bold",
+            "markdown.item.number": "bold",
+            "markdown.list": "none",
             "markdown.paragraph": "none",
             "markdown.text": "none",
             "markdown.s": "strike",
