@@ -45,7 +45,7 @@ def render_log_entries(log: RichLog, entries: list, colors: ThemeColors) -> None
         if entry.kind == LogEntryKind.USER:
             render_user(log, entry, colors)
         elif entry.kind == LogEntryKind.ASSISTANT:
-            render_assistant(log, entry)
+            render_assistant(log, entry, colors)
         elif entry.kind == LogEntryKind.THINKING:
             _render_thinking(log, entry)
         elif entry.kind == LogEntryKind.TOOL_USE:
