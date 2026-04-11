@@ -281,12 +281,12 @@ class ActorWatchApp(App):
         result = compute_diff(actor)
 
         if result.data is None:
-            self.call_from_thread(self._set_diff_text, f"No diff available ({result.reason})")
+            self.call_from_thread(self._set_diff_text, result.reason)
             return
 
         path_orig, path_mod, orig, mod = result.data
         if orig == mod:
-            self.call_from_thread(self._set_diff_text, "No changes (working tree clean)")
+            self.call_from_thread(self._set_diff_text, "Working tree clean")
             return
 
         try:
