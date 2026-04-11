@@ -226,13 +226,23 @@ class ActorWatchApp(App):
         self.call_from_thread(self._set_logs, entries)
 
     _last_log_count: int = 0
+    _last_log_width: int = 0
+    _last_log_entries: list = []
+
+    def on_resize(self) -> None:
+        log = self.query_one("#logs-content", RichLog)
+        if log.size.width != self._last_log_width and self._last_log_entries:
+            self._last_log_count = 0
+            self._set_logs(self._last_log_entries)
 
     def _set_logs(self, entries: list) -> None:
         log = self.query_one("#logs-content", RichLog)
 
-        if len(entries) == self._last_log_count:
+        if len(entries) == self._last_log_count and log.size.width == self._last_log_width:
             return
         self._last_log_count = len(entries)
+        self._last_log_width = log.size.width
+        self._last_log_entries = entries
 
         at_bottom = log.scroll_offset.y >= log.max_scroll_y - 1
 
