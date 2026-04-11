@@ -10,28 +10,11 @@ from typing import NamedTuple
 
 from pygments.lexers import get_lexer_for_filename, TextLexer
 from pygments.token import Token
-from rich.console import Console, ConsoleOptions, Group, RenderResult
-from rich.measure import Measurement
+from rich.console import Group
+from rich.table import Table
 from rich.text import Text
 
 
-class FullWidthText:
-    """A Text renderable that pads to the full console width with a background style."""
-
-    def __init__(self, text: Text, bg_style: str = "") -> None:
-        self.text = text
-        self.bg_style = bg_style
-
-    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
-        width = options.max_width
-        text = self.text.copy()
-        padding = width - text.cell_len
-        if padding > 0 and self.bg_style:
-            text.append(" " * padding, style=self.bg_style)
-        yield text
-
-    def __rich_measure__(self, console: Console, options: ConsoleOptions) -> Measurement:
-        return Measurement(self.text.cell_len, options.max_width)
 
 
 # -- Colors ------------------------------------------------------------------
@@ -287,59 +270,69 @@ def render_edit_diff(
         summary.append(f"Removed {removed} lines", style="dim")
     output.append(summary)
 
-    # Diff lines
+    # Diff table
+    table = Table(
+        show_header=False,
+        box=None,
+        padding=0,
+        expand=True,
+    )
+    table.add_column(width=num_width + 2, no_wrap=True)  # line number
+    table.add_column(width=1, no_wrap=True)               # marker
+    table.add_column(ratio=1)                              # code
+
     for i, entry in enumerate(entries):
         if entry["type"] == "ellipsis":
-            output.append(Text(f"{'':>{num_width + 4}}...", style="dim"))
+            table.add_row(
+                Text("", style="dim"),
+                Text("", style="dim"),
+                Text("...", style="dim"),
+            )
             continue
 
-        line_text = Text()
         num = entry["num"]
-        marker = entry["marker"]
         code = entry["code"]
-        bg_style = ""
-
-        # Line number
-        num_str = f" {num:>{num_width}} "
+        num_text = Text(f"{num:>{num_width}} ", no_wrap=True)
 
         if entry["type"] == "add":
-            bg_style = f"on {colors.added_bg}"
-            line_text.append(num_str, style=f"{colors.added_marker} on {colors.added_bg}")
-            line_text.append("+", style=f"bold {colors.added_marker} on {colors.added_bg}")
+            bg = f"on {colors.added_bg}"
+            num_text.stylize(f"{colors.added_marker} {bg}")
+            marker_text = Text("+", style=f"bold {colors.added_marker} {bg}")
 
             if i in word_diffs:
+                code_text = Text()
                 for token, changed in word_diffs[i]:
-                    bg = colors.added_word_bg if changed else colors.added_bg
-                    line_text.append(token, style=f"on {bg}")
+                    wbg = f"on {colors.added_word_bg}" if changed else bg
+                    code_text.append(token, style=wbg)
             else:
-                highlighted = _highlight_line(code, lexer)
-                highlighted.stylize(f"on {colors.added_bg}")
-                line_text.append_text(highlighted)
+                code_text = _highlight_line(code, lexer)
+                code_text.stylize(bg)
+
+            table.add_row(num_text, marker_text, code_text, style=bg)
 
         elif entry["type"] == "del":
-            bg_style = f"on {colors.removed_bg}"
-            line_text.append(num_str, style=f"{colors.removed_marker} on {colors.removed_bg}")
-            line_text.append("-", style=f"bold {colors.removed_marker} on {colors.removed_bg}")
+            bg = f"on {colors.removed_bg}"
+            num_text.stylize(f"{colors.removed_marker} {bg}")
+            marker_text = Text("-", style=f"bold {colors.removed_marker} {bg}")
 
-            # Deleted lines: no syntax highlighting (matches Claude Code)
             if i in word_diffs:
+                code_text = Text()
                 for token, changed in word_diffs[i]:
-                    bg = colors.removed_word_bg if changed else colors.removed_bg
-                    line_text.append(token, style=f"on {bg}")
+                    wbg = f"on {colors.removed_word_bg}" if changed else bg
+                    code_text.append(token, style=wbg)
             else:
-                line_text.append(code, style=f"on {colors.removed_bg}")
+                code_text = Text(code, style=bg)
+
+            table.add_row(num_text, marker_text, code_text, style=bg)
 
         else:  # context
-            line_text.append(num_str, style=f"{colors.line_num_fg}")
-            line_text.append(" ", style="dim")
-            highlighted = _highlight_line(code, lexer)
-            highlighted.stylize("dim")
-            line_text.append_text(highlighted)
+            num_text.stylize(colors.line_num_fg)
+            marker_text = Text(" ", style="dim")
+            code_text = _highlight_line(code, lexer)
+            code_text.stylize("dim")
+            table.add_row(num_text, marker_text, code_text)
 
-        if bg_style:
-            output.append(FullWidthText(line_text, bg_style))
-        else:
-            output.append(line_text)
+    output.append(table)
 
     return Group(*output)
 
