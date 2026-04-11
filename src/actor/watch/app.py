@@ -239,7 +239,7 @@ class ActorWatchApp(App):
 
     @work(thread=True, exclusive=True, group="diff")
     def _refresh_diff(self, actor: Actor) -> None:
-        from textual_diff_view import DiffView
+        from .diff_render import render_edit_diff
 
         diff_data = compute_diff(actor)
 
@@ -253,15 +253,9 @@ class ActorWatchApp(App):
             return
 
         try:
-            dv = DiffView(
-                path_original=path_orig,
-                path_modified=path_mod,
-                code_original=orig,
-                code_modified=mod,
-            )
-            dv.grouped_opcodes
-            dv.highlighted_code_lines
-            self.call_from_thread(self._set_diff_widget, dv)
+            is_dark = self.current_theme.dark if self.current_theme else True
+            renderable = render_edit_diff(path_mod, orig, mod, dark=is_dark)
+            self.call_from_thread(self._set_diff_widget, Static(renderable))
         except Exception as e:
             self.call_from_thread(self._set_diff_text, f"Diff error: {e}")
 

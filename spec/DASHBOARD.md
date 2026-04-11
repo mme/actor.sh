@@ -89,10 +89,9 @@ Displays the Claude JSONL session output, color-coded:
 
 ### Diff
 
-Uses [textual-diff-view](https://github.com/batrachianai/textual-diff-view).
+Uses custom diff renderer (Claude Code-style, Pygments syntax highlighting).
 
-- Computes `git diff <base_branch>...<actor_branch>` for the actor's worktree
-- Split and unified view modes, toggled with `s`
+- Computes `git diff <base_branch>` from the actor's worktree
 - File list at top if multiple files changed, selectable
 - Refreshes on tab switch (debounced)
 
@@ -152,7 +151,7 @@ Textual's built-in command palette (`Ctrl+P`) with commands:
 - Served via textual-serve on `localhost:2204`
 - Command: `actor watch`
 - Also runs standalone in terminal: `actor watch --no-serve`
-- Dependencies: `textual`, `textual-serve`, `textual-diff-view`
+- Dependencies: `textual`, `textual-serve`
 
 ## Not in scope
 
