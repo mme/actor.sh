@@ -37,6 +37,29 @@ def _patched_truecolor_style(
     return result
 
 
+def _patch_markdown_list_numbers() -> None:
+    """Patch Rich's ListItem to render '1.' instead of '1'."""
+    from rich.markdown import ListItem
+    from rich.segment import Segment
+    from rich._loop import loop_first
+
+    def render_number(self, console, options, number, last_number):
+        number_width = len(str(last_number)) + 3
+        render_options = options.update(width=options.max_width - number_width)
+        lines = console.render_lines(self.elements, render_options, style=self.style)
+        number_style = console.get_style("markdown.item.number", default="none")
+        new_line = Segment("\n")
+        padding = Segment(" " * number_width, number_style)
+        numeral = Segment(f"{number}.".rjust(number_width - 1) + " ", number_style)
+        for first, line in loop_first(lines):
+            yield numeral if first else padding
+            yield from line
+            yield new_line
+
+    ListItem.render_number = render_number
+
+
 def apply_patches() -> None:
     """Apply all monkey-patches. Call once at import time."""
     ANSIToTruecolor.truecolor_style = _patched_truecolor_style  # type: ignore[assignment]
+    _patch_markdown_list_numbers()
