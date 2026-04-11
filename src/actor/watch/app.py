@@ -283,7 +283,7 @@ class ActorWatchApp(App):
 
         path_orig, path_mod, orig, mod = result.data
         if orig == mod:
-            self.call_from_thread(self._set_diff_text, "No diff available (no changes)")
+            self.call_from_thread(self._set_diff_text, "No changes (working tree clean)")
             return
 
         try:

@@ -108,7 +108,7 @@ def compute_diff(actor: Actor) -> DiffResult:
             capture_output=True, text=True, cwd=worktree_dir,
         )
         if result.returncode != 0 or not result.stdout.strip():
-            return DiffResult(reason="no changes")
+            return DiffResult(reason="no changes (working tree clean)")
 
         files = result.stdout.strip().split("\n")
 
