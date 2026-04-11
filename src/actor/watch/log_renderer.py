@@ -29,8 +29,18 @@ def render_log_entries(log: RichLog, entries: list, colors: ThemeColors) -> None
         log.write(Text("No logs yet", style="dim"))
         return
 
+    first = True
     for entry in entries:
-        log.write(Text(""))
+        # Skip invisible entries
+        if entry.kind == LogEntryKind.TOOL_RESULT:
+            continue
+        from .render_tool import HIDDEN_TOOLS
+        if entry.kind == LogEntryKind.TOOL_USE and entry.name in HIDDEN_TOOLS:
+            continue
+
+        if not first:
+            log.write(Text(""))
+        first = False
 
         if entry.kind == LogEntryKind.USER:
             render_user(log, entry, colors)
@@ -40,8 +50,6 @@ def render_log_entries(log: RichLog, entries: list, colors: ThemeColors) -> None
             _render_thinking(log, entry)
         elif entry.kind == LogEntryKind.TOOL_USE:
             render_tool(log, entry, colors)
-        elif entry.kind == LogEntryKind.TOOL_RESULT:
-            pass
 
 
 def _render_thinking(log: RichLog, entry) -> None:
