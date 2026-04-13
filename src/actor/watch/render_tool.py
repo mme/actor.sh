@@ -48,10 +48,10 @@ def tool_header(name: str, params: str, ctx: ToolRenderContext) -> Table:
 def connector(text: str | Text, dim: bool = True) -> Table:
     """Render a connector line: ⎿  content"""
     table = Table(show_header=False, box=None, padding=0, expand=True)
-    table.add_column(width=6, no_wrap=True)
+    table.add_column(width=4, no_wrap=True)
     table.add_column(ratio=1)
     content = text if isinstance(text, Text) else Text(text, style="dim" if dim else "")
-    table.add_row(Text("  ⎿  ", style="dim"), content)
+    table.add_row(Text("  ⎿ ", style="dim"), content)
     return table
 
 
@@ -70,13 +70,11 @@ def truncate_output(text: str, max_lines: int = MAX_OUTPUT_LINES) -> str:
 def render_bash(ctx: ToolRenderContext) -> None:
     """Render Bash tool call with truncated output."""
     command = ctx.data.get("command", "")
-    # Collapse to single line for display
-    display = " ".join(command.split())
-    if len(display) > MAX_COMMAND_DISPLAY_CHARS:
-        display = display[:MAX_COMMAND_DISPLAY_CHARS] + "…"
-    ctx.log.write(tool_header("Bash", display, ctx), expand=True)
+    if len(command) > MAX_COMMAND_DISPLAY_CHARS:
+        command = command[:MAX_COMMAND_DISPLAY_CHARS] + "…"
+    ctx.log.write(tool_header("Bash", command, ctx), expand=True)
     if ctx.result:
-        ctx.log.write(connector(truncate_output(ctx.result)), expand=True)
+        ctx.log.write(connector(truncate_output(ctx.result), dim=False), expand=True)
     else:
         ctx.log.write(connector("(No output)"), expand=True)
 
