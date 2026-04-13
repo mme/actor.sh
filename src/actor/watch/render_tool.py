@@ -70,17 +70,13 @@ def truncate_output(text: str, max_lines: int = MAX_OUTPUT_LINES) -> str:
 def render_bash(ctx: ToolRenderContext) -> None:
     """Render Bash tool call with truncated output."""
     command = ctx.data.get("command", "")
-    # Truncate command display
-    lines = command.split("\n")
-    if len(lines) > MAX_COMMAND_DISPLAY_LINES:
-        display = "\n".join(lines[:MAX_COMMAND_DISPLAY_LINES]).strip() + "…"
-    elif len(command) > MAX_COMMAND_DISPLAY_CHARS:
-        display = command[:MAX_COMMAND_DISPLAY_CHARS] + "…"
-    else:
-        display = command
+    # Collapse to single line for display
+    display = " ".join(command.split())
+    if len(display) > MAX_COMMAND_DISPLAY_CHARS:
+        display = display[:MAX_COMMAND_DISPLAY_CHARS] + "…"
     ctx.log.write(tool_header("Bash", display, ctx), expand=True)
     if ctx.result:
-        ctx.log.write(connector(truncate_output(ctx.result), dim=False), expand=True)
+        ctx.log.write(connector(truncate_output(ctx.result)), expand=True)
     else:
         ctx.log.write(connector("(No output)"), expand=True)
 
