@@ -303,12 +303,7 @@ class ActorWatchApp(App):
         tabs = self.query_one("#tabs", TabbedContent)
         tab = tabs.get_tab("diff")
         if added or removed:
-            parts = []
-            if added:
-                parts.append(f"+{added}")
-            if removed:
-                parts.append(f"-{removed}")
-            tab.label = f"Diff ({', '.join(parts)})"
+            tab.label = f"Diff ±{added + removed}"
         else:
             tab.label = "Diff"
 
