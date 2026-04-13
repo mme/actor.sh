@@ -22,7 +22,7 @@ def render_log_entries(log: RichLog, entries: list, colors: ThemeColors) -> None
         log.write(Text("No logs yet", style="dim"))
         return
 
-    # Pair each TOOL_USE with its following TOOL_RESULT
+    # Pair tool uses with their results
     tool_results: dict[int, object] = {}
     for idx, entry in enumerate(entries):
         if entry.kind == LogEntryKind.TOOL_USE:
@@ -35,7 +35,6 @@ def render_log_entries(log: RichLog, entries: list, colors: ThemeColors) -> None
 
     first = True
     for idx, entry in enumerate(entries):
-        # Skip invisible entries
         if entry.kind == LogEntryKind.TOOL_RESULT:
             continue
         if entry.kind == LogEntryKind.TOOL_USE and entry.name in HIDDEN_TOOLS:
