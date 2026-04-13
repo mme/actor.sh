@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+from typing import Callable
 
 from rich.table import Table
 from rich.text import Text
@@ -12,23 +14,38 @@ from textual.widgets import RichLog
 from .types import ThemeColors
 from .diff_render import try_render_tool_diff
 
+MAX_COMMAND_DISPLAY_CHARS = 160
+MAX_COMMAND_DISPLAY_LINES = 2
+MAX_OUTPUT_LINES = 3
 
-# -- Tool header -------------------------------------------------------------
 
-def _tool_header(name: str, params: str, colors: ThemeColors, success: bool = True) -> Table:
+# -- Render context ----------------------------------------------------------
+
+@dataclass
+class ToolRenderContext:
+    """Everything a tool renderer needs."""
+    log: RichLog
+    name: str
+    data: dict
+    colors: ThemeColors
+    result: str
+
+
+# -- Shared helpers ----------------------------------------------------------
+
+def tool_header(name: str, params: str, ctx: ToolRenderContext) -> Table:
     """Render a tool header: ⏺ ToolName(params)"""
-    color = colors.success_color if success else colors.error_color
     table = Table(show_header=False, box=None, padding=0, expand=True)
     table.add_column(width=2, no_wrap=True)
     table.add_column(ratio=1)
     table.add_row(
-        Text("⏺ ", style=f"{color}"),
+        Text("⏺ ", style=ctx.colors.success_color),
         Text.assemble((name, "bold"), (f"({params})", "dim") if params else ("", "")),
     )
     return table
 
 
-def _connector(text: str | Text, dim: bool = True) -> Table:
+def connector(text: str | Text, dim: bool = True) -> Table:
     """Render a connector line: ⎿  content"""
     table = Table(show_header=False, box=None, padding=0, expand=True)
     table.add_column(width=6, no_wrap=True)
@@ -38,148 +55,175 @@ def _connector(text: str | Text, dim: bool = True) -> Table:
     return table
 
 
-# -- Tool-specific parsers ---------------------------------------------------
-
-def _parse_input(input_json: str) -> dict:
-    """Safely parse tool input JSON."""
-    try:
-        return json.loads(input_json)
-    except (json.JSONDecodeError, TypeError):
-        return {}
+def truncate_output(text: str, max_lines: int = MAX_OUTPUT_LINES) -> str:
+    """Truncate output to max_lines, appending +N lines if truncated."""
+    lines = text.strip().splitlines()
+    if len(lines) <= max_lines:
+        return text.strip()
+    truncated = "\n".join(lines[:max_lines])
+    remaining = len(lines) - max_lines
+    return f"{truncated}\n... +{remaining} lines"
 
 
 # -- Individual tool renderers -----------------------------------------------
 
-def _render_bash(log: RichLog, data: dict, colors: ThemeColors) -> None:
-    """Render Bash tool call."""
-    command = data.get("command", "")
-    description = data.get("description", "")
-    display = description or command
-    # Truncate long commands
-    if len(display) > 160:
-        display = display[:157] + "..."
-    log.write(_tool_header("Bash", display, colors), expand=True)
+def render_bash(ctx: ToolRenderContext) -> None:
+    """Render Bash tool call with truncated output."""
+    command = ctx.data.get("command", "")
+    # Truncate command display
+    lines = command.split("\n")
+    if len(lines) > MAX_COMMAND_DISPLAY_LINES:
+        display = "\n".join(lines[:MAX_COMMAND_DISPLAY_LINES]).strip() + "…"
+    elif len(command) > MAX_COMMAND_DISPLAY_CHARS:
+        display = command[:MAX_COMMAND_DISPLAY_CHARS] + "…"
+    else:
+        display = command
+    ctx.log.write(tool_header("Bash", display, ctx), expand=True)
+    if ctx.result:
+        ctx.log.write(connector(truncate_output(ctx.result), dim=False), expand=True)
+    else:
+        ctx.log.write(connector("(No output)"), expand=True)
 
 
-def _render_read(log: RichLog, data: dict, colors: ThemeColors) -> None:
+def render_read(ctx: ToolRenderContext) -> None:
     """Render Read tool call."""
-    file_path = data.get("file_path", "")
+    file_path = ctx.data.get("file_path", "")
     suffix = ""
-    if data.get("offset") and data.get("limit"):
-        suffix = f", lines {data['offset']}-{data['offset'] + data['limit']}"
-    elif data.get("pages"):
-        suffix = f", pages {data['pages']}"
-    log.write(_tool_header("Read", file_path + suffix, colors), expand=True)
+    if ctx.data.get("offset") and ctx.data.get("limit"):
+        suffix = f", lines {ctx.data['offset']}-{ctx.data['offset'] + ctx.data['limit']}"
+    elif ctx.data.get("pages"):
+        suffix = f", pages {ctx.data['pages']}"
+    ctx.log.write(tool_header("Read", file_path + suffix, ctx), expand=True)
+    if ctx.result:
+        # Count lines in result
+        line_count = len(ctx.result.strip().splitlines())
+        ctx.log.write(connector(Text.assemble(
+            "Read ", (str(line_count), "bold"), " lines",
+        )), expand=True)
 
 
-def _render_write(log: RichLog, data: dict, colors: ThemeColors) -> None:
-    """Render Write tool call with file content preview."""
-    file_path = data.get("file_path", "")
-    content = data.get("content", "")
+def render_write(ctx: ToolRenderContext) -> None:
+    """Render Write tool call."""
+    file_path = ctx.data.get("file_path", "")
+    content = ctx.data.get("content", "")
     line_count = len(content.splitlines()) if content else 0
-    log.write(_tool_header("Write", file_path, colors), expand=True)
-    log.write(_connector(Text.assemble(
+    ctx.log.write(tool_header("Write", file_path, ctx), expand=True)
+    ctx.log.write(connector(Text.assemble(
         "Wrote ", (str(line_count), "bold"), " lines",
     )), expand=True)
 
 
-def _render_edit(log: RichLog, data: dict, colors: ThemeColors) -> None:
+def render_edit(ctx: ToolRenderContext) -> None:
     """Render Edit tool call with diff."""
-    file_path = data.get("file_path", "")
-    diff = try_render_tool_diff("Edit", json.dumps(data), dark=colors.is_dark)
+    file_path = ctx.data.get("file_path", "")
+    diff = try_render_tool_diff("Edit", json.dumps(ctx.data), dark=ctx.colors.is_dark)
     if diff:
-        log.write(diff, expand=True)
+        ctx.log.write(diff, expand=True)
     else:
-        log.write(_tool_header("Update", file_path, colors), expand=True)
+        ctx.log.write(tool_header("Update", file_path, ctx), expand=True)
 
 
-def _render_glob(log: RichLog, data: dict, colors: ThemeColors) -> None:
+def render_glob(ctx: ToolRenderContext) -> None:
     """Render Glob/Search tool call."""
-    pattern = data.get("pattern", "")
-    path = data.get("path", "")
+    pattern = ctx.data.get("pattern", "")
+    path = ctx.data.get("path", "")
     params = f'pattern: "{pattern}"'
     if path:
         params += f', path: "{path}"'
-    log.write(_tool_header("Search", params, colors), expand=True)
+    ctx.log.write(tool_header("Search", params, ctx), expand=True)
+    if ctx.result:
+        lines = ctx.result.strip().splitlines()
+        ctx.log.write(connector(Text.assemble(
+            "Found ", (str(len(lines)), "bold"), " files",
+        )), expand=True)
 
 
-def _render_grep(log: RichLog, data: dict, colors: ThemeColors) -> None:
+def render_grep(ctx: ToolRenderContext) -> None:
     """Render Grep/Search tool call."""
-    pattern = data.get("pattern", "")
-    path = data.get("path", "")
+    pattern = ctx.data.get("pattern", "")
+    path = ctx.data.get("path", "")
     params = f'pattern: "{pattern}"'
     if path:
         params += f', path: "{path}"'
-    log.write(_tool_header("Search", params, colors), expand=True)
+    ctx.log.write(tool_header("Search", params, ctx), expand=True)
+    if ctx.result:
+        lines = ctx.result.strip().splitlines()
+        ctx.log.write(connector(Text.assemble(
+            "Found ", (str(len(lines)), "bold"), " results",
+        )), expand=True)
 
 
-def _render_web_fetch(log: RichLog, data: dict, colors: ThemeColors) -> None:
+def render_web_fetch(ctx: ToolRenderContext) -> None:
     """Render WebFetch tool call."""
-    url = data.get("url", "")
-    log.write(_tool_header("WebFetch", url, colors), expand=True)
+    url = ctx.data.get("url", "")
+    ctx.log.write(tool_header("WebFetch", url, ctx), expand=True)
 
 
-def _render_web_search(log: RichLog, data: dict, colors: ThemeColors) -> None:
+def render_web_search(ctx: ToolRenderContext) -> None:
     """Render WebSearch tool call."""
-    query = data.get("query", "")
-    log.write(_tool_header("WebSearch", f'"{query}"', colors), expand=True)
+    query = ctx.data.get("query", "")
+    ctx.log.write(tool_header("WebSearch", f'"{query}"', ctx), expand=True)
 
 
-def _render_agent(log: RichLog, data: dict, colors: ThemeColors) -> None:
+def render_agent(ctx: ToolRenderContext) -> None:
     """Render Agent tool call."""
-    description = data.get("description", data.get("prompt", ""))
+    description = ctx.data.get("description", ctx.data.get("prompt", ""))
     if len(description) > 100:
         description = description[:97] + "..."
-    log.write(_tool_header("Agent", description, colors), expand=True)
+    ctx.log.write(tool_header("Agent", description, ctx), expand=True)
 
 
-def _render_fallback(log: RichLog, name: str, data: dict, colors: ThemeColors) -> None:
+def render_fallback(ctx: ToolRenderContext) -> None:
     """Render unknown tool call with generic display."""
-    # Try to find a meaningful parameter to show
     display = ""
     for key in ("file_path", "path", "name", "command", "query", "url", "pattern", "prompt", "description"):
-        if key in data:
-            val = str(data[key])
+        if key in ctx.data:
+            val = str(ctx.data[key])
             if len(val) > 100:
                 val = val[:97] + "..."
             display = val
             break
-    if not display and data:
-        display = str(data)[:100]
-    log.write(_tool_header(name, display, colors), expand=True)
+    if not display and ctx.data:
+        display = str(ctx.data)[:100]
+    ctx.log.write(tool_header(ctx.name, display, ctx), expand=True)
 
 
-# -- Tool renderer dispatch --------------------------------------------------
+# -- Registry ----------------------------------------------------------------
 
-TOOL_RENDERERS = {
-    "Bash": _render_bash,
-    "Read": _render_read,
-    "Write": _render_write,
-    "Edit": _render_edit,
-    "Glob": _render_glob,
-    "Grep": _render_grep,
-    "WebFetch": _render_web_fetch,
-    "WebSearch": _render_web_search,
-    "Agent": _render_agent,
+TOOL_RENDERERS: dict[str, Callable[[ToolRenderContext], None]] = {
+    "Bash": render_bash,
+    "Read": render_read,
+    "Write": render_write,
+    "Edit": render_edit,
+    "Glob": render_glob,
+    "Grep": render_grep,
+    "WebFetch": render_web_fetch,
+    "WebSearch": render_web_search,
+    "Agent": render_agent,
 }
 
-# Tools to hide entirely
 HIDDEN_TOOLS = {"TodoWrite", "TodoRead", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "ToolSearch"}
 
 
-def render_tool(log: RichLog, entry, colors: ThemeColors) -> None:
-    """Render a tool use entry in Claude Code style."""
-    name = entry.name
+# -- Dispatch ----------------------------------------------------------------
 
-    # Hide invisible tools
-    if name in HIDDEN_TOOLS:
+def render_tool(log: RichLog, entry, colors: ThemeColors, result=None) -> None:
+    """Render a tool use entry in Claude Code style."""
+    if entry.name in HIDDEN_TOOLS:
         return
 
-    data = _parse_input(entry.input)
+    try:
+        data = json.loads(entry.input) if entry.input else {}
+    except (json.JSONDecodeError, TypeError):
+        data = {}
 
-    # Try specific renderer
-    renderer = TOOL_RENDERERS.get(name)
-    if renderer:
-        renderer(log, data, colors)
-    else:
-        _render_fallback(log, name, data, colors)
+    ctx = ToolRenderContext(
+        log=log,
+        name=entry.name,
+        data=data,
+        colors=colors,
+        result=result.content if result else "",
+    )
+
+    renderer = TOOL_RENDERERS.get(entry.name, render_fallback)
+    renderer(ctx)
