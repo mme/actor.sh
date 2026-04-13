@@ -182,8 +182,14 @@ def render_edit_diff(
     new_string: str,
     dark: bool = True,
     context_lines: int = 3,
+    style: str = "log",
 ) -> Group:
-    """Render a file edit diff as a Rich Group renderable."""
+    """Render a file edit diff as a Rich Group renderable.
+
+    Args:
+        style: "log" for Claude Code tool call style (⏺ Edit header),
+               "diff" for magit-style (file status + path).
+    """
     colors = DARK_COLORS if dark else LIGHT_COLORS
     lexer = _get_lexer(file_path)
 
@@ -207,13 +213,14 @@ def render_edit_diff(
 
     for line in diff:
         if line.startswith('@@'):
-            # Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
-            match = re.match(r'^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@', line)
+            match = re.match(r'^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)', line)
             if match:
                 old_num = int(match.group(1))
                 new_num = int(match.group(2))
-                if entries:  # Add ellipsis between hunks
-                    entries.append({"type": "ellipsis"})
+                if entries:
+                    entries.append({"type": "hunk", "header": line})
+                else:
+                    entries.append({"type": "hunk", "header": line})
             continue
         if line.startswith('---') or line.startswith('+++'):
             continue
@@ -253,22 +260,35 @@ def render_edit_diff(
     # Build output
     output: list = []
 
-    # Header
-    header = Text()
-    header.append("⏺ ", style="bold")
-    header.append("Edit", style="bold")
-    header.append(f"({file_path})", style="dim")
-    output.append(header)
+    if style == "log":
+        # Claude Code tool call style
+        header = Text()
+        header.append("⏺ ", style="bold")
+        header.append("Edit", style="bold")
+        header.append(f"({file_path})", style="dim")
+        output.append(header)
 
-    # Summary
-    summary = Text("  ⎿  ", style="dim")
-    if added and removed:
-        summary.append(f"Added {added}, removed {removed} lines", style="dim")
-    elif added:
-        summary.append(f"Added {added} lines", style="dim")
-    elif removed:
-        summary.append(f"Removed {removed} lines", style="dim")
-    output.append(summary)
+        summary = Text("  ⎿  ", style="dim")
+        if added and removed:
+            summary.append(f"Added {added}, removed {removed} lines", style="dim")
+        elif added:
+            summary.append(f"Added {added} lines", style="dim")
+        elif removed:
+            summary.append(f"Removed {removed} lines", style="dim")
+        output.append(summary)
+    else:
+        # Magit-style file header
+        file_status = "new file" if not old_string else "deleted" if not new_string else "modified"
+        header = Text()
+        header.append(f"{file_status}   ", style="bold")
+        header.append(file_path)
+        stats = Text()
+        if added:
+            stats.append(f" +{added}", style=f"{colors.added_marker}")
+        if removed:
+            stats.append(f" -{removed}", style=f"{colors.removed_marker}")
+        header.append_text(stats)
+        output.append(header)
 
     # Diff table
     table = Table(
@@ -282,12 +302,22 @@ def render_edit_diff(
     table.add_column(ratio=1)                              # code
 
     for i, entry in enumerate(entries):
-        if entry["type"] == "ellipsis":
-            table.add_row(
-                Text("", style="dim"),
-                Text("", style="dim"),
-                Text("...", style="dim"),
-            )
+        if entry["type"] == "hunk":
+            if style == "diff":
+                if table.row_count:
+                    output.append(table)
+                    table = Table(show_header=False, box=None, padding=0, expand=True)
+                    table.add_column(width=num_width + 2, no_wrap=True)
+                    table.add_column(width=1, no_wrap=True)
+                    table.add_column(ratio=1)
+                output.append(Text(entry["header"], style=f"{colors.dim}"))
+                output.append(Text(""))
+            else:
+                table.add_row(
+                    Text("", style="dim"),
+                    Text("", style="dim"),
+                    Text("...", style="dim"),
+                )
             continue
 
         num = entry["num"]

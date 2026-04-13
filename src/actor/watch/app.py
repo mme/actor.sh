@@ -152,13 +152,13 @@ class ActorWatchApp(App):
 
     @staticmethod
     def _fetch_actors() -> tuple[list[Actor], dict[str, Status]]:
-        db = Database.open(_db_path())
-        pm = RealProcessManager()
-        actors = db.list_actors()
-        statuses = {}
-        for a in actors:
-            statuses[a.name] = db.resolve_actor_status(a.name, pm)
-        return actors, statuses
+        with Database.open(_db_path()) as db:
+            pm = RealProcessManager()
+            actors = db.list_actors()
+            statuses = {}
+            for a in actors:
+                statuses[a.name] = db.resolve_actor_status(a.name, pm)
+            return actors, statuses
 
     @work(thread=True)
     def _poll_actors_async(self) -> None:
@@ -277,37 +277,53 @@ class ActorWatchApp(App):
 
         result = compute_diff(actor)
 
-        if result.data is None:
+        if result.files is None:
             self.call_from_thread(self._set_diff_text, result.reason)
-            return
-
-        path_orig, path_mod, orig, mod = result.data
-        if orig == mod:
-            self.call_from_thread(self._set_diff_text, "Working tree clean")
             return
 
         try:
             is_dark = self.current_theme.dark if self.current_theme else True
-            renderable = render_edit_diff(path_mod, orig, mod, dark=is_dark)
-            self.call_from_thread(self._set_diff_widget, Static(renderable))
+            from rich.console import Group
+            import difflib
+            parts = []
+            total_added = 0
+            total_removed = 0
+            for fd in result.files:
+                parts.append(render_edit_diff(fd.file_path, fd.old_content, fd.new_content, dark=is_dark, style="diff"))
+                for line in difflib.unified_diff(fd.old_content.splitlines(), fd.new_content.splitlines(), lineterm=""):
+                    if line.startswith("+") and not line.startswith("+++"):
+                        total_added += 1
+                    elif line.startswith("-") and not line.startswith("---"):
+                        total_removed += 1
+            self.call_from_thread(self._set_diff_widget, Static(Group(*parts)), total_added, total_removed)
         except Exception as e:
             self.call_from_thread(self._set_diff_text, f"Diff error: {e}")
+
+    def _update_diff_tab_label(self, added: int = 0, removed: int = 0) -> None:
+        tabs = self.query_one("#tabs", TabbedContent)
+        tab = tabs.get_tab("diff")
+        if added or removed:
+            tab.label = f"Diff (±{added + removed})"
+        else:
+            tab.label = "Diff"
 
     def _set_diff_text(self, text: str) -> None:
         scroll = self.query_one("#diff-scroll", VerticalScroll)
         scroll.remove_children()
         scroll.mount(Static(text))
+        self._update_diff_tab_label()
 
-    def _set_diff_widget(self, dv: object) -> None:
+    def _set_diff_widget(self, dv: object, added: int = 0, removed: int = 0) -> None:
         scroll = self.query_one("#diff-scroll", VerticalScroll)
         scroll.remove_children()
         scroll.mount(dv)
+        self._update_diff_tab_label(added, removed)
 
     # -- Runs ----------------------------------------------------------------
 
     def _refresh_runs(self, actor: Actor) -> None:
-        db = Database.open(_db_path())
-        runs, _total = db.list_runs(actor.name, limit=50)
+        with Database.open(_db_path()) as db:
+            runs, _total = db.list_runs(actor.name, limit=50)
         table = self.query_one("#runs-table", DataTable)
         table.clear(columns=True)
         table.add_columns("#", "Status", "Exit", "Prompt", "Started", "Duration")

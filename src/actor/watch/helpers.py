@@ -79,10 +79,18 @@ def read_log_entries(actor: Actor) -> list:
 
 # -- Compute git diff --------------------------------------------------------
 
+class FileDiff:
+    """Diff for a single file."""
+    def __init__(self, file_path: str, old_content: str, new_content: str) -> None:
+        self.file_path = file_path
+        self.old_content = old_content
+        self.new_content = new_content
+
+
 class DiffResult:
     """Result of compute_diff."""
-    def __init__(self, data: tuple[str, str, str, str] | None = None, reason: str = "") -> None:
-        self.data = data
+    def __init__(self, files: list[FileDiff] | None = None, reason: str = "") -> None:
+        self.files = files
         self.reason = reason
 
 
@@ -131,27 +139,26 @@ def compute_diff(actor: Actor) -> DiffResult:
         if not files:
             return DiffResult(reason="working tree clean")
 
-        orig_parts = []
-        mod_parts = []
+        file_diffs = []
         for f in files:
             orig_result = subprocess.run(
                 ["git", "show", f"{diff_ref}:{f}"],
                 capture_output=True, text=True, cwd=worktree_dir,
             )
-            orig_parts.append(f"# {f}\n" + (orig_result.stdout if orig_result.returncode == 0 else ""))
+            old_content = orig_result.stdout if orig_result.returncode == 0 else ""
 
             file_path = Path(worktree_dir) / f
             try:
-                mod_content = file_path.read_text()
+                new_content = file_path.read_text()
             except (FileNotFoundError, OSError):
-                mod_content = ""
-            mod_parts.append(f"# {f}\n" + mod_content)
+                new_content = ""
 
-        return DiffResult(data=(
-            diff_ref[:12],
-            f"{actor.name} (working tree)",
-            "\n".join(orig_parts),
-            "\n".join(mod_parts),
-        ))
+            if old_content != new_content:
+                file_diffs.append(FileDiff(f, old_content, new_content))
+
+        if not file_diffs:
+            return DiffResult(reason="working tree clean")
+
+        return DiffResult(files=file_diffs)
     except Exception:
         return DiffResult(reason="error")

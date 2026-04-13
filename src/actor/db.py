@@ -22,6 +22,15 @@ class Database:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
+    def close(self) -> None:
+        self._conn.close()
+
+    def __enter__(self) -> Database:
+        return self
+
+    def __exit__(self, *args) -> None:
+        self.close()
+
     @classmethod
     def open(cls, path: str) -> Database:
         if path == ":memory:":
