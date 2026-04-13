@@ -277,19 +277,17 @@ class ActorWatchApp(App):
 
         result = compute_diff(actor)
 
-        if result.data is None:
+        if result.files is None:
             self.call_from_thread(self._set_diff_text, result.reason)
-            return
-
-        path_orig, path_mod, orig, mod = result.data
-        if orig == mod:
-            self.call_from_thread(self._set_diff_text, "Working tree clean")
             return
 
         try:
             is_dark = self.current_theme.dark if self.current_theme else True
-            renderable = render_edit_diff(path_mod, orig, mod, dark=is_dark)
-            self.call_from_thread(self._set_diff_widget, Static(renderable))
+            from rich.console import Group
+            parts = []
+            for fd in result.files:
+                parts.append(render_edit_diff(fd.file_path, fd.old_content, fd.new_content, dark=is_dark))
+            self.call_from_thread(self._set_diff_widget, Static(Group(*parts)))
         except Exception as e:
             self.call_from_thread(self._set_diff_text, f"Diff error: {e}")
 
