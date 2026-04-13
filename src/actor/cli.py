@@ -180,7 +180,7 @@ Examples:
         "watch",
         help="Open real-time dashboard (browser + terminal)",
     )
-    p_watch.add_argument("--no-serve", action="store_true", help="Run in terminal only, no browser")
+    p_watch.add_argument("--serve", action="store_true", help="Serve in browser via textual-serve on port 2204")
 
     # -- discard --
     p_discard = sub.add_parser(
@@ -211,7 +211,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     if args.command == "watch":
         from .watch import run_watch
-        run_watch(serve=not args.no_serve)
+        run_watch(serve=args.serve)
         return
 
     try:
