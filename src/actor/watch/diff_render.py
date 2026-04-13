@@ -310,7 +310,8 @@ def render_edit_diff(
                     table.add_column(width=num_width + 2, no_wrap=True)
                     table.add_column(width=1, no_wrap=True)
                     table.add_column(ratio=1)
-                output.append(Text(entry["header"], style="#D77757"))
+                output.append(Text(entry["header"], style=f"{colors.dim}"))
+                output.append(Text(""))
             else:
                 table.add_row(
                     Text("", style="dim"),
