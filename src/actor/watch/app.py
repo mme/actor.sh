@@ -82,7 +82,6 @@ class ActorWatchApp(App):
         Binding("p", "command_palette", "Palette"),
         Binding("l", "show_tab('logs')", "Logs"),
         Binding("d", "show_tab('diff')", "Diff"),
-        Binding("r", "show_tab('runs')", "Runs"),
         Binding("i", "show_tab('info')", "Info"),
     ]
 
@@ -99,13 +98,10 @@ class ActorWatchApp(App):
                         yield RichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False)
                     with TabPane("Diff", id="diff"):
                         yield VerticalScroll(id="diff-scroll")
-                    with TabPane("Runs", id="runs"):
-                        yield VerticalScroll(
-                            DataTable(id="runs-table"),
-                        )
                     with TabPane("Info", id="info"):
                         yield VerticalScroll(
                             Static("Select an actor", id="info-content"),
+                            DataTable(id="runs-table"),
                         )
         yield Static("Loading...", id="status-bar")
         yield Footer()
@@ -347,7 +343,6 @@ class ActorWatchApp(App):
         focus_map = {
             "logs": "#logs-content",
             "diff": "#diff-scroll",
-            "runs": "#runs-table",
             "info": "#info-content",
         }
         selector = focus_map.get(tab_id)
@@ -366,7 +361,7 @@ class ActorWatchApp(App):
             self._maybe_refresh_diff(force=True)
         self._focus_detail_content(tab_id)
 
-    TAB_ORDER = ["logs", "diff", "runs", "info"]
+    TAB_ORDER = ["logs", "diff", "info"]
 
     def _tree_has_focus(self) -> bool:
         return self.query_one(ActorTree).has_focus
