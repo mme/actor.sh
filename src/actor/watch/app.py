@@ -284,22 +284,45 @@ class ActorWatchApp(App):
         try:
             is_dark = self.current_theme.dark if self.current_theme else True
             from rich.console import Group
+            import difflib
             parts = []
+            total_added = 0
+            total_removed = 0
             for fd in result.files:
                 parts.append(render_edit_diff(fd.file_path, fd.old_content, fd.new_content, dark=is_dark, style="diff"))
-            self.call_from_thread(self._set_diff_widget, Static(Group(*parts)))
+                for line in difflib.unified_diff(fd.old_content.splitlines(), fd.new_content.splitlines(), lineterm=""):
+                    if line.startswith("+") and not line.startswith("+++"):
+                        total_added += 1
+                    elif line.startswith("-") and not line.startswith("---"):
+                        total_removed += 1
+            self.call_from_thread(self._set_diff_widget, Static(Group(*parts)), total_added, total_removed)
         except Exception as e:
             self.call_from_thread(self._set_diff_text, f"Diff error: {e}")
+
+    def _update_diff_tab_label(self, added: int = 0, removed: int = 0) -> None:
+        tabs = self.query_one("#tabs", TabbedContent)
+        tab = tabs.get_tab("diff")
+        if added or removed:
+            parts = []
+            if added:
+                parts.append(f"+{added}")
+            if removed:
+                parts.append(f"-{removed}")
+            tab.label = f"Diff ({', '.join(parts)})"
+        else:
+            tab.label = "Diff"
 
     def _set_diff_text(self, text: str) -> None:
         scroll = self.query_one("#diff-scroll", VerticalScroll)
         scroll.remove_children()
         scroll.mount(Static(text))
+        self._update_diff_tab_label()
 
-    def _set_diff_widget(self, dv: object) -> None:
+    def _set_diff_widget(self, dv: object, added: int = 0, removed: int = 0) -> None:
         scroll = self.query_one("#diff-scroll", VerticalScroll)
         scroll.remove_children()
         scroll.mount(dv)
+        self._update_diff_tab_label(added, removed)
 
     # -- Runs ----------------------------------------------------------------
 
