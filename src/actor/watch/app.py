@@ -79,6 +79,7 @@ class ActorWatchApp(App):
         Binding("right,ctrl+f", "navigate_right", show=False),
         Binding("up,ctrl+p", "navigate_up", show=False),
         Binding("down,ctrl+n", "navigate_down", show=False),
+        Binding("ctrl+p", "command_palette", show=False),
         Binding("p", "command_palette", "Palette"),
         Binding("l", "show_tab('logs')", "Logs"),
         Binding("d", "show_tab('diff')", "Diff"),
