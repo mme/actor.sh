@@ -113,14 +113,23 @@ def compute_diff(actor: Actor) -> DiffResult:
         else:
             diff_ref = base_branch
 
+        # Get tracked files that changed
         result = subprocess.run(
             ["git", "diff", "--name-only", diff_ref],
             capture_output=True, text=True, cwd=worktree_dir,
         )
-        if result.returncode != 0 or not result.stdout.strip():
-            return DiffResult(reason="working tree clean")
+        tracked_files = result.stdout.strip().split("\n") if result.returncode == 0 and result.stdout.strip() else []
 
-        files = result.stdout.strip().split("\n")
+        # Get untracked files (new files the actor created)
+        untracked_result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True, cwd=worktree_dir,
+        )
+        untracked_files = untracked_result.stdout.strip().split("\n") if untracked_result.returncode == 0 and untracked_result.stdout.strip() else []
+
+        files = tracked_files + untracked_files
+        if not files:
+            return DiffResult(reason="working tree clean")
 
         orig_parts = []
         mod_parts = []
