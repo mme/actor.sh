@@ -103,8 +103,18 @@ def compute_diff(actor: Actor) -> DiffResult:
         base_branch = "HEAD"
 
     try:
+        # Find the merge base — the point where the actor branched off
+        merge_base_result = subprocess.run(
+            ["git", "merge-base", base_branch, "HEAD"],
+            capture_output=True, text=True, cwd=worktree_dir,
+        )
+        if merge_base_result.returncode == 0 and merge_base_result.stdout.strip():
+            diff_ref = merge_base_result.stdout.strip()
+        else:
+            diff_ref = base_branch
+
         result = subprocess.run(
-            ["git", "diff", "--name-only", base_branch],
+            ["git", "diff", "--name-only", diff_ref],
             capture_output=True, text=True, cwd=worktree_dir,
         )
         if result.returncode != 0 or not result.stdout.strip():
@@ -116,7 +126,7 @@ def compute_diff(actor: Actor) -> DiffResult:
         mod_parts = []
         for f in files:
             orig_result = subprocess.run(
-                ["git", "show", f"{base_branch}:{f}"],
+                ["git", "show", f"{diff_ref}:{f}"],
                 capture_output=True, text=True, cwd=worktree_dir,
             )
             orig_parts.append(f"# {f}\n" + (orig_result.stdout if orig_result.returncode == 0 else ""))
@@ -129,7 +139,7 @@ def compute_diff(actor: Actor) -> DiffResult:
             mod_parts.append(f"# {f}\n" + mod_content)
 
         return DiffResult(data=(
-            base_branch,
+            diff_ref[:12],
             f"{actor.name} (working tree)",
             "\n".join(orig_parts),
             "\n".join(mod_parts),
