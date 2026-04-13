@@ -152,13 +152,13 @@ class ActorWatchApp(App):
 
     @staticmethod
     def _fetch_actors() -> tuple[list[Actor], dict[str, Status]]:
-        db = Database.open(_db_path())
-        pm = RealProcessManager()
-        actors = db.list_actors()
-        statuses = {}
-        for a in actors:
-            statuses[a.name] = db.resolve_actor_status(a.name, pm)
-        return actors, statuses
+        with Database.open(_db_path()) as db:
+            pm = RealProcessManager()
+            actors = db.list_actors()
+            statuses = {}
+            for a in actors:
+                statuses[a.name] = db.resolve_actor_status(a.name, pm)
+            return actors, statuses
 
     @work(thread=True)
     def _poll_actors_async(self) -> None:
@@ -306,8 +306,8 @@ class ActorWatchApp(App):
     # -- Runs ----------------------------------------------------------------
 
     def _refresh_runs(self, actor: Actor) -> None:
-        db = Database.open(_db_path())
-        runs, _total = db.list_runs(actor.name, limit=50)
+        with Database.open(_db_path()) as db:
+            runs, _total = db.list_runs(actor.name, limit=50)
         table = self.query_one("#runs-table", DataTable)
         table.clear(columns=True)
         table.add_columns("#", "Status", "Exit", "Prompt", "Started", "Duration")
