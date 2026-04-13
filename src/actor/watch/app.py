@@ -79,6 +79,7 @@ class ActorWatchApp(App):
         Binding("right,ctrl+f", "navigate_right", show=False),
         Binding("up,ctrl+p", "navigate_up", show=False),
         Binding("down,ctrl+n", "navigate_down", show=False),
+        Binding("a", "focus_actors", "Actors"),
         Binding("p", "command_palette", "Palette"),
         Binding("l", "show_tab('logs')", "Logs"),
         Binding("d", "show_tab('diff')", "Diff"),
@@ -362,6 +363,9 @@ class ActorWatchApp(App):
         self._focus_detail_content(tab_id)
 
     TAB_ORDER = ["logs", "diff", "info"]
+
+    def action_focus_actors(self) -> None:
+        self.query_one(ActorTree).focus()
 
     def _tree_has_focus(self) -> bool:
         return self.query_one(ActorTree).has_focus
