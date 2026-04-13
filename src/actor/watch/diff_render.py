@@ -304,11 +304,13 @@ def render_edit_diff(
     for i, entry in enumerate(entries):
         if entry["type"] == "hunk":
             if style == "diff":
-                table.add_row(
-                    Text("", style="dim"),
-                    Text("", style="dim"),
-                    Text(entry["header"], style="dim cyan"),
-                )
+                if table.row_count:
+                    output.append(table)
+                    table = Table(show_header=False, box=None, padding=0, expand=True)
+                    table.add_column(width=num_width + 2, no_wrap=True)
+                    table.add_column(width=1, no_wrap=True)
+                    table.add_column(ratio=1)
+                output.append(Text(entry["header"], style="#D77757"))
             else:
                 table.add_row(
                     Text("", style="dim"),
