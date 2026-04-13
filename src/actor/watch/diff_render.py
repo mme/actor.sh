@@ -213,13 +213,14 @@ def render_edit_diff(
 
     for line in diff:
         if line.startswith('@@'):
-            # Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
-            match = re.match(r'^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@', line)
+            match = re.match(r'^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)', line)
             if match:
                 old_num = int(match.group(1))
                 new_num = int(match.group(2))
-                if entries:  # Add ellipsis between hunks
-                    entries.append({"type": "ellipsis"})
+                if entries:
+                    entries.append({"type": "hunk", "header": line})
+                else:
+                    entries.append({"type": "hunk", "header": line})
             continue
         if line.startswith('---') or line.startswith('+++'):
             continue
@@ -301,12 +302,19 @@ def render_edit_diff(
     table.add_column(ratio=1)                              # code
 
     for i, entry in enumerate(entries):
-        if entry["type"] == "ellipsis":
-            table.add_row(
-                Text("", style="dim"),
-                Text("", style="dim"),
-                Text("...", style="dim"),
-            )
+        if entry["type"] == "hunk":
+            if style == "diff":
+                table.add_row(
+                    Text("", style="dim"),
+                    Text("", style="dim"),
+                    Text(entry["header"], style="dim cyan"),
+                )
+            else:
+                table.add_row(
+                    Text("", style="dim"),
+                    Text("", style="dim"),
+                    Text("...", style="dim"),
+                )
             continue
 
         num = entry["num"]
