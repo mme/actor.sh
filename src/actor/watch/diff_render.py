@@ -182,8 +182,14 @@ def render_edit_diff(
     new_string: str,
     dark: bool = True,
     context_lines: int = 3,
+    style: str = "log",
 ) -> Group:
-    """Render a file edit diff as a Rich Group renderable."""
+    """Render a file edit diff as a Rich Group renderable.
+
+    Args:
+        style: "log" for Claude Code tool call style (⏺ Edit header),
+               "diff" for magit-style (file status + path).
+    """
     colors = DARK_COLORS if dark else LIGHT_COLORS
     lexer = _get_lexer(file_path)
 
@@ -253,22 +259,35 @@ def render_edit_diff(
     # Build output
     output: list = []
 
-    # Header
-    header = Text()
-    header.append("⏺ ", style="bold")
-    header.append("Edit", style="bold")
-    header.append(f"({file_path})", style="dim")
-    output.append(header)
+    if style == "log":
+        # Claude Code tool call style
+        header = Text()
+        header.append("⏺ ", style="bold")
+        header.append("Edit", style="bold")
+        header.append(f"({file_path})", style="dim")
+        output.append(header)
 
-    # Summary
-    summary = Text("  ⎿  ", style="dim")
-    if added and removed:
-        summary.append(f"Added {added}, removed {removed} lines", style="dim")
-    elif added:
-        summary.append(f"Added {added} lines", style="dim")
-    elif removed:
-        summary.append(f"Removed {removed} lines", style="dim")
-    output.append(summary)
+        summary = Text("  ⎿  ", style="dim")
+        if added and removed:
+            summary.append(f"Added {added}, removed {removed} lines", style="dim")
+        elif added:
+            summary.append(f"Added {added} lines", style="dim")
+        elif removed:
+            summary.append(f"Removed {removed} lines", style="dim")
+        output.append(summary)
+    else:
+        # Magit-style file header
+        file_status = "new file" if not old_string else "deleted" if not new_string else "modified"
+        header = Text()
+        header.append(f"{file_status}   ", style="bold")
+        header.append(file_path)
+        stats = Text()
+        if added:
+            stats.append(f" +{added}", style=f"{colors.added_marker}")
+        if removed:
+            stats.append(f" -{removed}", style=f"{colors.removed_marker}")
+        header.append_text(stats)
+        output.append(header)
 
     # Diff table
     table = Table(

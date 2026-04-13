@@ -286,7 +286,7 @@ class ActorWatchApp(App):
             from rich.console import Group
             parts = []
             for fd in result.files:
-                parts.append(render_edit_diff(fd.file_path, fd.old_content, fd.new_content, dark=is_dark))
+                parts.append(render_edit_diff(fd.file_path, fd.old_content, fd.new_content, dark=is_dark, style="diff"))
             self.call_from_thread(self._set_diff_widget, Static(Group(*parts)))
         except Exception as e:
             self.call_from_thread(self._set_diff_text, f"Diff error: {e}")
