@@ -103,7 +103,7 @@ class ActorTree(Tree[Actor]):
                 label = self._make_label(actor.name, status)
                 has_children = actor.name in by_parent
                 if has_children:
-                    should_expand = actor.name in expanded or actor.name not in self._snapshot
+                    should_expand = actor.name in expanded
                     node = parent_node.add(label, data=actor, expand=should_expand)
                     _add_children(node, actor.name)
                 else:
@@ -112,9 +112,9 @@ class ActorTree(Tree[Actor]):
         _add_children(self.root, None)
 
         if selected_name:
-            self._select_by_name(self.root, selected_name)
+            self._move_cursor_by_name(self.root, selected_name)
         elif self.root.children:
-            self.select_node(self.root.children[0])
+            self.move_cursor(self.root.children[0])
 
     def _refresh_all_labels(self, node) -> None:
         """Update all labels based on current statuses."""
@@ -132,12 +132,12 @@ class ActorTree(Tree[Actor]):
                 expanded.add(child.data.name)
             self._collect_expanded(child, expanded)
 
-    def _select_by_name(self, node, name: str) -> bool:
+    def _move_cursor_by_name(self, node, name: str) -> bool:
         for child in node.children:
             if child.data and child.data.name == name:
-                self.select_node(child)
+                self.move_cursor(child)
                 return True
-            if self._select_by_name(child, name):
+            if self._move_cursor_by_name(child, name):
                 return True
         return False
 

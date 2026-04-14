@@ -411,7 +411,11 @@ class ActorWatchApp(App):
 
     def action_navigate_left(self) -> None:
         if self._tree_has_focus():
-            return  # already on actor list
+            tree = self.query_one(ActorTree)
+            node = tree.cursor_node
+            if node and node.children and node.is_expanded:
+                node.collapse()
+            return
         tabs = self.query_one("#tabs", TabbedContent)
         current = tabs.active
         if current in self.TAB_ORDER:
@@ -423,8 +427,12 @@ class ActorWatchApp(App):
 
     def action_navigate_right(self) -> None:
         if self._tree_has_focus():
-            # Move from tree to detail panel
-            self._focus_detail_content()
+            tree = self.query_one(ActorTree)
+            node = tree.cursor_node
+            if node and node.children and not node.is_expanded:
+                node.expand()
+            else:
+                self._focus_detail_content()
         else:
             tabs = self.query_one("#tabs", TabbedContent)
             current = tabs.active
