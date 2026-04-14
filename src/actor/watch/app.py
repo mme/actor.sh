@@ -241,8 +241,9 @@ class ActorWatchApp(App):
     @work(thread=True, exclusive=True, group="logs")
     def _refresh_logs(self, actor: Actor) -> None:
         entries = read_log_entries(actor)
-        self.call_from_thread(self._set_logs, entries)
+        self.call_from_thread(self._set_logs, actor.name, entries)
 
+    _last_log_actor: str | None = None
     _last_log_count: int = 0
     _last_log_width: int = 0
     _last_log_entries: list = []
@@ -253,11 +254,13 @@ class ActorWatchApp(App):
             self._last_log_count = 0
             self._set_logs(self._last_log_entries)
 
-    def _set_logs(self, entries: list) -> None:
+    def _set_logs(self, actor_name: str, entries: list) -> None:
         log = self.query_one("#logs-content", RichLog)
 
-        if len(entries) == self._last_log_count and log.size.width == self._last_log_width:
+        actor_changed = actor_name != self._last_log_actor
+        if not actor_changed and len(entries) == self._last_log_count and log.size.width == self._last_log_width:
             return
+        self._last_log_actor = actor_name
         self._last_log_count = len(entries)
         self._last_log_width = log.size.width
         self._last_log_entries = entries
