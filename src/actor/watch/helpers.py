@@ -10,11 +10,11 @@ from ..types import Actor, Status
 # -- Status icons -----------------------------------------------------------
 
 STATUS_ICON = {
-    Status.RUNNING: "●",
-    Status.DONE: "○",
-    Status.ERROR: "✗",
-    Status.IDLE: "◌",
-    Status.STOPPED: "■",
+    Status.RUNNING: "♤",  # animated in tree.py via RUNNING_FRAMES
+    Status.DONE: "",
+    Status.ERROR: "󰗖",
+    Status.IDLE: "",
+    Status.STOPPED: "",
 }
 
 
