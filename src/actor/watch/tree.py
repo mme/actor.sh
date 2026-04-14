@@ -8,17 +8,15 @@ from ..types import Actor, Status
 from .helpers import STATUS_ICON, group_by_parent
 
 
+RUNNING_FRAMES = ["♤", "♡", "♢", "♧"]
+
+
 class ActorTree(Tree[Actor]):
     """Left panel showing all actors as a tree."""
 
     DEFAULT_CSS = """
     ActorTree {
-        width: 28;
-        border: blank;
-        padding: 0 1;
-    }
-    ActorTree:focus {
-        border: round $primary;
+        width: 1fr;
     }
     ActorTree > .tree--cursor {
         background: $primary;
@@ -31,23 +29,59 @@ class ActorTree(Tree[Actor]):
         super().__init__("Actors", id="actor-tree")
         self.show_root = False
         self.guide_depth = 3
-        self._snapshot: dict[str, str] = {}
+        self._snapshot: dict[str, Status] = {}
+        self._statuses: dict[str, Status] = {}
+        self._anim_frame: int = 0
+
+    def on_mount(self) -> None:
+        self.set_interval(0.5, self._tick_animation)
+
+    def _make_label(self, name: str, status: Status) -> str:
+        """Generate display label for an actor."""
+        if status == Status.RUNNING:
+            icon = RUNNING_FRAMES[self._anim_frame]
+        else:
+            icon = STATUS_ICON.get(status, "")
+        if icon:
+            return f" {icon} {name} "
+        return f" {name} "
+
+    # -- Animation -------------------------------------------------------------
+
+    def _tick_animation(self) -> None:
+        """Advance the running animation frame and update labels."""
+        has_running = any(s == Status.RUNNING for s in self._statuses.values())
+        if not has_running:
+            return
+        self._anim_frame = (self._anim_frame + 1) % len(RUNNING_FRAMES)
+        self._update_animated_labels(self.root)
+
+    def _update_animated_labels(self, node) -> None:
+        """Update only running actor labels with the current animation frame."""
+        for child in node.children:
+            if child.data and self._statuses.get(child.data.name) == Status.RUNNING:
+                new_label = self._make_label(child.data.name, Status.RUNNING)
+                if str(child.label) != new_label:
+                    child.set_label(new_label)
+            self._update_animated_labels(child)
+
+    # -- Data update -----------------------------------------------------------
 
     def update_actors(self, actors: list[Actor], statuses: dict[str, Status]) -> None:
-        new_snapshot: dict[str, str] = {}
-        for a in actors:
-            status = statuses.get(a.name, Status.IDLE)
-            icon = STATUS_ICON.get(status, "?")
-            new_snapshot[a.name] = f"{icon} {a.name}"
+        self._statuses = statuses
+
+        new_snapshot = {a.name: statuses.get(a.name, Status.IDLE) for a in actors}
 
         if new_snapshot == self._snapshot:
             return
 
         if set(new_snapshot.keys()) == set(self._snapshot.keys()):
-            self._update_labels(self.root, new_snapshot)
+            # Same actors, status changed — update labels in place
+            self._refresh_all_labels(self.root)
             self._snapshot = new_snapshot
             return
 
+        # Structure changed — full rebuild
         selected_name = None
         if self.cursor_node and self.cursor_node.data:
             selected_name = self.cursor_node.data.name
@@ -65,7 +99,8 @@ class ActorTree(Tree[Actor]):
                 if actor.name in visited:
                     continue
                 visited.add(actor.name)
-                label = new_snapshot[actor.name]
+                status = statuses.get(actor.name, Status.IDLE)
+                label = self._make_label(actor.name, status)
                 has_children = actor.name in by_parent
                 if has_children:
                     should_expand = actor.name in expanded or actor.name not in self._snapshot
@@ -81,13 +116,15 @@ class ActorTree(Tree[Actor]):
         elif self.root.children:
             self.select_node(self.root.children[0])
 
-    def _update_labels(self, node, snapshot: dict[str, str]) -> None:
+    def _refresh_all_labels(self, node) -> None:
+        """Update all labels based on current statuses."""
         for child in node.children:
-            if child.data and child.data.name in snapshot:
-                new_label = snapshot[child.data.name]
+            if child.data:
+                status = self._statuses.get(child.data.name, Status.IDLE)
+                new_label = self._make_label(child.data.name, status)
                 if str(child.label) != new_label:
                     child.set_label(new_label)
-            self._update_labels(child, snapshot)
+            self._refresh_all_labels(child)
 
     def _collect_expanded(self, node, expanded: set[str]) -> None:
         for child in node.children:
