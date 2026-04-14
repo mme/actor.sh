@@ -232,6 +232,7 @@ def cmd_run(
         finished_at=None,
     )
     run_id = db.insert_run(run)
+    db.touch_actor(name)
 
     # Expose actor name to the agent process (set for child, cleaned up after)
     prev_actor_name = os.environ.get("ACTOR_NAME")

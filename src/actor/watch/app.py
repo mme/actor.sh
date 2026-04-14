@@ -109,7 +109,7 @@ class ActorWatchApp(App):
     def compose(self) -> ComposeResult:
         with Horizontal():
             with Vertical(id="actor-panel"):
-                yield Static(" 󱐋 ACTOR.SH", id="actor-title")
+                yield Static(" ★ ACTOR.SH", id="actor-title")
                 yield ActorTree()
             with Vertical(id="detail-panel"):
                 with TabbedContent(id="tabs"):

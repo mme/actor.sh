@@ -146,6 +146,17 @@ class Database:
         if cur.rowcount == 0:
             raise NotFoundError(name)
 
+    def touch_actor(self, name: str) -> None:
+        """Update the actor's updated_at timestamp."""
+        now = _now_iso()
+        cur = self._conn.execute(
+            "UPDATE actors SET updated_at = ? WHERE name = ?",
+            (now, name),
+        )
+        self._conn.commit()
+        if cur.rowcount == 0:
+            raise NotFoundError(name)
+
     def update_actor_session(self, name: str, session_id: str) -> None:
         now = _now_iso()
         cur = self._conn.execute(
