@@ -42,6 +42,22 @@ class ActorWatchApp(App):
     DataTable, Tree, #detail-panel, #status-bar {
         background: ansi_default;
     }
+    #actor-panel {
+        width: 33;
+        border: blank;
+        padding: 0 1;
+        background: ansi_default;
+    }
+    #actor-panel:focus-within {
+        border: round $primary;
+    }
+    #actor-title {
+        text-style: bold;
+        color: $secondary;
+        height: 1;
+        margin-bottom: 1;
+        background: ansi_default;
+    }
     #detail-panel {
         width: 1fr;
         border: blank;
@@ -92,7 +108,9 @@ class ActorWatchApp(App):
 
     def compose(self) -> ComposeResult:
         with Horizontal():
-            yield ActorTree()
+            with Vertical(id="actor-panel"):
+                yield Static(" 󱐋 ACTOR.SH", id="actor-title")
+                yield ActorTree()
             with Vertical(id="detail-panel"):
                 with TabbedContent(id="tabs"):
                     with TabPane("Logs", id="logs"):
