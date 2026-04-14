@@ -309,8 +309,10 @@ class ActorWatchApp(App):
             parts = []
             total_added = 0
             total_removed = 0
+            from rich.text import Text as RichText
             for fd in result.files:
                 parts.append(render_edit_diff(fd.file_path, fd.old_content, fd.new_content, dark=is_dark, style="diff"))
+                parts.append(RichText(""))
                 for line in difflib.unified_diff(fd.old_content.splitlines(), fd.new_content.splitlines(), lineterm=""):
                     if line.startswith("+") and not line.startswith("+++"):
                         total_added += 1
