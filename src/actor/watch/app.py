@@ -215,6 +215,7 @@ class ActorWatchApp(App):
         actor_list = self.query_one(ActorTree)
         actor = actor_list.selected_actor
         if actor is None:
+            self._clear_detail()
             return
 
         status = self._prev_statuses.get(actor.name, Status.IDLE)
@@ -235,6 +236,24 @@ class ActorWatchApp(App):
 
         self._refresh_runs(actor)
         self._refresh_logs(actor)
+
+    def _clear_detail(self) -> None:
+        info = self.query_one("#info-content", Static)
+        info.update("Select an actor")
+
+        table = self.query_one("#runs-table", DataTable)
+        table.clear(columns=True)
+
+        log = self.query_one("#logs-content", RichLog)
+        log.clear()
+        self._last_log_actor = None
+        self._last_log_count = 0
+        self._last_log_entries = []
+
+        scroll = self.query_one("#diff-scroll", VerticalScroll)
+        scroll.remove_children()
+        self._diff_loaded_for = None
+        self._update_diff_tab_label()
 
     # -- Logs ----------------------------------------------------------------
 
