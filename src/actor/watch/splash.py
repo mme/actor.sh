@@ -49,7 +49,6 @@ SPATIAL_RANGE = 3.0
 # → amp² threshold for bucket k is (k / (N_TEX-1))^(1/0.65) / 18
 _INV_EXP = 1.0 / 0.65
 _AMP_SQ_THRESHOLDS = [((k / (N_TEX - 1)) ** _INV_EXP) / 18.0 for k in range(N_TEX)]
-_BOLD_FROM = int(0.75 * (N_TEX - 1)) + 1  # buckets 16..21 are bold
 
 
 def _factorial(n: int) -> float:
@@ -101,9 +100,22 @@ class Splash(Widget):
         self._cached_size: tuple[int, int] | None = None
         self._grids: list[list[list[float]]] | None = None
         self._style_cache: dict[str, Style] = {}
+        # Per-frame cache — populated by _prepare_frame, used by render_line
+        self._frame_dirty = True
+        self._frame: dict | None = None
+        # Theme-dependent cache
+        self._theme_key: str | None = None
+        self._styles: dict[str, Style] | None = None
+        # Size-dependent cache (box layout)
+        self._geometry: dict | None = None
+        self._geometry_size: tuple[int, int] | None = None
 
     def on_mount(self) -> None:
-        self.set_interval(1 / 20, self.refresh)
+        self.set_interval(1 / 15, self._tick)
+
+    def _tick(self) -> None:
+        self._frame_dirty = True
+        self.refresh()
 
     def _get_style(self, spec: str) -> Style:
         cached = self._style_cache.get(spec)
@@ -137,42 +149,28 @@ class Splash(Widget):
             return t.secondary, t.primary, t.foreground, t.panel
         return "#D77757", "#B1B9F9", "#FFFFFF", "#2C323E"
 
-    def _compute_frame_params(self) -> tuple[float, float, int, int] | None:
-        """Return (s, 1-s, idx, nxt) for the current time, or None if size is zero."""
-        rows = self.size.height
-        cols = self.size.width
-        if rows <= 0 or cols <= 0:
-            return None
-        self._ensure_grids(rows, cols)
-
-        t = time.monotonic() - self._start
-        idx = int(t / CYCLE_SECONDS) % len(STATES)
-        nxt = (idx + 1) % len(STATES)
-        local = (t / CYCLE_SECONDS) - math.floor(t / CYCLE_SECONDS)
-        s = 0.5 - 0.5 * math.cos(local * math.pi)
-        return s, 1.0 - s, idx, nxt
-
-    def render_line(self, y: int) -> Strip:
-        params = self._compute_frame_params()
-        if params is None or self._grids is None:
-            return Strip.blank(self.size.width)
-        s, one_minus_s, idx, nxt = params
-
-        rows = self.size.height
-        cols = self.size.width
-        a_row = self._grids[idx][y]
-        b_row = self._grids[nxt][y]
-
+    def _ensure_styles(self) -> None:
+        t = self.app.current_theme
+        key = t.name if t is not None else "_default"
+        if self._styles is not None and self._theme_key == key:
+            return
         logo_color, anim_color, border_color, panel_color = self._theme_colors()
-        anim_plain_style = self._get_style(anim_color)
-        anim_bold_style = self._get_style(f"bold {anim_color}")
-        box_bg_style = self._get_style(f"on {panel_color}")
-        border_style = self._get_style(f"{border_color} on {panel_color}")
-        logo_style = self._get_style(f"bold {logo_color} on {panel_color}")
-        tagline_style = self._get_style(f"{logo_color} on {panel_color}")
-        hint_style = self._get_style(f"dim {anim_color} on {panel_color}")
+        self._styles = {
+            "anim": self._get_style(anim_color),
+            "border": self._get_style(f"{border_color} on {panel_color}"),
+            "box_bg": self._get_style(f"on {panel_color}"),
+            "logo": self._get_style(f"bold {logo_color} on {panel_color}"),
+            "tagline": self._get_style(f"{logo_color} on {panel_color}"),
+            "hint": self._get_style(f"dim {anim_color} on {panel_color}"),
+        }
+        self._theme_key = key
+        # Box segments depend on styles — invalidate
+        if self._geometry is not None:
+            self._geometry["box_segments"] = None
 
-        # Box geometry: border + padding + content
+    def _ensure_geometry(self, rows: int, cols: int) -> None:
+        if self._geometry is not None and self._geometry_size == (rows, cols):
+            return
         overlay_lines = LOGO + ["", TAGLINE, "", HINT]
         overlay_h = len(overlay_lines)
         overlay_w = max(len(line) for line in overlay_lines)
@@ -182,77 +180,161 @@ class Splash(Widget):
         box_r0 = max(0, (rows - box_h) // 2)
         box_c0 = max(0, (cols - box_w) // 2)
 
-        br = y - box_r0
-        in_box = 0 <= br < box_h
-
-        # Build the per-column content for columns inside the box
-        box_chars: list[str] = []
-        box_styles: list[Style] = []
-        if in_box:
+        # Precompute per-box-row contents: (chars, style_keys) — style lookup happens later
+        rows_content: list[tuple[list[str], list[str]]] = []
+        for br in range(box_h):
             if br == 0:
-                box_chars = ["╭"] + ["─"] * (box_w - 2) + ["╮"]
-                box_styles = [border_style] * box_w
+                chars = ["╭"] + ["─"] * (box_w - 2) + ["╮"]
+                keys = ["border"] * box_w
             elif br == box_h - 1:
-                box_chars = ["╰"] + ["─"] * (box_w - 2) + ["╯"]
-                box_styles = [border_style] * box_w
+                chars = ["╰"] + ["─"] * (box_w - 2) + ["╯"]
+                keys = ["border"] * box_w
             else:
-                box_chars = ["│"] + [" "] * (box_w - 2) + ["│"]
-                box_styles = [border_style] + [box_bg_style] * (box_w - 2) + [border_style]
+                chars = ["│"] + [" "] * (box_w - 2) + ["│"]
+                keys = ["border"] + ["box_bg"] * (box_w - 2) + ["border"]
                 content_row = br - 1 - pad_v
                 if 0 <= content_row < overlay_h:
                     line = overlay_lines[content_row]
                     if line:
                         if content_row < LOGO_H:
-                            line_style = logo_style
+                            line_key = "logo"
                         elif line == HINT:
-                            line_style = hint_style
+                            line_key = "hint"
                         else:
-                            line_style = tagline_style
-                        # Center the content line within the inner box area
+                            line_key = "tagline"
                         inner_start = 1 + pad_h
                         offset = inner_start + (overlay_w - len(line)) // 2
                         for i, ch in enumerate(line):
                             pos = offset + i
                             if 0 <= pos < box_w - 1 and ch != " ":
-                                box_chars[pos] = ch
-                                box_styles[pos] = line_style
+                                chars[pos] = ch
+                                keys[pos] = line_key
+            rows_content.append((chars, keys))
 
-        texture = TEXTURE
+        self._geometry = {
+            "box_w": box_w,
+            "box_h": box_h,
+            "box_r0": box_r0,
+            "box_c0": box_c0,
+            "box_c1": box_c0 + box_w,
+            "rows_content": rows_content,
+            "box_segments": None,  # built lazily once styles are available
+        }
+        self._geometry_size = (rows, cols)
+
+    def _ensure_box_segments(self) -> None:
+        assert self._geometry is not None and self._styles is not None
+        if self._geometry["box_segments"] is not None:
+            return
+        styles = self._styles
+        per_row: list[list[Segment]] = []
+        for chars, keys in self._geometry["rows_content"]:
+            segs: list[Segment] = []
+            run_chars: list[str] = []
+            run_key: str | None = None
+            for i in range(len(chars)):
+                k = keys[i]
+                if k != run_key:
+                    if run_chars:
+                        segs.append(Segment("".join(run_chars), styles[run_key]))
+                        run_chars = []
+                    run_key = k
+                run_chars.append(chars[i])
+            if run_chars:
+                segs.append(Segment("".join(run_chars), styles[run_key]))
+            per_row.append(segs)
+        self._geometry["box_segments"] = per_row
+
+    def _prepare_frame(self) -> None:
+        rows = self.size.height
+        cols = self.size.width
+        if rows <= 0 or cols <= 0:
+            self._frame = None
+            return
+        self._ensure_grids(rows, cols)
+        self._ensure_styles()
+        self._ensure_geometry(rows, cols)
+        self._ensure_box_segments()
+
+        t = time.monotonic() - self._start
+        idx = int(t / CYCLE_SECONDS) % len(STATES)
+        nxt = (idx + 1) % len(STATES)
+        local = (t / CYCLE_SECONDS) - math.floor(t / CYCLE_SECONDS)
+        s = 0.5 - 0.5 * math.cos(local * math.pi)
+
+        self._frame = {
+            "s": s,
+            "one_minus_s": 1.0 - s,
+            "a_grid": self._grids[idx],
+            "b_grid": self._grids[nxt],
+            "rows": rows,
+            "cols": cols,
+        }
+
+    def _anim_segment(
+        self,
+        start: int,
+        end: int,
+        a_row: list[float],
+        b_row: list[float],
+        s: float,
+        one_minus_s: float,
+        style: Style,
+    ) -> Segment:
         thresholds = _AMP_SQ_THRESHOLDS
+        texture = TEXTURE
+        n_tex_m1 = N_TEX - 1
+        chars: list[str] = []
+        for c in range(start, end):
+            amp = one_minus_s * a_row[c] + s * b_row[c]
+            amp_sq = amp * amp
+            bucket = bisect_right(thresholds, amp_sq) - 1
+            if bucket < 0:
+                bucket = 0
+            elif bucket > n_tex_m1:
+                bucket = n_tex_m1
+            chars.append(texture[bucket])
+        return Segment("".join(chars), style)
+
+    def render_line(self, y: int) -> Strip:
+        if self._frame_dirty:
+            self._prepare_frame()
+            self._frame_dirty = False
+
+        frame = self._frame
+        if frame is None:
+            return Strip.blank(self.size.width)
+
+        cols = frame["cols"]
+        a_row = frame["a_grid"][y]
+        b_row = frame["b_grid"][y]
+        s = frame["s"]
+        one_minus_s = frame["one_minus_s"]
+        anim_style = self._styles["anim"]
+
+        geom = self._geometry
+        box_r0 = geom["box_r0"]
+        box_h = geom["box_h"]
+        box_c0 = geom["box_c0"]
+        box_c1 = geom["box_c1"]
+        br = y - box_r0
+        in_box = 0 <= br < box_h
+
+        if not in_box:
+            return Strip(
+                [self._anim_segment(0, cols, a_row, b_row, s, one_minus_s, anim_style)],
+                cols,
+            )
 
         segments: list[Segment] = []
-        run_chars: list[str] = []
-        run_style: Style | None = None
-
-        def flush() -> None:
-            if run_chars:
-                segments.append(Segment("".join(run_chars), run_style))
-
-        box_c1 = box_c0 + box_w
-        for c in range(cols):
-            if in_box and box_c0 <= c < box_c1:
-                bc = c - box_c0
-                ch = box_chars[bc]
-                style = box_styles[bc]
-            else:
-                amp = one_minus_s * a_row[c] + s * b_row[c]
-                amp_sq = amp * amp
-                bucket = bisect_right(thresholds, amp_sq) - 1
-                if bucket < 0:
-                    bucket = 0
-                elif bucket >= N_TEX:
-                    bucket = N_TEX - 1
-                ch = texture[bucket]
-                style = anim_bold_style if bucket >= _BOLD_FROM else anim_plain_style
-
-            if style is not run_style:
-                flush()
-                run_chars = []
-                run_style = style
-            run_chars.append(ch)
-
-        flush()
+        if box_c0 > 0:
+            segments.append(self._anim_segment(0, box_c0, a_row, b_row, s, one_minus_s, anim_style))
+        segments.extend(geom["box_segments"][br])
+        if box_c1 < cols:
+            segments.append(self._anim_segment(box_c1, cols, a_row, b_row, s, one_minus_s, anim_style))
         return Strip(segments, cols)
 
     def on_resize(self) -> None:
         self._cached_size = None
+        self._geometry = None
+        self._frame_dirty = True
