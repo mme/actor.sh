@@ -12,8 +12,6 @@ from textual.strip import Strip
 from textual.widget import Widget
 
 
-# -- ASCII logo ------------------------------------------------------------
-
 LOGO = [
     r" █████╗  ██████╗████████╗ ██████╗ ██████╗    ███████╗██╗  ██╗",
     r"██╔══██╗██╔════╝╚══██╔══╝██╔═══██╗██╔══██╗   ██╔════╝██║  ██║",
@@ -28,11 +26,9 @@ TAGLINE = "Autonomous actor command center."
 HINT = "Spawn one from Claude Code and it will appear here."
 
 
-# -- QHO physics -----------------------------------------------------------
-#
 # 2D Quantum Harmonic Oscillator: ψ_{nx,ny}(x,y) = ψ_nx(x) · ψ_ny(y)
 # with ψ_n(x) = e^{−x²/2} · H_n(x) / sqrt(2^n · n! · √π)
-# Animate by crossfading amplitudes between 8 (nx, ny) pairs.
+# Animated by crossfading amplitudes between 8 (nx, ny) pairs.
 
 TEXTURE = " .,:;-~=+*x!tiLC0O8%#@"
 N_TEX = len(TEXTURE)
@@ -80,9 +76,6 @@ def _psi2d(nx: int, ny: int, x: float, y: float) -> float:
     return _psi1d(nx, x) * _psi1d(ny, y)
 
 
-# -- Widget ----------------------------------------------------------------
-
-
 class Splash(Widget):
     """Full-screen QHO animation with ACTOR.SH logo overlay."""
 
@@ -100,13 +93,12 @@ class Splash(Widget):
         self._cached_size: tuple[int, int] | None = None
         self._grids: list[list[list[float]]] | None = None
         self._style_cache: dict[str, Style] = {}
-        # Per-frame cache — populated by _prepare_frame, used by render_line
+        # Three caches with different invalidation axes: _frame per tick,
+        # _styles per theme change, _geometry per resize.
         self._frame_dirty = True
         self._frame: dict | None = None
-        # Theme-dependent cache
         self._theme_key: str | None = None
         self._styles: dict[str, Style] | None = None
-        # Size-dependent cache (box layout)
         self._geometry: dict | None = None
         self._geometry_size: tuple[int, int] | None = None
 
@@ -180,7 +172,21 @@ class Splash(Widget):
         box_r0 = max(0, (rows - box_h) // 2)
         box_c0 = max(0, (cols - box_w) // 2)
 
-        # Precompute per-box-row contents: (chars, style_keys) — style lookup happens later
+        # Terminal too small for a box — skip the overlay entirely.
+        # Min viable: 2 border cols + 1 interior + border = 4 wide, 2 tall.
+        if box_w < 4 or box_h < 2:
+            self._geometry = {
+                "box_w": 0,
+                "box_h": 0,
+                "box_r0": 0,
+                "box_c0": 0,
+                "box_c1": 0,
+                "rows_content": [],
+                "box_segments": [],
+            }
+            self._geometry_size = (rows, cols)
+            return
+
         rows_content: list[tuple[list[str], list[str]]] = []
         for br in range(box_h):
             if br == 0:
