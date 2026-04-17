@@ -23,6 +23,7 @@ from ..process import RealProcessManager
 from ..types import Actor, Status
 from ..cli import _db_path
 from .patches import apply_patches
+from .splash import Splash
 from .themes import CLAUDE_DARK, CLAUDE_LIGHT
 from .tree import ActorTree
 from .helpers import read_log_entries, compute_diff
@@ -87,6 +88,12 @@ class ActorWatchApp(App):
         padding: 0 1;
         color: $text-muted;
     }
+    #splash, #main-layout {
+        display: none;
+    }
+    #splash.-active, #main-layout.-active {
+        display: block;
+    }
     """
 
     BINDINGS = [
@@ -105,9 +112,15 @@ class ActorWatchApp(App):
     _prev_statuses: dict[str, Status] = {}
     _current_actors: list[Actor] = []
     _diff_loaded_for: str | None = None
+    _splash_active: bool = False
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if self._splash_active and action != "quit":
+            return False
+        return True
 
     def compose(self) -> ComposeResult:
-        with Horizontal():
+        with Horizontal(id="main-layout"):
             with Vertical(id="actor-panel"):
                 yield Static(" ★ ACTOR.SH", id="actor-title")
                 yield ActorTree()
@@ -122,6 +135,7 @@ class ActorWatchApp(App):
                             Static("Select an actor", id="info-content"),
                             DataTable(id="runs-table"),
                         )
+        yield Splash(id="splash")
         yield Static("Loading...", id="status-bar")
         yield Footer(show_command_palette=False)
 
@@ -199,6 +213,19 @@ class ActorWatchApp(App):
         actor_list = self.query_one(ActorTree)
         actor_list.update_actors(actors, statuses)
 
+        main = self.query_one("#main-layout")
+        splash = self.query_one("#splash")
+        was_splash = self._splash_active
+        self._splash_active = not actors
+        if self._splash_active:
+            main.set_class(False, "-active")
+            splash.set_class(True, "-active")
+        else:
+            main.set_class(True, "-active")
+            splash.set_class(False, "-active")
+        if was_splash != self._splash_active:
+            self.refresh_bindings()
+
         running = sum(1 for s in statuses.values() if s == Status.RUNNING)
         done = sum(1 for s in statuses.values() if s == Status.DONE)
         errors = sum(1 for s in statuses.values() if s == Status.ERROR)
@@ -215,6 +242,7 @@ class ActorWatchApp(App):
         actor_list = self.query_one(ActorTree)
         actor = actor_list.selected_actor
         if actor is None:
+            self._clear_detail()
             return
 
         status = self._prev_statuses.get(actor.name, Status.IDLE)
@@ -235,6 +263,24 @@ class ActorWatchApp(App):
 
         self._refresh_runs(actor)
         self._refresh_logs(actor)
+
+    def _clear_detail(self) -> None:
+        info = self.query_one("#info-content", Static)
+        info.update("Select an actor")
+
+        table = self.query_one("#runs-table", DataTable)
+        table.clear(columns=True)
+
+        log = self.query_one("#logs-content", RichLog)
+        log.clear()
+        self._last_log_actor = None
+        self._last_log_count = 0
+        self._last_log_entries = []
+
+        scroll = self.query_one("#diff-scroll", VerticalScroll)
+        scroll.remove_children()
+        self._diff_loaded_for = None
+        self._update_diff_tab_label()
 
     # -- Logs ----------------------------------------------------------------
 
