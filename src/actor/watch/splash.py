@@ -87,8 +87,9 @@ class Splash(Widget):
     }
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, animate: bool = True, **kwargs) -> None:
         super().__init__(**kwargs)
+        self._animate = animate
         self._start = time.monotonic()
         self._cached_size: tuple[int, int] | None = None
         self._grids: list[list[list[float]]] | None = None
@@ -103,7 +104,8 @@ class Splash(Widget):
         self._geometry_size: tuple[int, int] | None = None
 
     def on_mount(self) -> None:
-        self.set_interval(1 / 15, self._tick)
+        if self._animate:
+            self.set_interval(1 / 15, self._tick)
 
     def _tick(self) -> None:
         self._frame_dirty = True
@@ -262,7 +264,7 @@ class Splash(Widget):
         self._ensure_geometry(rows, cols)
         self._ensure_box_segments()
 
-        t = time.monotonic() - self._start
+        t = (time.monotonic() - self._start) if self._animate else 0.0
         idx = int(t / CYCLE_SECONDS) % len(STATES)
         nxt = (idx + 1) % len(STATES)
         local = (t / CYCLE_SECONDS) - math.floor(t / CYCLE_SECONDS)

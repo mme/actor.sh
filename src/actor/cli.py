@@ -181,6 +181,7 @@ Examples:
         help="Open real-time dashboard (browser + terminal)",
     )
     p_watch.add_argument("--serve", action="store_true", help="Serve in browser via textual-serve on port 2204")
+    p_watch.add_argument("--no-animation", action="store_true", help="Disable splash animation (lighter over SSH/slow links)")
 
     # -- discard --
     p_discard = sub.add_parser(
@@ -211,7 +212,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     if args.command == "watch":
         from .watch import run_watch
-        run_watch(serve=args.serve)
+        run_watch(serve=args.serve, animate=not args.no_animation)
         return
 
     try:

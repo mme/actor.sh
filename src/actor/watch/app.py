@@ -114,6 +114,10 @@ class ActorWatchApp(App):
     _diff_loaded_for: str | None = None
     _splash_active: bool = False
 
+    def __init__(self, animate: bool = True) -> None:
+        super().__init__()
+        self._animate = animate
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if self._splash_active and action != "quit":
             return False
@@ -135,7 +139,7 @@ class ActorWatchApp(App):
                             Static("Select an actor", id="info-content"),
                             DataTable(id="runs-table"),
                         )
-        yield Splash(id="splash")
+        yield Splash(id="splash", animate=self._animate)
         yield Static("Loading...", id="status-bar")
         yield Footer(show_command_palette=False)
 
@@ -505,18 +509,21 @@ class ActorWatchApp(App):
                 focused.scroll_down()
 
 
-def run_watch(serve: bool = False) -> None:
+def run_watch(serve: bool = False, animate: bool = True) -> None:
     """Entry point for `actor watch`."""
     if serve:
         try:
             from textual_serve.server import Server
-            server = Server("uv run python -m actor.watch --no-serve", port=2204)
+            cmd = "uv run python -m actor.watch --no-serve"
+            if not animate:
+                cmd += " --no-animation"
+            server = Server(cmd, port=2204)
             server.serve()
         except ImportError:
-            app = ActorWatchApp()
+            app = ActorWatchApp(animate=animate)
             app.run()
     else:
-        app = ActorWatchApp()
+        app = ActorWatchApp(animate=animate)
         app.run()
 
 
@@ -524,4 +531,5 @@ def main() -> None:
     """Direct entry point when run as module."""
     import sys
     serve = "--no-serve" not in sys.argv
-    run_watch(serve=serve)
+    animate = "--no-animation" not in sys.argv
+    run_watch(serve=serve, animate=animate)
