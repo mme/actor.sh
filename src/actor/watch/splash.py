@@ -166,7 +166,7 @@ class Splash(Widget):
         overlay_lines = LOGO + ["", TAGLINE, "", HINT]
         overlay_h = len(overlay_lines)
         overlay_w = max(len(line) for line in overlay_lines)
-        pad_v, pad_h = 1, 2
+        pad_v, pad_h = 2, 3
         box_w = min(cols, overlay_w + 2 * pad_h + 2)
         box_h = min(rows, overlay_h + 2 * pad_v + 2)
         box_r0 = max(0, (rows - box_h) // 2)
