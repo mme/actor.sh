@@ -8,27 +8,22 @@ Manages multiple Claude/Codex agents running in isolated git worktrees.
 # Install uv (if needed)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Clone and install
-git clone https://github.com/mme/actor.sh.git
-cd actor.sh
-uv sync
-uv tool install -e .
+# Install actor-sh
+uv tool install actor-sh            # or: pip install actor-sh
 
-# Symlink the skill for Claude Code
-ln -s "$(pwd)/skills/actor" ~/.claude/skills/actor
+# Register the Claude Code skill + MCP server
+actor setup --for claude-code       # user-wide
+# or: actor setup --for claude-code --scope project   # project-local
 
 # Verify
 actor --help
 ```
 
-## MCP server (channels)
+After bumping `actor-sh` to a new version, refresh the deployed skill:
 
 ```bash
-# Start Claude Code with channel support
-claude --dangerously-load-development-channels server:actor
+actor update
 ```
-
-The `.mcp.json` in the repo root configures the MCP server automatically.
 
 ## Running tests
 

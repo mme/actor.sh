@@ -8,6 +8,8 @@ Manages multiple Claude/Codex agents running in isolated git worktrees.
 src/actor/               # Python package
   cli.py                 # argparse CLI, command dispatch
   commands.py            # Command implementations (cmd_new, cmd_run, cmd_list, etc.)
+  setup.py               # 'actor setup' / 'actor update' — deploy bundled skill + register MCP
+  server.py              # MCP server entry point
   db.py                  # SQLite database layer (~/.actor/actor.db)
   types.py               # Dataclasses: Actor, Run, Status, Config
   interfaces.py          # ABCs: Agent, GitOps, ProcessManager
@@ -26,7 +28,7 @@ src/actor/               # Python package
   plugin.json            # Declares src/actor/_skill as a skill location for
                          # tooling like npx skills
 tests/
-  test_actor.py          # All tests (unittest)
+  test_*.py              # unittest suites
 spec/
   V2.md                  # V2 vision (MCP server, channels, dashboard, plugin)
   PLAN-STAGE1.md         # Stage 1 implementation plan (minimal MCP server)

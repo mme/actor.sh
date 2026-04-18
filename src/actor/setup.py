@@ -1,26 +1,25 @@
-"""Implementation for 'actor setup' and 'actor update'.
-
-'setup' deploys the bundled Claude Code skill + registers the MCP server
-with the target coding agent host. 'update' re-runs just the skill-copy
-step to pick up a newer version of actor-sh without touching the MCP
-registration.
-
-Only --for claude-code is supported today. Other hosts error cleanly.
+"""'setup' deploys the bundled skill + registers the MCP server with a host.
+'update' re-runs the skill-copy step to pick up a new actor-sh version
+without touching the MCP registration.
 """
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from importlib.resources import as_file, files
 from pathlib import Path
-from typing import Iterable
 
 from . import __version__
 from .errors import ActorError
 
 SUPPORTED_HOSTS = ("claude-code",)
 SUPPORTED_SCOPES = ("user", "project", "local")
+_CLAUDE_MCP_TIMEOUT_SEC = 30
+# Skill name is used as a filesystem path segment; reject anything that
+# could escape the target parent dir or produce nonsense paths.
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def _validate_host(host: str) -> None:
@@ -39,13 +38,23 @@ def _validate_scope(scope: str) -> None:
         )
 
 
+def _validate_name(name: str) -> None:
+    if not _SAFE_NAME_RE.match(name):
+        raise ActorError(
+            f"invalid --name {name!r}: must start with an alphanumeric and "
+            "contain only [A-Za-z0-9._-]"
+        )
+
+
 def _skill_target_dir(host: str, scope: str, name: str) -> Path:
-    """Where the deployed skill directory should live for this host + scope."""
+    """Path the deployed skill should live at. May or may not exist on disk."""
     _validate_host(host)
-    # claude-code uses ~/.claude/skills/<name>/ for user/local, .claude/skills/<name>/ for project
+    _validate_name(name)
     if scope == "project":
         base = Path.cwd() / ".claude" / "skills"
-    else:  # user, local
+    else:
+        # local scope only changes where claude mcp stores the registration;
+        # the skill files themselves always live under the user's home.
         home = os.environ.get("HOME", "")
         if not home:
             raise ActorError("HOME environment variable is not set")
@@ -54,18 +63,32 @@ def _skill_target_dir(host: str, scope: str, name: str) -> Path:
 
 
 def _copy_bundled_skill(target: Path) -> list[str]:
-    """Copy the bundled src/actor/_skill contents to target. Returns list of file names copied."""
+    """Copy the bundled src/actor/_skill contents to target. Returns list of file names copied.
+
+    Raises ActorError if the bundled resources don't include a SKILL.md (indicates
+    a broken install where the package data didn't ship).
+    """
     target.mkdir(parents=True, exist_ok=True)
     copied: list[str] = []
     source = files("actor._skill")
     for entry in source.iterdir():
         name = entry.name
-        # Skip Python-only artifacts
+        # __init__.py and __pycache__ are package plumbing, not skill content
         if name.startswith("__") or name.endswith(".py"):
+            continue
+        # Skill subdirectories aren't used today; skip rather than crash on
+        # shutil.copy so a future nested layout fails gracefully here.
+        if entry.is_dir():
             continue
         with as_file(entry) as entry_path:
             shutil.copy(entry_path, target / name)
         copied.append(name)
+    if "SKILL.md" not in copied:
+        raise ActorError(
+            "bundled skill resources are missing SKILL.md — actor-sh may be "
+            "installed from an incomplete source tree. Try "
+            "`uv tool install --force actor-sh` (or re-install from the wheel)."
+        )
     return copied
 
 
@@ -101,20 +124,38 @@ def _stamp_version(skill_md: Path, version: str) -> None:
     skill_md.write_text("".join(lines))
 
 
-def _claude_mcp_add(name: str, scope: str, for_host: str) -> None:
-    """Register the MCP server with Claude Code via its CLI."""
-    cmd = [
-        "claude", "mcp", "add", name,
-        "--scope", scope,
-        "--", "actor", "mcp", "--for", for_host,
-    ]
+def _run_claude(*args: str, timeout: int = _CLAUDE_MCP_TIMEOUT_SEC) -> subprocess.CompletedProcess[str]:
+    """Run `claude ...` with a timeout, surfacing a clear error if the CLI is missing or hangs."""
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        return subprocess.run(
+            ["claude", *args], capture_output=True, text=True, timeout=timeout,
+        )
     except FileNotFoundError:
         raise ActorError(
             "`claude` CLI not found on PATH. Install Claude Code first "
             "(https://claude.com/claude-code), then re-run 'actor setup'."
         )
+    except subprocess.TimeoutExpired:
+        raise ActorError(
+            f"`claude {' '.join(args)}` timed out after {timeout}s. "
+            "Try running it manually to see what's happening."
+        )
+
+
+def _claude_mcp_remove(name: str, scope: str) -> None:
+    """Best-effort remove an existing MCP registration. Silently succeeds if absent."""
+    # `claude mcp remove` returns non-zero when the entry doesn't exist; that's
+    # fine for our purposes (--force should be idempotent).
+    _run_claude("mcp", "remove", name, "--scope", scope)
+
+
+def _claude_mcp_add(name: str, scope: str, for_host: str) -> None:
+    """Register the MCP server with Claude Code via its CLI."""
+    result = _run_claude(
+        "mcp", "add", name,
+        "--scope", scope,
+        "--", "actor", "mcp", "--for", for_host,
+    )
     if result.returncode != 0:
         stderr = result.stderr.strip() or result.stdout.strip()
         raise ActorError(f"`claude mcp add` failed: {stderr}")
@@ -129,6 +170,7 @@ def cmd_setup(
 ) -> str:
     _validate_host(for_host)
     _validate_scope(scope)
+    _validate_name(name)
 
     target = _skill_target_dir(for_host, scope, name)
     if target.exists() and not force:
@@ -138,6 +180,9 @@ def cmd_setup(
         )
     if target.exists():
         shutil.rmtree(target)
+        # Also clear any stale MCP registration under this name so the
+        # subsequent `claude mcp add` doesn't collide.
+        _claude_mcp_remove(name=name, scope=scope)
 
     copied = _copy_bundled_skill(target)
     _stamp_version(target / "SKILL.md", __version__)
@@ -158,6 +203,14 @@ def cmd_update(
 ) -> str:
     _validate_host(for_host)
     _validate_scope(scope)
+    _validate_name(name)
+
+    new_version = __version__
+    if new_version == "unknown":
+        raise ActorError(
+            "cannot determine installed actor-sh version — reinstall with "
+            "`uv tool install --force actor-sh` (or `pip install --upgrade actor-sh`) and retry."
+        )
 
     target = _skill_target_dir(for_host, scope, name)
     if not target.exists() or not (target / "SKILL.md").exists():
@@ -168,10 +221,8 @@ def cmd_update(
 
     before = (target / "SKILL.md").read_text()
     _copy_bundled_skill(target)
-    new_version = __version__
     _stamp_version(target / "SKILL.md", new_version)
 
-    # Crude version-delta detection: compare frontmatter version strings
     prev_version = _parse_frontmatter_version(before) or "unknown"
     if prev_version == new_version:
         return f"actor skill at {target} is already at version {new_version}."

@@ -126,13 +126,8 @@ class UpdateEndToEndTests(unittest.TestCase):
             with patch.dict(os.environ, {"HOME": tmp}), \
                  patch("actor.setup._claude_mcp_add"):
                 cmd_setup(for_host="claude-code", scope="user", name="actor", force=False)
-                target = Path(tmp) / ".claude" / "skills" / "actor"
+                skill = Path(tmp) / ".claude" / "skills" / "actor" / "SKILL.md"
 
-                # Simulate an older version by overwriting the stamp
-                skill = target / "SKILL.md"
-                text = skill.read_text()
-                text = text.replace("version: ", "version: 0.0.0-old\n# ", 1)
-                # The replace above is hacky; just rewrite cleanly
                 lines = skill.read_text().splitlines(keepends=True)
                 for i, line in enumerate(lines):
                     if line.startswith("version:"):
@@ -142,11 +137,83 @@ class UpdateEndToEndTests(unittest.TestCase):
                 msg = cmd_update(for_host="claude-code", scope="user", name="actor")
                 self.assertIn("updated from 0.0.0-old", msg)
 
+    def test_update_noop_when_same_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"HOME": tmp}), \
+                 patch("actor.setup._claude_mcp_add"):
+                cmd_setup(for_host="claude-code", scope="user", name="actor", force=False)
+                msg = cmd_update(for_host="claude-code", scope="user", name="actor")
+                self.assertIn("already at version", msg)
+
     def test_update_without_setup_errors(self):
         with tempfile.TemporaryDirectory() as tmp, \
              patch.dict(os.environ, {"HOME": tmp}):
             with self.assertRaises(ActorError):
                 cmd_update(for_host="claude-code", scope="user", name="actor")
+
+
+class NameValidationTests(unittest.TestCase):
+    def test_rejects_traversal(self):
+        from actor.setup import _validate_name
+        for bad in ("", ".", "..", "../evil", "a/b", ".hidden", "-start"):
+            with self.subTest(bad=bad), self.assertRaises(ActorError):
+                _validate_name(bad)
+
+    def test_accepts_normal_names(self):
+        from actor.setup import _validate_name
+        for good in ("actor", "actor-dev", "actor_v2", "actor.beta", "a1"):
+            _validate_name(good)  # no raise
+
+
+class ClaudeMcpSubprocessTests(unittest.TestCase):
+    def test_claude_missing_raises_actor_error(self):
+        from actor.setup import _claude_mcp_add
+        with patch("actor.setup.subprocess.run", side_effect=FileNotFoundError):
+            with self.assertRaises(ActorError) as ctx:
+                _claude_mcp_add(name="actor", scope="user", for_host="claude-code")
+            self.assertIn("claude", str(ctx.exception).lower())
+
+    def test_claude_timeout_raises_actor_error(self):
+        import subprocess as _sp
+        from actor.setup import _claude_mcp_add
+        with patch(
+            "actor.setup.subprocess.run",
+            side_effect=_sp.TimeoutExpired(cmd=["claude"], timeout=30),
+        ):
+            with self.assertRaises(ActorError) as ctx:
+                _claude_mcp_add(name="actor", scope="user", for_host="claude-code")
+            self.assertIn("timed out", str(ctx.exception))
+
+    def test_claude_nonzero_exit_surfaces_stderr(self):
+        from unittest.mock import MagicMock
+        from actor.setup import _claude_mcp_add
+        fake_result = MagicMock(returncode=1, stderr="already exists", stdout="")
+        with patch("actor.setup.subprocess.run", return_value=fake_result):
+            with self.assertRaises(ActorError) as ctx:
+                _claude_mcp_add(name="actor", scope="user", for_host="claude-code")
+            self.assertIn("already exists", str(ctx.exception))
+
+
+class BundledSkillTests(unittest.TestCase):
+    def test_skips_python_artifacts(self):
+        from actor.setup import _copy_bundled_skill
+        with tempfile.TemporaryDirectory() as tmp:
+            copied = _copy_bundled_skill(Path(tmp))
+            for py_name in ("__init__.py", "__pycache__"):
+                self.assertNotIn(py_name, copied)
+            self.assertIn("SKILL.md", copied)
+
+
+class SetupVersionAssertionTests(unittest.TestCase):
+    def test_stamped_version_matches_package_version(self):
+        from actor import __version__
+        from actor.setup import _parse_frontmatter_version
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"HOME": tmp}), \
+                 patch("actor.setup._claude_mcp_add"):
+                cmd_setup(for_host="claude-code", scope="user", name="actor", force=False)
+                skill = Path(tmp) / ".claude" / "skills" / "actor" / "SKILL.md"
+                self.assertEqual(_parse_frontmatter_version(skill.read_text()), __version__)
 
 
 if __name__ == "__main__":
