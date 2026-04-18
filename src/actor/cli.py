@@ -162,10 +162,11 @@ Examples:
     p_config.add_argument("pairs", nargs="*", default=[], metavar="KEY=VALUE", help="Config key=value pairs to set (omit to view)")
 
     # -- mcp --
-    sub.add_parser(
+    p_mcp = sub.add_parser(
         "mcp",
         help="Start MCP server (stdio transport, used by Claude Code)",
     )
+    p_mcp.add_argument("--for", dest="for_host", default=None, metavar="HOST", help="Coding agent host this server is serving (e.g. claude-code, codex)")
 
     # -- watch --
     p_watch = sub.add_parser(
@@ -186,10 +187,80 @@ Examples:
     )
     p_discard.add_argument("name", help="Actor name")
 
+    # -- setup --
+    p_setup = sub.add_parser(
+        "setup",
+        help="Install or reinstall the actor skill + register the MCP with a coding agent",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Examples:
+  actor setup --for claude-code                     User-wide install
+  actor setup --for claude-code --scope project     Project-local install
+  actor setup --for claude-code --name actor-dev    Register under a different name
+
+'setup' is idempotent — safe to re-run. For a lightweight refresh of
+just the skill files after upgrading actor-sh, use 'actor update'.""",
+    )
+    p_setup.add_argument("--for", dest="for_host", required=True, metavar="HOST", help="Coding agent host (currently supported: claude-code)")
+    p_setup.add_argument("--scope", default="user", choices=["user", "project", "local"], help="Where to install (default: user)")
+    p_setup.add_argument("--name", default="actor", help="Name to register the MCP under (default: actor)")
+
+    # -- update --
+    p_update = sub.add_parser(
+        "update",
+        help="Refresh the deployed actor skill files to match the installed actor-sh version",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Examples:
+  actor update                                       Refresh user-wide install
+  actor update --scope project                       Refresh project-local install""",
+    )
+    p_update.add_argument("--for", dest="for_host", default="claude-code", metavar="HOST", help="Coding agent host (default: claude-code)")
+    p_update.add_argument("--scope", default="user", choices=["user", "project", "local"], help="Which install to refresh (default: user)")
+    p_update.add_argument("--name", default="actor", help="MCP name used at setup time (default: actor)")
+
+    # -- claude --
+    p_claude = sub.add_parser(
+        "claude",
+        help="Launch Claude Code with the actor channel enabled",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+All arguments are passed through to the claude CLI verbatim.
+Equivalent to: claude --dangerously-load-development-channels server:actor <args>
+
+Examples:
+  actor claude                                      Open an interactive session
+  actor claude "fix the nav bar"                    Non-interactive one-shot
+  actor claude --model opus                         Forward flags to claude""",
+    )
+    p_claude.add_argument("args", nargs=argparse.REMAINDER, help="Arguments forwarded to the claude CLI")
+
     return parser
 
 
 def main(argv: Optional[List[str]] = None) -> None:
+    effective_argv = sys.argv[1:] if argv is None else argv
+    # `actor claude ...` forwards everything after to the claude CLI verbatim.
+    # Short-circuit before argparse so unknown claude flags (--model, -p, etc.)
+    # don't trip the top-level parser.
+    if effective_argv and effective_argv[0] == "claude":
+        cmd = [
+            "claude", "--dangerously-load-development-channels", "server:actor",
+            *effective_argv[1:],
+        ]
+        try:
+            os.execvp(cmd[0], cmd)
+        except FileNotFoundError:
+            print(
+                "error: `claude` CLI not found on PATH. Install Claude Code first "
+                "(https://claude.com/claude-code).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        # execvp replaces the process on success, so control only reaches here
+        # if the call was mocked (in tests). Don't fall through to argparse.
+        return
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -199,13 +270,45 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     if args.command == "mcp":
         from .server import main as mcp_main
-        mcp_main()
+        mcp_main(for_host=args.for_host)
         return
 
     if args.command == "watch":
         from .watch import run_watch
         run_watch(serve=args.serve, animate=not args.no_animation)
         return
+
+    if args.command == "setup":
+        from .setup import cmd_setup
+        try:
+            msg = cmd_setup(
+                for_host=args.for_host,
+                scope=args.scope,
+                name=args.name,
+            )
+            print(msg)
+        except ActorError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.command == "update":
+        from .setup import cmd_update
+        try:
+            msg = cmd_update(
+                for_host=args.for_host,
+                scope=args.scope,
+                name=args.name,
+            )
+            print(msg)
+        except ActorError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    # 'claude' subcommand is short-circuited above before argparse runs;
+    # this block is unreachable but kept for clarity if anything routes
+    # back into argparse with command == "claude".
 
     try:
         db = Database.open(_db_path())

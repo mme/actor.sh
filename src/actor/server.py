@@ -8,6 +8,8 @@ import threading
 import traceback
 from typing import Any, List, Literal
 
+from . import __version__
+
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.stdio import stdio_server
 from mcp.shared.message import SessionMessage
@@ -44,13 +46,25 @@ class ActorMCP(FastMCP):
             )
 
 
-mcp = ActorMCP(
-    "actor.sh",
-    instructions=(
+def _build_instructions(for_host: str | None = None) -> str:
+    base = (
         "Events from the actor channel arrive as <channel source=\"actor\" ...>. "
         "They notify you when an actor finishes. Read the event and report the result to the user."
-    ),
-)
+    )
+    # When running from a source clone without install, we can't know the
+    # version — skip the drift hint since "unknown" would falsely trigger an
+    # `actor update` prompt every session.
+    if __version__ == "unknown":
+        return base
+    return (
+        base
+        + f"\n\nactor-sh MCP version: {__version__}. If the actor skill document "
+        "declares a different version in its frontmatter, tell the user to run "
+        "`actor update` to refresh the deployed skill, then restart this session."
+    )
+
+
+mcp = ActorMCP("actor.sh", instructions=_build_instructions())
 
 
 def _db() -> Database:
@@ -265,5 +279,15 @@ def run_actor(
     return f"Actor '{name}' is running."
 
 
-def main() -> None:
+def main(for_host: str | None = None) -> None:
+    # for_host is accepted for forward compat but not yet used — FastMCP's
+    # instructions are set once at construction (the property is read-only),
+    # so host-specific variation will require restructuring when it lands.
+    # Warn loudly if the caller passed something we're silently ignoring.
+    if for_host is not None and for_host != "claude-code":
+        print(
+            f"[actor-mcp] note: --for {for_host!r} is accepted but host-specific "
+            "behavior isn't wired up yet; running in default mode.",
+            file=sys.stderr,
+        )
     mcp.run(transport="stdio")

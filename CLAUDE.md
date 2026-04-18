@@ -8,6 +8,8 @@ Manages multiple Claude/Codex agents running in isolated git worktrees.
 src/actor/               # Python package
   cli.py                 # argparse CLI, command dispatch
   commands.py            # Command implementations (cmd_new, cmd_run, cmd_list, etc.)
+  setup.py               # 'actor setup' / 'actor update' — deploy bundled skill + register MCP
+  server.py              # MCP server entry point
   db.py                  # SQLite database layer (~/.actor/actor.db)
   types.py               # Dataclasses: Actor, Run, Status, Config
   interfaces.py          # ABCs: Agent, GitOps, ProcessManager
@@ -17,12 +19,16 @@ src/actor/               # Python package
   agents/
     claude.py            # ClaudeAgent — spawns claude CLI sessions
     codex.py             # CodexAgent — spawns codex CLI sessions
-skills/actor/
-  SKILL.md               # Claude Code skill definition (the agent-facing docs)
-  claude-config.md       # Claude agent config reference
-  codex-config.md        # Codex agent config reference
+  _skill/                # Bundled Claude Code skill (agent-facing docs)
+    SKILL.md             # Main skill definition
+    cli.md               # CLI fallback reference
+    claude-config.md     # Claude agent config reference
+    codex-config.md      # Codex agent config reference
+.claude-plugin/
+  plugin.json            # Declares src/actor/_skill as a skill location for
+                         # tooling like npx skills
 tests/
-  test_actor.py          # All tests (unittest)
+  test_*.py              # unittest suites
 spec/
   V2.md                  # V2 vision (MCP server, channels, dashboard, plugin)
   PLAN-STAGE1.md         # Stage 1 implementation plan (minimal MCP server)
@@ -40,10 +46,27 @@ uv tool install -e .       # makes `actor` globally available
 Changes to `src/actor/` take effect immediately — no reinstall needed.
 Re-run `uv tool install -e .` only when adding new console scripts to `[project.scripts]`.
 
-### Symlink the skill for global use
+### Register the skill + MCP with Claude Code
 
 ```bash
-ln -s /Users/mme/Projects/actor.sh/main/skills/actor ~/.claude/skills/actor
+actor setup --for claude-code                    # user-wide
+actor setup --for claude-code --scope project    # project-local
+```
+
+Launch a session that has the actor channel enabled:
+
+```bash
+actor claude                                      # wraps `claude --dangerously-load-development-channels server:actor`
+```
+
+Sub-claudes spawned by actors inherit the same flag automatically (see
+`ClaudeAgent._CHANNEL_ARGS`), so nested actors can receive completion
+notifications too.
+
+For dev work, after editing `src/actor/_skill/*.md`:
+
+```bash
+actor update                                      # refreshes deployed skill files in place
 ```
 
 ## Running tests
