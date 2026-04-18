@@ -23,7 +23,7 @@ LOGO = [
 LOGO_H = len(LOGO)
 
 TAGLINE = "Autonomous agent command center."
-HINT = "Spawn one from Claude Code and it will appear here."
+HINT = "Spawn actors from Claude Code and they will appear here."
 
 
 # 2D Quantum Harmonic Oscillator: ψ_{nx,ny}(x,y) = ψ_nx(x) · ψ_ny(y)
