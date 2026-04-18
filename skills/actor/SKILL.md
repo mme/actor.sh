@@ -14,13 +14,23 @@ This skill is designed around the `mcp__actor__*` tools. They return immediately
 
 **If `mcp__actor__*` tools are NOT in your tool list, prompt the user to install the MCP server before proceeding:**
 
-> This skill works best with the actor MCP server, which isn't available in the current session. Please install it:
+> This skill works best with the actor MCP server, which isn't available in the current session.
 >
-> ```
-> claude mcp add actor -- actor mcp
-> ```
->
-> Then restart this session and try again.
+> 1. Install the `actor` CLI (provides both the CLI and the MCP server):
+>    ```
+>    uv tool install actor-sh
+>    ```
+>    or, if you prefer pip:
+>    ```
+>    pip install actor-sh
+>    ```
+> 2. Register the MCP server with Claude Code:
+>    ```
+>    claude mcp add actor -- actor mcp
+>    ```
+> 3. Restart this session and try again.
+
+If `actor` is already installed but the MCP isn't registered, skip step 1. Check with `actor --version` — if that prints a version, only run the `claude mcp add` step.
 
 Only fall back to the CLI (see [cli.md](cli.md)) if the user explicitly declines to install the MCP. When using the CLI fallback, completion is not pushed — you won't know when an actor finishes without asking.
 

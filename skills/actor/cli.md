@@ -8,6 +8,20 @@ Use this reference only when:
 
 For Codex users: actor.sh is not currently compatible with Codex regardless of path, because Codex doesn't forward MCP notifications into the model's conversation. See [SKILL.md](SKILL.md) § Agent compatibility.
 
+## Prerequisite: install `actor`
+
+If `actor --version` fails, the CLI (and the MCP server) isn't installed. Install with:
+
+```
+uv tool install actor-sh
+```
+
+or:
+
+```
+pip install actor-sh
+```
+
 ---
 
 ## Create and run an actor
