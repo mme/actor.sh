@@ -6,6 +6,7 @@ import asyncio
 import sys
 import threading
 import traceback
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Any, List, Literal
 
 from mcp.server.fastmcp import FastMCP, Context
@@ -44,13 +45,29 @@ class ActorMCP(FastMCP):
             )
 
 
-mcp = ActorMCP(
-    "actor.sh",
-    instructions=(
+def _installed_version() -> str:
+    try:
+        return _pkg_version("actor-sh")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def _build_instructions(for_host: str | None = None) -> str:
+    version = _installed_version()
+    lines = [
         "Events from the actor channel arrive as <channel source=\"actor\" ...>. "
-        "They notify you when an actor finishes. Read the event and report the result to the user."
-    ),
-)
+        "They notify you when an actor finishes. Read the event and report the result to the user.",
+        "",
+        f"actor-sh MCP version: {version}. If the actor skill document declares "
+        "a different version in its frontmatter, tell the user to run "
+        "`actor update` to refresh the deployed skill, then restart this session.",
+    ]
+    # for_host is currently informational only; future: adjust the channel
+    # mechanism per host (claude-code / codex / generic).
+    return "\n".join(lines)
+
+
+mcp = ActorMCP("actor.sh", instructions=_build_instructions())
 
 
 def _db() -> Database:
@@ -265,5 +282,6 @@ def run_actor(
     return f"Actor '{name}' is running."
 
 
-def main() -> None:
+def main(for_host: str | None = None) -> None:
+    mcp.instructions = _build_instructions(for_host)
     mcp.run(transport="stdio")

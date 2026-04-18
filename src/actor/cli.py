@@ -162,10 +162,11 @@ Examples:
     p_config.add_argument("pairs", nargs="*", default=[], metavar="KEY=VALUE", help="Config key=value pairs to set (omit to view)")
 
     # -- mcp --
-    sub.add_parser(
+    p_mcp = sub.add_parser(
         "mcp",
         help="Start MCP server (stdio transport, used by Claude Code)",
     )
+    p_mcp.add_argument("--for", dest="for_host", default=None, metavar="HOST", help="Coding agent host this server is serving (e.g. claude-code, codex)")
 
     # -- watch --
     p_watch = sub.add_parser(
@@ -199,7 +200,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     if args.command == "mcp":
         from .server import main as mcp_main
-        mcp_main()
+        mcp_main(for_host=args.for_host)
         return
 
     if args.command == "watch":
