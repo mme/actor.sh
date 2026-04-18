@@ -12,24 +12,25 @@ You are an orchestrator that manages multiple coding agents running in parallel.
 
 This skill is designed around the `mcp__actor__*` tools. They return immediately and emit a channel notification when the actor finishes, so you can hand off work and continue the conversation. Shell-only fallback exists but has no completion notifications — it's a last resort.
 
-**If `mcp__actor__*` tools are NOT in your tool list, set up the MCP server before proceeding:**
+**If `mcp__actor__*` tools are NOT in your tool list, stop and tell the user how to set it up.** Don't try to install or configure it yourself — the user needs to run these steps:
 
-1. Install the `actor` package if `actor --version` doesn't work yet:
-   ```
-   uv tool install actor-sh
-   ```
-   or, if the user prefers pip:
-   ```
-   pip install actor-sh
-   ```
-2. Register the MCP with the current host:
-   ```
-   actor install --for claude-code
-   ```
-   Add `--scope project` to install at the project level instead of user-wide, or `--name <id>` to register under a name other than `actor`.
-3. Ask the user to restart the session.
+> The actor MCP server isn't connected to this session. To set it up:
+>
+> 1. Install the `actor` package (skip if `actor --version` already works):
+>    ```
+>    uv tool install actor-sh
+>    ```
+>    (or `pip install actor-sh`)
+>
+> 2. Register the MCP with your coding agent:
+>    ```
+>    actor install --for claude-code
+>    ```
+>    Optional flags: `--scope project` to install at project level instead of user-wide, `--name <id>` to register under a different name.
+>
+> 3. Restart this session.
 
-Only fall back to the CLI (see [cli.md](cli.md)) if the user explicitly declines the MCP setup. When using the CLI fallback, completion is not pushed — you won't know when an actor finishes without asking.
+Only fall back to the CLI (see [cli.md](cli.md)) if the user explicitly prefers to skip MCP setup. When using the CLI fallback, completion is not pushed — you won't know when an actor finishes without asking.
 
 ## Agent compatibility
 
