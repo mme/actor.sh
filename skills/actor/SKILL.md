@@ -12,27 +12,24 @@ You are an orchestrator that manages multiple coding agents running in parallel.
 
 This skill is designed around the `mcp__actor__*` tools. They return immediately and emit a channel notification when the actor finishes, so you can hand off work and continue the conversation. Shell-only fallback exists but has no completion notifications — it's a last resort.
 
-**If `mcp__actor__*` tools are NOT in your tool list, prompt the user to install the MCP server before proceeding:**
+**If `mcp__actor__*` tools are NOT in your tool list, set up the MCP server before proceeding:**
 
-> This skill works best with the actor MCP server, which isn't available in the current session.
->
-> 1. Install the `actor` CLI (provides both the CLI and the MCP server):
->    ```
->    uv tool install actor-sh
->    ```
->    or, if you prefer pip:
->    ```
->    pip install actor-sh
->    ```
-> 2. Register the MCP server with Claude Code:
->    ```
->    claude mcp add actor -- actor mcp
->    ```
-> 3. Restart this session and try again.
+1. Install the `actor` package if `actor --version` doesn't work yet:
+   ```
+   uv tool install actor-sh
+   ```
+   or, if the user prefers pip:
+   ```
+   pip install actor-sh
+   ```
+2. Register the MCP with the current host:
+   ```
+   actor install --for claude-code
+   ```
+   Add `--scope project` to install at the project level instead of user-wide, or `--name <id>` to register under a name other than `actor`.
+3. Ask the user to restart the session.
 
-If `actor` is already installed but the MCP isn't registered, skip step 1. Check with `actor --version` — if that prints a version, only run the `claude mcp add` step.
-
-Only fall back to the CLI (see [cli.md](cli.md)) if the user explicitly declines to install the MCP. When using the CLI fallback, completion is not pushed — you won't know when an actor finishes without asking.
+Only fall back to the CLI (see [cli.md](cli.md)) if the user explicitly declines the MCP setup. When using the CLI fallback, completion is not pushed — you won't know when an actor finishes without asking.
 
 ## Agent compatibility
 
