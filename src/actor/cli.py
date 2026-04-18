@@ -51,19 +51,22 @@ def _build_parser() -> argparse.ArgumentParser:
     # -- new --
     p_new = sub.add_parser(
         "new",
-        help="Create a new actor",
+        help="Create a new actor (optionally run a prompt immediately)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
-  actor new my-feature                              Worktree from current repo
+  actor new my-feature                              Create (worktree from current repo)
+  actor new my-feature "fix the nav bar"            Create and run with a prompt
   actor new my-feature --model sonnet               Use a specific model
   actor new my-feature --no-strip-api-keys          Pass API keys to the agent
   actor new my-feature --no-worktree                Use current directory directly
   actor new my-feature --dir /path/to/repo          Worktree from another repo
   actor new my-feature --base develop               Branch off develop
-  actor new my-feature --config effort=max          Set agent config at creation""",
+  actor new my-feature --config effort=max          Set agent config at creation
+  echo "fix it" | actor new my-feature              Create and run with piped prompt""",
     )
     p_new.add_argument("name", help="Actor name")
+    p_new.add_argument("prompt", nargs="?", default=None, help="Optional prompt to run immediately after creation")
     p_new.add_argument("--dir", default=None, help="Base directory (defaults to CWD)")
     p_new.add_argument("--no-worktree", action="store_true", help="Skip worktree creation, run in the directory directly")
     p_new.add_argument("--base", default=None, help="Branch to create the worktree from (defaults to current branch)")
@@ -71,37 +74,26 @@ Examples:
     p_new.add_argument("--model", default=None, help="Model for the agent to use")
     p_new.add_argument("--strip-api-keys", action="store_true", default=True, dest="strip_api_keys", help="Strip API keys from environment (default)")
     p_new.add_argument("--no-strip-api-keys", action="store_false", dest="strip_api_keys", help="Pass API keys through to the agent")
-    p_new.add_argument("--config", dest="config", nargs="+", default=[], metavar="KEY=VALUE", help="Config key=value pairs")
+    p_new.add_argument("--config", dest="config", action="append", default=[], metavar="KEY=VALUE", help="Config key=value pair (repeat for multiple)")
 
     # -- run --
     p_run = sub.add_parser(
         "run",
-        help="Create and/or run an actor",
+        help="Run an existing actor with a prompt",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
-  actor run fix-nav -c "fix the nav bar"             Create actor and run
-  actor run fix-nav "continue fixing"                Resume existing actor
-  actor run fix-nav -c --model opus "fix it"         Create with specific model
-  actor run fix-nav -c --agent codex "fix it"        Create with Codex agent
-  actor run fix-nav --model opus "one-off override"  Override model for this run
+  actor run fix-nav "continue fixing"                Run with a prompt
+  actor run fix-nav --config model=opus "one-off"    Temporary config override for this run
   actor run fix-nav -i                               Resume interactively
-  echo "fix it" | actor run fix-nav -c               Prompt from stdin""",
+  echo "fix it" | actor run fix-nav                  Prompt from stdin
+
+To create an actor, use 'actor new'. To change actor defaults, use 'actor config'.""",
     )
     p_run.add_argument("name", help="Actor name")
     p_run.add_argument("prompt", nargs="?", default=None, help="Prompt (reads stdin if omitted and not interactive)")
-    p_run.add_argument("-c", "--create", action="store_true", help="Create the actor first (worktree from current repo)")
     p_run.add_argument("-i", "--interactive", action="store_true", help="Resume the actor in interactive mode")
-    # Shared flags (used for both creation and run overrides)
-    p_run.add_argument("--model", default=None, help="Model for the agent to use")
-    p_run.add_argument("--strip-api-keys", action="store_true", default=None, dest="strip_api_keys", help="Strip API keys from environment (default)")
-    p_run.add_argument("--no-strip-api-keys", action="store_false", dest="strip_api_keys", help="Pass API keys through to the agent")
-    p_run.add_argument("--config", dest="config", nargs="+", default=[], metavar="KEY=VALUE", help="Config key=value pairs")
-    # Creation-only flags (require -c)
-    p_run.add_argument("--agent", default="claude", help="Coding agent to use (requires -c)")
-    p_run.add_argument("--dir", default=None, help="Base directory (requires -c)")
-    p_run.add_argument("--base", default=None, help="Branch to create worktree from (requires -c)")
-    p_run.add_argument("--no-worktree", action="store_true", help="Skip worktree creation (requires -c)")
+    p_run.add_argument("--config", dest="config", action="append", default=[], metavar="KEY=VALUE", help="Per-run config override key=value (repeat for multiple, not saved to actor)")
 
     # -- list --
     p_list = sub.add_parser(
@@ -246,34 +238,28 @@ def main(argv: Optional[List[str]] = None) -> None:
             )
             print(f"{actor.name} created ({actor.dir})")
 
+            prompt = args.prompt
+            stdin_consumed = False
+            if prompt is None and not sys.stdin.isatty():
+                prompt = sys.stdin.read().strip()
+                stdin_consumed = True
+            if stdin_consumed and not prompt:
+                print("error: stdin was empty — expected a prompt", file=sys.stderr)
+                sys.exit(1)
+            if prompt:
+                try:
+                    agent = agent_for(args.name)
+                    cmd_run(
+                        db, agent, proc_mgr,
+                        name=args.name,
+                        prompt=prompt,
+                        config_pairs=[],  # creation flags already saved as defaults
+                    )
+                except Exception as e:
+                    print(f"error: actor created but run failed: {e}", file=sys.stderr)
+                    sys.exit(2)
+
         elif args.command == "run":
-            # Validate creation-only flags
-            creation_only = {"dir": args.dir, "base": args.base}
-            if args.no_worktree:
-                creation_only["no-worktree"] = True
-            for flag, val in creation_only.items():
-                if val and not args.create:
-                    raise ActorError(f"--{flag} requires -c/--create")
-
-            # Build config pairs from flags
-            config_pairs = list(args.config)
-            if args.model is not None:
-                config_pairs.append(f"model={args.model}")
-            if args.strip_api_keys is not None:
-                config_pairs.append(f"strip-api-keys={'true' if args.strip_api_keys else 'false'}")
-
-            # Create actor if requested
-            if args.create:
-                cmd_new(
-                    db, git,
-                    name=args.name,
-                    dir=args.dir,
-                    no_worktree=args.no_worktree,
-                    base=args.base,
-                    agent_name=args.agent,
-                    config_pairs=config_pairs,
-                )
-
             # Interactive mode
             if args.interactive:
                 actor = db.get_actor(args.name)
@@ -305,7 +291,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 db, agent, proc_mgr,
                 name=args.name,
                 prompt=prompt,
-                config_pairs=config_pairs if not args.create else [],
+                config_pairs=list(args.config),
             )
 
         elif args.command == "list":

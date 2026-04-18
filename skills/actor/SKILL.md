@@ -14,7 +14,7 @@ Requires `pip install actor-sh` (Python 3.9+). All commands below use the `actor
 
 ## Core Rules
 
-1. **Always run `actor run` in background mode.** Use the Bash tool's `run_in_background: true` parameter. Do NOT use shell `&`. You will be automatically notified when the actor finishes. **Each `actor run` MUST be its own separate Bash tool call.** Never batch multiple `actor run` commands in a single Bash call — this prevents proper process tracking and notification.
+1. **Always run `actor new`/`actor run` in background mode.** Use the Bash tool's `run_in_background: true` parameter. Do NOT use shell `&`. You will be automatically notified when the actor finishes. **Each `actor new`/`actor run` with a prompt MUST be its own separate Bash tool call.** Never batch multiple such calls in a single Bash call — this prevents proper process tracking and notification.
 2. **ALWAYS read the output when an actor finishes.** When you receive a background task notification, you MUST read the output file BEFORE taking any further action or responding to the user. The agent may have asked a question, proposed a plan, or reported an error. You cannot know what happened without reading the output.
 3. **Do NOT use `actor logs` for routine output.** The background notification output file is your primary source. Only use `actor logs` when the user explicitly asks for logs or you need historical context.
 4. **Choose descriptive actor names.** The name becomes the git branch. Use lowercase with hyphens: `fix-auth`, `refactor-nav`, `add-tests`.
@@ -25,31 +25,54 @@ Requires `pip install actor-sh` (Python 3.9+). All commands below use the `actor
 
 ## Commands Reference
 
-### Run an actor
+### Create and run an actor
+
+Use `actor new` to create a new actor. If you pass a prompt, it also runs immediately.
+
 ```bash
-actor run <name> -c "<prompt>"            # create and run (worktree from current repo)
-actor run <name> "<prompt>"               # run existing actor (resumes session)
-actor run <name> -c --model opus "<prompt>"       # create with specific model
-actor run <name> -c --agent codex "<prompt>"      # create with Codex agent
-actor run <name> -c --base develop "<prompt>"     # create from specific branch
-actor run <name> -c --dir /path/to/repo "<prompt>"  # create from another repo
-actor run <name> -c --no-worktree "<prompt>"      # create without worktree
-actor run <name> -i                       # resume interactively (not for skill use)
+actor new <name> "<prompt>"                       # create and run (worktree from current repo)
+actor new <name>                                   # create without running
+actor new <name> --model opus "<prompt>"           # create with specific model
+actor new <name> --agent codex "<prompt>"          # create with Codex agent
+actor new <name> --base develop "<prompt>"         # create from specific branch
+actor new <name> --dir /path/to/repo "<prompt>"    # create from another repo
+actor new <name> --no-worktree "<prompt>"          # create without worktree
+actor new <name> --no-strip-api-keys "<prompt>"    # pass API keys through to the agent
+echo "fix it" | actor new <name>                   # prompt from stdin
 ```
 
-The `-c` flag creates the actor before running. Without `-c`, the actor must already exist.
+### Run an existing actor
 
-**Prompt:** Pass as an argument or pipe via stdin (`echo "fix it" | actor run name -c`).
+Use `actor run` to run an actor that already exists (resumes its session).
+
+```bash
+actor run <name> "<prompt>"                                # run with a prompt
+actor run <name> --config model=opus "<prompt>"            # one-off per-run config override (not saved)
+actor run <name> -i                                        # resume interactively (not for skill use)
+echo "fix it" | actor run <name>                           # prompt from stdin
+```
 
 **Flags:**
-- `--model` sets the model. On `-c` it's saved for all runs; without `-c` it overrides this run only.
-- `--agent` selects the coding agent: `claude` (default), `codex`. Requires `-c`.
-- `--strip-api-keys` (default: on) strips API keys from the environment so agents use subscription auth. Use `--no-strip-api-keys` to pass keys through.
-- `--config key=value` sets agent-specific options. Bare keys (no `=`) are boolean flags. See the config reference for your agent:
-  - [Claude config](claude-config.md)
-  - [Codex config](codex-config.md)
+- `--config key=value ...` — per-run config overrides. NOT saved to the actor's defaults. Use `actor config` to change defaults.
+
+### Change actor configuration
+
+Config set at creation (`actor new --model ...`) becomes the actor's defaults. To change defaults later, use `actor config`.
+
+```bash
+actor config <name>                                # view config
+actor config <name> model=opus                     # update one key
+actor config <name> model=sonnet effort=max        # update multiple
+```
+
+Config changes apply to the **next** run — they don't affect an in-flight run. Structural properties (agent, worktree, dir, base branch) are set at creation and can't be changed via `config`.
+
+**Config reference by agent:**
+- [Claude config](claude-config.md)
+- [Codex config](codex-config.md)
 
 ### Monitor actors
+
 ```bash
 actor list                                # all actors and their status
 actor list --status running               # only running actors
@@ -59,13 +82,13 @@ actor logs <name> --verbose               # full output with tool calls, thinkin
 ```
 
 ### Manage actors
+
 ```bash
 actor stop <name>                         # kill a running actor
-actor config <name>                       # view config
-actor config <name> model=opus            # update config
 ```
 
 ### Finish actors
+
 ```bash
 actor discard <name>                      # remove actor from DB (worktree stays on disk)
 ```
@@ -74,14 +97,14 @@ actor discard <name>                      # remove actor from DB (worktree stays
 
 ### User: "spin up an actor to refactor the auth module"
 ```bash
-actor run refactor-auth -c "Refactor the auth module. Simplify the token validation logic, remove dead code, and make sure all tests pass."
+actor new refactor-auth "Refactor the auth module. Simplify the token validation logic, remove dead code, and make sure all tests pass."
 ```
 
 ### User: "start three actors: fix the nav, update the tests, and rewrite the README"
 ```bash
-actor run fix-nav -c "Fix the navigation bar — it's broken on mobile viewports"
-actor run update-tests -c "Update all test files to use the new test utilities"
-actor run rewrite-readme -c "Rewrite the README with proper setup instructions and examples"
+actor new fix-nav "Fix the navigation bar — it's broken on mobile viewports"
+actor new update-tests "Update all test files to use the new test utilities"
+actor new rewrite-readme "Rewrite the README with proper setup instructions and examples"
 ```
 
 ### User: "what are my actors doing?"
@@ -121,17 +144,17 @@ actor run feature "Commit all your changes with a descriptive message."
 ```
 After the actor commits:
 ```bash
-actor run feature-v2 -c --base feature "Take a different approach to..."
+actor new feature-v2 --base feature "Take a different approach to..."
 ```
 
 ### User: "start a codex actor to fix the API"
 ```bash
-actor run fix-api -c --agent codex "Fix the /users API endpoint — it returns 500 on missing email field"
+actor new fix-api --agent codex "Fix the /users API endpoint — it returns 500 on missing email field"
 ```
 
 ### User: "start an actor on the backend repo to fix the API"
 ```bash
-actor run fix-api -c --dir /path/to/backend-repo "Fix the /users API endpoint — it returns 500 on missing email field"
+actor new fix-api --dir /path/to/backend-repo "Fix the /users API endpoint — it returns 500 on missing email field"
 ```
 
 ## Crafting Prompts for Actors
@@ -149,4 +172,4 @@ Choose based on context. If the user gave clear requirements, tell the actor to 
 - Each actor gets its own git worktree by default, so multiple actors can work on the same repo without conflicts.
 - Actor sessions persist — you can `actor run` multiple prompts against the same actor and it remembers context.
 - If an actor errors, check `actor logs <name> --verbose` to see what went wrong, then `actor run <name> "fix the issue"` to retry.
-- When the user says something like "kick off", "spin up", "start", "launch", or "create an actor" — that means `actor run -c`.
+- When the user says something like "kick off", "spin up", "start", "launch", or "create an actor" — that means `actor new <name> "<prompt>"`.
