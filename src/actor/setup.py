@@ -179,19 +179,16 @@ def cmd_setup(
     for_host: str,
     scope: str,
     name: str,
-    force: bool,
 ) -> str:
     _validate_host(for_host)
     _validate_scope(scope)
     _validate_name(name)
 
     target = _skill_target_dir(for_host, scope, name)
-    if target.exists() and not force:
-        raise ActorError(
-            f"{target} already exists. Use --force to overwrite, "
-            "or run 'actor update' to refresh an existing install."
-        )
 
+    # setup is idempotent. If the target already exists we replace it
+    # (including re-registering the MCP). For a lightweight skill-only
+    # refresh, use `actor update` instead.
     # Stage the new skill in a sibling temp dir, validate (SKILL.md present,
     # version stampable), then atomically swap. This way a broken install or
     # a missing bundled resource doesn't destroy the existing skill.
@@ -227,7 +224,7 @@ def cmd_setup(
     except ActorError as e:
         raise ActorError(
             f"skill deployed to {target}, but MCP registration failed: {e}. "
-            "Re-run `actor setup --for ... --force` to retry."
+            "Re-run `actor setup` to retry."
         )
 
     return (

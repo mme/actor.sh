@@ -190,19 +190,20 @@ Examples:
     # -- setup --
     p_setup = sub.add_parser(
         "setup",
-        help="Install the actor skill + register the MCP server with a coding agent",
+        help="Install or reinstall the actor skill + register the MCP with a coding agent",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
   actor setup --for claude-code                     User-wide install
   actor setup --for claude-code --scope project     Project-local install
   actor setup --for claude-code --name actor-dev    Register under a different name
-  actor setup --for claude-code --force             Overwrite an existing install""",
+
+'setup' is idempotent — safe to re-run. For a lightweight refresh of
+just the skill files after upgrading actor-sh, use 'actor update'.""",
     )
     p_setup.add_argument("--for", dest="for_host", required=True, metavar="HOST", help="Coding agent host (currently supported: claude-code)")
     p_setup.add_argument("--scope", default="user", choices=["user", "project", "local"], help="Where to install (default: user)")
     p_setup.add_argument("--name", default="actor", help="Name to register the MCP under (default: actor)")
-    p_setup.add_argument("--force", action="store_true", help="Overwrite an existing install")
 
     # -- update --
     p_update = sub.add_parser(
@@ -246,7 +247,6 @@ def main(argv: Optional[List[str]] = None) -> None:
                 for_host=args.for_host,
                 scope=args.scope,
                 name=args.name,
-                force=args.force,
             )
             print(msg)
         except ActorError as e:

@@ -94,30 +94,31 @@ class SetupEndToEndTests(unittest.TestCase):
         """Context manager that provides a tmp HOME and fakes 'claude mcp add'."""
         return tempfile.TemporaryDirectory()
 
-    def test_setup_installs_and_errors_on_existing(self):
+    def test_setup_installs_and_is_idempotent(self):
         with self._fake_home() as tmp:
             with patch.dict(os.environ, {"HOME": tmp}), \
-                 patch("actor.setup._claude_mcp_add") as mcp_add:
-                msg = cmd_setup(for_host="claude-code", scope="user", name="actor", force=False)
+                 patch("actor.setup._claude_mcp_add") as mcp_add, \
+                 patch("actor.setup._claude_mcp_remove") as mcp_remove:
+                msg = cmd_setup(for_host="claude-code", scope="user", name="actor")
                 target = Path(tmp) / ".claude" / "skills" / "actor"
                 self.assertTrue((target / "SKILL.md").exists())
                 self.assertTrue((target / "cli.md").exists())
                 self.assertIn("version: ", (target / "SKILL.md").read_text())
                 mcp_add.assert_called_once_with(name="actor", scope="user", for_host="claude-code")
+                mcp_remove.assert_not_called()  # nothing to clobber on first install
                 self.assertIn("installed", msg)
 
-                # Re-run without --force: errors
-                with self.assertRaises(ActorError):
-                    cmd_setup(for_host="claude-code", scope="user", name="actor", force=False)
-
-                # Re-run with --force: succeeds (idempotent overwrite)
-                cmd_setup(for_host="claude-code", scope="user", name="actor", force=True)
+                # Re-run: idempotent — replaces skill and re-registers MCP
+                mcp_add.reset_mock()
+                cmd_setup(for_host="claude-code", scope="user", name="actor")
                 self.assertTrue((target / "SKILL.md").exists())
+                mcp_add.assert_called_once()
+                mcp_remove.assert_called_once_with(name="actor", scope="user")
 
     def test_setup_rejects_unsupported_host(self):
         with self._fake_home() as tmp, patch.dict(os.environ, {"HOME": tmp}):
             with self.assertRaises(ActorError):
-                cmd_setup(for_host="cursor", scope="user", name="actor", force=False)
+                cmd_setup(for_host="cursor", scope="user", name="actor")
 
 
 class UpdateEndToEndTests(unittest.TestCase):
@@ -125,7 +126,7 @@ class UpdateEndToEndTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"HOME": tmp}), \
                  patch("actor.setup._claude_mcp_add"):
-                cmd_setup(for_host="claude-code", scope="user", name="actor", force=False)
+                cmd_setup(for_host="claude-code", scope="user", name="actor")
                 skill = Path(tmp) / ".claude" / "skills" / "actor" / "SKILL.md"
 
                 lines = skill.read_text().splitlines(keepends=True)
@@ -141,7 +142,7 @@ class UpdateEndToEndTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"HOME": tmp}), \
                  patch("actor.setup._claude_mcp_add"):
-                cmd_setup(for_host="claude-code", scope="user", name="actor", force=False)
+                cmd_setup(for_host="claude-code", scope="user", name="actor")
                 msg = cmd_update(for_host="claude-code", scope="user", name="actor")
                 self.assertIn("already at version", msg)
 
@@ -207,17 +208,16 @@ class BundledSkillTests(unittest.TestCase):
 class SetupAtomicSwapTests(unittest.TestCase):
     """Verify --force keeps the old install intact when the new one fails mid-flight."""
 
-    def test_post_swap_mcp_failure_mentions_force_retry(self):
+    def test_post_swap_mcp_failure_mentions_retry(self):
         from actor.errors import ActorError
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"HOME": tmp}), \
                  patch("actor.setup._claude_mcp_add",
                        side_effect=ActorError("`claude mcp add` failed: nope")):
                 with self.assertRaises(ActorError) as ctx:
-                    cmd_setup(for_host="claude-code", scope="user", name="actor", force=False)
+                    cmd_setup(for_host="claude-code", scope="user", name="actor")
                 self.assertIn("skill deployed to", str(ctx.exception))
-                self.assertIn("--force", str(ctx.exception))
-            # Skill should be on disk even though MCP registration failed
+                self.assertIn("actor setup", str(ctx.exception))
             target = Path(tmp) / ".claude" / "skills" / "actor"
             self.assertTrue((target / "SKILL.md").exists())
 
@@ -226,19 +226,19 @@ class SetupAtomicSwapTests(unittest.TestCase):
             with patch.dict(os.environ, {"HOME": tmp}), \
                  patch("actor.setup._claude_mcp_add"):
                 # First install — should succeed and leave a working skill
-                cmd_setup(for_host="claude-code", scope="user", name="actor", force=False)
+                cmd_setup(for_host="claude-code", scope="user", name="actor")
                 target = Path(tmp) / ".claude" / "skills" / "actor"
                 first_text = (target / "SKILL.md").read_text()
                 self.assertIn("version: ", first_text)
 
-            # Second install with --force, but _copy_bundled_skill raises
-            # mid-way. The existing install must survive.
+            # Second install, but _copy_bundled_skill raises mid-way. The
+            # existing install must survive.
             with patch.dict(os.environ, {"HOME": tmp}), \
                  patch("actor.setup._copy_bundled_skill",
                        side_effect=ActorError("bundled skill resources are missing")), \
                  patch("actor.setup._claude_mcp_add"):
                 with self.assertRaises(ActorError):
-                    cmd_setup(for_host="claude-code", scope="user", name="actor", force=True)
+                    cmd_setup(for_host="claude-code", scope="user", name="actor")
 
             self.assertTrue((target / "SKILL.md").exists())
             self.assertEqual((target / "SKILL.md").read_text(), first_text)
@@ -256,7 +256,7 @@ class SetupVersionAssertionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"HOME": tmp}), \
                  patch("actor.setup._claude_mcp_add"):
-                cmd_setup(for_host="claude-code", scope="user", name="actor", force=False)
+                cmd_setup(for_host="claude-code", scope="user", name="actor")
                 skill = Path(tmp) / ".claude" / "skills" / "actor" / "SKILL.md"
                 self.assertEqual(_parse_frontmatter_version(skill.read_text()), __version__)
 
