@@ -283,4 +283,11 @@ def main(for_host: str | None = None) -> None:
     # for_host is accepted for forward compat but not yet used — FastMCP's
     # instructions are set once at construction (the property is read-only),
     # so host-specific variation will require restructuring when it lands.
+    # Warn loudly if the caller passed something we're silently ignoring.
+    if for_host is not None and for_host != "claude-code":
+        print(
+            f"[actor-mcp] note: --for {for_host!r} is accepted but host-specific "
+            "behavior isn't wired up yet; running in default mode.",
+            file=sys.stderr,
+        )
     mcp.run(transport="stdio")

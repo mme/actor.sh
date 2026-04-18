@@ -204,6 +204,37 @@ class BundledSkillTests(unittest.TestCase):
             self.assertIn("SKILL.md", copied)
 
 
+class SetupAtomicSwapTests(unittest.TestCase):
+    """Verify --force keeps the old install intact when the new one fails mid-flight."""
+
+    def test_staging_failure_preserves_existing_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"HOME": tmp}), \
+                 patch("actor.setup._claude_mcp_add"):
+                # First install — should succeed and leave a working skill
+                cmd_setup(for_host="claude-code", scope="user", name="actor", force=False)
+                target = Path(tmp) / ".claude" / "skills" / "actor"
+                first_text = (target / "SKILL.md").read_text()
+                self.assertIn("version: ", first_text)
+
+            # Second install with --force, but _copy_bundled_skill raises
+            # mid-way. The existing install must survive.
+            with patch.dict(os.environ, {"HOME": tmp}), \
+                 patch("actor.setup._copy_bundled_skill",
+                       side_effect=ActorError("bundled skill resources are missing")), \
+                 patch("actor.setup._claude_mcp_add"):
+                with self.assertRaises(ActorError):
+                    cmd_setup(for_host="claude-code", scope="user", name="actor", force=True)
+
+            self.assertTrue((target / "SKILL.md").exists())
+            self.assertEqual((target / "SKILL.md").read_text(), first_text)
+            # No leftover staging directories
+            stagings = list(target.parent.glob(f".actor-staging-*"))
+            backups = list(target.parent.glob(f".actor-old-*"))
+            self.assertEqual(stagings, [])
+            self.assertEqual(backups, [])
+
+
 class SetupVersionAssertionTests(unittest.TestCase):
     def test_stamped_version_matches_package_version(self):
         from actor import __version__

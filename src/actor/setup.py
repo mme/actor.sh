@@ -8,6 +8,8 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import tempfile
 from importlib.resources import as_file, files
 from pathlib import Path
 
@@ -143,10 +145,15 @@ def _run_claude(*args: str, timeout: int = _CLAUDE_MCP_TIMEOUT_SEC) -> subproces
 
 
 def _claude_mcp_remove(name: str, scope: str) -> None:
-    """Best-effort remove an existing MCP registration. Silently succeeds if absent."""
-    # `claude mcp remove` returns non-zero when the entry doesn't exist; that's
-    # fine for our purposes (--force should be idempotent).
-    _run_claude("mcp", "remove", name, "--scope", scope)
+    """Best-effort remove an existing MCP registration. Prints to stderr on success
+    (so --force clobbering a real entry is visible); non-zero exit means no entry
+    existed, which is fine."""
+    result = _run_claude("mcp", "remove", name, "--scope", scope)
+    if result.returncode == 0:
+        print(
+            f"[setup] removed existing MCP registration for '{name}' (scope={scope})",
+            file=sys.stderr,
+        )
 
 
 def _claude_mcp_add(name: str, scope: str, for_host: str) -> None:
@@ -178,14 +185,34 @@ def cmd_setup(
             f"{target} already exists. Use --force to overwrite, "
             "or run 'actor update' to refresh an existing install."
         )
-    if target.exists():
-        shutil.rmtree(target)
-        # Also clear any stale MCP registration under this name so the
-        # subsequent `claude mcp add` doesn't collide.
+
+    # Stage the new skill in a sibling temp dir, validate (SKILL.md present,
+    # version stampable), then atomically swap. This way a broken install or
+    # a missing bundled resource doesn't destroy the existing skill.
+    parent = target.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(dir=parent, prefix=f".{name}-staging-"))
+    old_backup: Path | None = None
+    try:
+        _copy_bundled_skill(staging)
+        _stamp_version(staging / "SKILL.md", __version__)
+
+        if target.exists():
+            old_backup = parent / f".{name}-old-{os.getpid()}"
+            target.rename(old_backup)
+        staging.rename(target)
+    except Exception:
+        # Roll back the swap if we'd already moved the old install aside
+        if old_backup is not None and old_backup.exists() and not target.exists():
+            old_backup.rename(target)
+            old_backup = None
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    # Swap succeeded — clean up backup and stale MCP registration
+    if old_backup is not None:
+        shutil.rmtree(old_backup, ignore_errors=True)
         _claude_mcp_remove(name=name, scope=scope)
 
-    copied = _copy_bundled_skill(target)
-    _stamp_version(target / "SKILL.md", __version__)
     _claude_mcp_add(name=name, scope=scope, for_host=for_host)
 
     return (
@@ -209,7 +236,8 @@ def cmd_update(
     if new_version == "unknown":
         raise ActorError(
             "cannot determine installed actor-sh version — reinstall with "
-            "`uv tool install --force actor-sh` (or `pip install --upgrade actor-sh`) and retry."
+            "`uv tool install --force actor-sh` (or `pip install --upgrade actor-sh`), "
+            "then re-run `actor update`."
         )
 
     target = _skill_target_dir(for_host, scope, name)
