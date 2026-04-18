@@ -219,10 +219,48 @@ Examples:
     p_update.add_argument("--scope", default="user", choices=["user", "project", "local"], help="Which install to refresh (default: user)")
     p_update.add_argument("--name", default="actor", help="MCP name used at setup time (default: actor)")
 
+    # -- claude --
+    p_claude = sub.add_parser(
+        "claude",
+        help="Launch Claude Code with the actor channel enabled",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+All arguments are passed through to the claude CLI verbatim.
+Equivalent to: claude --dangerously-load-development-channels server:actor <args>
+
+Examples:
+  actor claude                                      Open an interactive session
+  actor claude "fix the nav bar"                    Non-interactive one-shot
+  actor claude --model opus                         Forward flags to claude""",
+    )
+    p_claude.add_argument("args", nargs=argparse.REMAINDER, help="Arguments forwarded to the claude CLI")
+
     return parser
 
 
 def main(argv: Optional[List[str]] = None) -> None:
+    effective_argv = sys.argv[1:] if argv is None else argv
+    # `actor claude ...` forwards everything after to the claude CLI verbatim.
+    # Short-circuit before argparse so unknown claude flags (--model, -p, etc.)
+    # don't trip the top-level parser.
+    if effective_argv and effective_argv[0] == "claude":
+        cmd = [
+            "claude", "--dangerously-load-development-channels", "server:actor",
+            *effective_argv[1:],
+        ]
+        try:
+            os.execvp(cmd[0], cmd)
+        except FileNotFoundError:
+            print(
+                "error: `claude` CLI not found on PATH. Install Claude Code first "
+                "(https://claude.com/claude-code).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        # execvp replaces the process on success, so control only reaches here
+        # if the call was mocked (in tests). Don't fall through to argparse.
+        return
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -267,6 +305,10 @@ def main(argv: Optional[List[str]] = None) -> None:
             print(f"error: {e}", file=sys.stderr)
             sys.exit(1)
         return
+
+    # 'claude' subcommand is short-circuited above before argparse runs;
+    # this block is unreachable but kept for clarity if anything routes
+    # back into argparse with command == "claude".
 
     try:
         db = Database.open(_db_path())

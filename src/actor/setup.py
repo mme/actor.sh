@@ -229,8 +229,8 @@ def cmd_setup(
 
     return (
         f"actor skill installed at {target} and MCP server registered "
-        f"(scope={scope}, name={name}, for={for_host}). "
-        f"Restart your Claude Code session to pick up the new skill and tools."
+        f"(scope={scope}, name={name}, for={for_host}).\n"
+        "Launch a session with `actor claude` so channel notifications are enabled."
     )
 
 

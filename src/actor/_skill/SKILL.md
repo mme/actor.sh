@@ -36,7 +36,11 @@ This skill is designed around the `mcp__actor__*` tools. They return immediately
 >    ```
 >    Optional flags: `--scope project` to install at project level instead of user-wide, `--name <id>` to register under a different name.
 >
-> 3. Restart this session.
+> 3. Launch a new session with:
+>    ```
+>    actor claude
+>    ```
+>    (this enables channel notifications so the session learns when actors finish.)
 
 Only fall back to the CLI (see [cli.md](cli.md)) if the user explicitly prefers to skip MCP setup. When using the CLI fallback, completion is not pushed — you won't know when an actor finishes without asking.
 

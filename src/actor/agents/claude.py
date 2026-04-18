@@ -75,10 +75,16 @@ class ClaudeAgent(Agent):
         encoded = ClaudeAgent._encode_dir(dir_path)
         return Path(home) / ".claude" / "projects" / encoded / f"{session_id}.jsonl"
 
+    # Enable the actor MCP's channel capability in every sub-claude so spawned
+    # actors inherit the same "notify me when the actor finishes" flow and can
+    # orchestrate their own children identically to the top-level Claude session.
+    _CHANNEL_ARGS = ["--dangerously-load-development-channels", "server:actor"]
+
     def start(self, dir: Path, prompt: str, config: Config) -> Tuple[int, Optional[str]]:
         session_id = str(uuid.uuid4())
         args = [
             "claude",
+            *self._CHANNEL_ARGS,
             "-p",
             *self._permission_args(config),
             "--session-id",
@@ -93,6 +99,7 @@ class ClaudeAgent(Agent):
     def resume(self, dir: Path, session_id: str, prompt: str, config: Config) -> int:
         args = [
             "claude",
+            *self._CHANNEL_ARGS,
             "-p",
             *self._permission_args(config),
             "--resume",

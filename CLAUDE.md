@@ -49,14 +49,24 @@ Re-run `uv tool install -e .` only when adding new console scripts to `[project.
 ### Register the skill + MCP with Claude Code
 
 ```bash
-actor setup --for claude-code        # user-wide (writes ~/.claude/skills/actor + registers MCP)
-actor setup --for claude-code --scope project   # project-local (./.claude/skills/actor + ./.mcp.json)
+actor setup --for claude-code                    # user-wide
+actor setup --for claude-code --scope project    # project-local
 ```
 
-For dev work, after editing `src/actor/_skill/*.md` re-run:
+Launch a session that has the actor channel enabled:
 
 ```bash
-actor update                         # refreshes the deployed skill files in place
+actor claude                                      # wraps `claude --dangerously-load-development-channels server:actor`
+```
+
+Sub-claudes spawned by actors inherit the same flag automatically (see
+`ClaudeAgent._CHANNEL_ARGS`), so nested actors can receive completion
+notifications too.
+
+For dev work, after editing `src/actor/_skill/*.md`:
+
+```bash
+actor update                                      # refreshes deployed skill files in place
 ```
 
 ## Running tests

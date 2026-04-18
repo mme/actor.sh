@@ -138,6 +138,81 @@ class RunCommandTests(unittest.TestCase):
                 self.assertEqual(ctx.exception.code, 1)
 
 
+class ClaudeWrapperTests(unittest.TestCase):
+    def test_execs_claude_with_channel_flag(self):
+        with patch("os.execvp") as execvp:
+            main(["claude"])
+        args, _ = execvp.call_args
+        self.assertEqual(args[0], "claude")
+        self.assertEqual(
+            args[1],
+            ["claude", "--dangerously-load-development-channels", "server:actor"],
+        )
+
+    def test_forwards_trailing_args_verbatim(self):
+        with patch("os.execvp") as execvp:
+            main(["claude", "--model", "opus", "fix the nav"])
+        args, _ = execvp.call_args
+        self.assertEqual(
+            args[1],
+            [
+                "claude",
+                "--dangerously-load-development-channels",
+                "server:actor",
+                "--model",
+                "opus",
+                "fix the nav",
+            ],
+        )
+
+    def test_missing_claude_binary_exits_cleanly(self):
+        with patch("os.execvp", side_effect=FileNotFoundError), \
+             patch("sys.stderr", io.StringIO()) as err:
+            with self.assertRaises(SystemExit) as ctx:
+                main(["claude"])
+            self.assertEqual(ctx.exception.code, 1)
+        self.assertIn("claude", err.getvalue().lower())
+
+
+class SubClaudeChannelTests(unittest.TestCase):
+    """ClaudeAgent must launch sub-claudes with the channel flag so nested actors
+    receive completion notifications identically to the top-level session."""
+
+    def test_start_includes_channel_flag(self):
+        from actor.agents.claude import ClaudeAgent
+        from pathlib import Path
+        agent = ClaudeAgent()
+
+        captured = {}
+
+        def fake_spawn(self, args, cwd, config):
+            captured["args"] = args
+            return 12345
+
+        with patch.object(ClaudeAgent, "_spawn_and_track", fake_spawn):
+            agent.start(Path("/tmp"), "hi", {})
+
+        self.assertIn("--dangerously-load-development-channels", captured["args"])
+        idx = captured["args"].index("--dangerously-load-development-channels")
+        self.assertEqual(captured["args"][idx + 1], "server:actor")
+
+    def test_resume_includes_channel_flag(self):
+        from actor.agents.claude import ClaudeAgent
+        from pathlib import Path
+        agent = ClaudeAgent()
+
+        captured = {}
+
+        def fake_spawn(self, args, cwd, config):
+            captured["args"] = args
+            return 12345
+
+        with patch.object(ClaudeAgent, "_spawn_and_track", fake_spawn):
+            agent.resume(Path("/tmp"), "some-session", "continue", {})
+
+        self.assertIn("--dangerously-load-development-channels", captured["args"])
+
+
 class McpToolTests(unittest.TestCase):
     """Exercise new_actor / run_actor wrappers."""
 
