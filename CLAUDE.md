@@ -17,10 +17,14 @@ src/actor/               # Python package
   agents/
     claude.py            # ClaudeAgent — spawns claude CLI sessions
     codex.py             # CodexAgent — spawns codex CLI sessions
-skills/actor/
-  SKILL.md               # Claude Code skill definition (the agent-facing docs)
-  claude-config.md       # Claude agent config reference
-  codex-config.md        # Codex agent config reference
+  _skill/                # Bundled Claude Code skill (agent-facing docs)
+    SKILL.md             # Main skill definition
+    cli.md               # CLI fallback reference
+    claude-config.md     # Claude agent config reference
+    codex-config.md      # Codex agent config reference
+.claude-plugin/
+  plugin.json            # Declares src/actor/_skill as a skill location for
+                         # tooling like npx skills
 tests/
   test_actor.py          # All tests (unittest)
 spec/
@@ -40,10 +44,17 @@ uv tool install -e .       # makes `actor` globally available
 Changes to `src/actor/` take effect immediately — no reinstall needed.
 Re-run `uv tool install -e .` only when adding new console scripts to `[project.scripts]`.
 
-### Symlink the skill for global use
+### Register the skill + MCP with Claude Code
 
 ```bash
-ln -s /Users/mme/Projects/actor.sh/main/skills/actor ~/.claude/skills/actor
+actor setup --for claude-code        # user-wide (writes ~/.claude/skills/actor + registers MCP)
+actor setup --for claude-code --scope project   # project-local (./.claude/skills/actor + ./.mcp.json)
+```
+
+For dev work, after editing `src/actor/_skill/*.md` re-run:
+
+```bash
+actor update                         # refreshes the deployed skill files in place
 ```
 
 ## Running tests
