@@ -6,8 +6,9 @@ import asyncio
 import sys
 import threading
 import traceback
-from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Any, List, Literal
+
+from . import __version__
 
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.stdio import stdio_server
@@ -45,15 +46,8 @@ class ActorMCP(FastMCP):
             )
 
 
-def _installed_version() -> str:
-    try:
-        return _pkg_version("actor-sh")
-    except PackageNotFoundError:
-        return "unknown"
-
-
 def _build_instructions(for_host: str | None = None) -> str:
-    version = _installed_version()
+    version = __version__
     lines = [
         "Events from the actor channel arrive as <channel source=\"actor\" ...>. "
         "They notify you when an actor finishes. Read the event and report the result to the user.",

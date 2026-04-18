@@ -187,6 +187,37 @@ Examples:
     )
     p_discard.add_argument("name", help="Actor name")
 
+    # -- setup --
+    p_setup = sub.add_parser(
+        "setup",
+        help="Install the actor skill + register the MCP server with a coding agent",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Examples:
+  actor setup --for claude-code                     User-wide install
+  actor setup --for claude-code --scope project     Project-local install
+  actor setup --for claude-code --name actor-dev    Register under a different name
+  actor setup --for claude-code --force             Overwrite an existing install""",
+    )
+    p_setup.add_argument("--for", dest="for_host", required=True, metavar="HOST", help="Coding agent host (currently supported: claude-code)")
+    p_setup.add_argument("--scope", default="user", choices=["user", "project", "local"], help="Where to install (default: user)")
+    p_setup.add_argument("--name", default="actor", help="Name to register the MCP under (default: actor)")
+    p_setup.add_argument("--force", action="store_true", help="Overwrite an existing install")
+
+    # -- update --
+    p_update = sub.add_parser(
+        "update",
+        help="Refresh the deployed actor skill files to match the installed actor-sh version",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Examples:
+  actor update                                       Refresh user-wide install
+  actor update --scope project                       Refresh project-local install""",
+    )
+    p_update.add_argument("--for", dest="for_host", default="claude-code", metavar="HOST", help="Coding agent host (default: claude-code)")
+    p_update.add_argument("--scope", default="user", choices=["user", "project", "local"], help="Which install to refresh (default: user)")
+    p_update.add_argument("--name", default="actor", help="MCP name used at setup time (default: actor)")
+
     return parser
 
 
@@ -206,6 +237,35 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.command == "watch":
         from .watch import run_watch
         run_watch(serve=args.serve, animate=not args.no_animation)
+        return
+
+    if args.command == "setup":
+        from .setup import cmd_setup
+        try:
+            msg = cmd_setup(
+                for_host=args.for_host,
+                scope=args.scope,
+                name=args.name,
+                force=args.force,
+            )
+            print(msg)
+        except ActorError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.command == "update":
+        from .setup import cmd_update
+        try:
+            msg = cmd_update(
+                for_host=args.for_host,
+                scope=args.scope,
+                name=args.name,
+            )
+            print(msg)
+        except ActorError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
         return
 
     try:
