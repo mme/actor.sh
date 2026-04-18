@@ -83,6 +83,21 @@ Tests use in-memory SQLite and fake implementations (FakeAgent, FakeGit, FakePro
 - **Worktrees:** `~/.actor/worktrees/<actor-name>/`
 - **Claude logs:** `~/.claude/projects/<encoded-dir>/<session-id>.jsonl`
 
+## Releasing
+
+Every merge to `main` automatically bumps the patch version, tags, and publishes to PyPI via `.github/workflows/release.yml`:
+
+1. Run the unit tests.
+2. `uv version --bump patch` → `0.1.3` → `0.1.4`.
+3. Commit as `chore(release): v0.1.4` and tag `v0.1.4`.
+4. `uv build` → wheel stamped with the new version.
+5. `pypa/gh-action-pypi-publish` uploads via PyPI trusted publishing (OIDC).
+6. GitHub Release created with auto-generated notes + wheel attached.
+
+The `chore(release):` prefix in the commit message prevents the workflow from retriggering on the version-bump push. Docs-only and CI-only changes (`**/*.md`, `.github/**`) are filtered out via `paths-ignore` so they don't cut a release.
+
+To skip a release manually, add `[skip release]` to the merge-commit body (requires a workflow guard update — not configured today).
+
 ## Architecture notes
 
 - Commands are pure functions that take a `Database` + interfaces and return strings. Side effects go through the `Agent`, `GitOps`, and `ProcessManager` ABCs — this is what makes everything testable with fakes.
