@@ -22,7 +22,7 @@ LOGO = [
 ]
 LOGO_H = len(LOGO)
 
-TAGLINE = "Autonomous actor command center."
+TAGLINE = "Autonomous agent command center."
 HINT = "Spawn one from Claude Code and it will appear here."
 
 
