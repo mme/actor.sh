@@ -74,7 +74,7 @@ Examples:
     p_new.add_argument("--model", default=None, help="Model for the agent to use")
     p_new.add_argument("--strip-api-keys", action="store_true", default=True, dest="strip_api_keys", help="Strip API keys from environment (default)")
     p_new.add_argument("--no-strip-api-keys", action="store_false", dest="strip_api_keys", help="Pass API keys through to the agent")
-    p_new.add_argument("--config", dest="config", nargs="+", default=[], metavar="KEY=VALUE", help="Config key=value pairs")
+    p_new.add_argument("--config", dest="config", action="append", default=[], metavar="KEY=VALUE", help="Config key=value pair (repeat for multiple)")
 
     # -- run --
     p_run = sub.add_parser(
@@ -93,7 +93,7 @@ To create an actor, use 'actor new'. To change actor defaults, use 'actor config
     p_run.add_argument("name", help="Actor name")
     p_run.add_argument("prompt", nargs="?", default=None, help="Prompt (reads stdin if omitted and not interactive)")
     p_run.add_argument("-i", "--interactive", action="store_true", help="Resume the actor in interactive mode")
-    p_run.add_argument("--config", dest="config", nargs="+", default=[], metavar="KEY=VALUE", help="Per-run config overrides (not saved to actor)")
+    p_run.add_argument("--config", dest="config", action="append", default=[], metavar="KEY=VALUE", help="Per-run config override key=value (repeat for multiple, not saved to actor)")
 
     # -- list --
     p_list = sub.add_parser(
@@ -238,18 +238,26 @@ def main(argv: Optional[List[str]] = None) -> None:
             )
             print(f"{actor.name} created ({actor.dir})")
 
-            # If a prompt was provided (arg or stdin), run immediately.
             prompt = args.prompt
+            stdin_consumed = False
             if prompt is None and not sys.stdin.isatty():
                 prompt = sys.stdin.read().strip()
+                stdin_consumed = True
+            if stdin_consumed and not prompt:
+                print("error: stdin was empty — expected a prompt", file=sys.stderr)
+                sys.exit(1)
             if prompt:
-                agent = agent_for(args.name)
-                cmd_run(
-                    db, agent, proc_mgr,
-                    name=args.name,
-                    prompt=prompt,
-                    config_pairs=[],  # creation flags already saved as defaults
-                )
+                try:
+                    agent = agent_for(args.name)
+                    cmd_run(
+                        db, agent, proc_mgr,
+                        name=args.name,
+                        prompt=prompt,
+                        config_pairs=[],  # creation flags already saved as defaults
+                    )
+                except Exception as e:
+                    print(f"error: actor created but run failed: {e}", file=sys.stderr)
+                    sys.exit(2)
 
         elif args.command == "run":
             # Interactive mode

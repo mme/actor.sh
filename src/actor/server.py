@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
-from typing import Any, List
+import traceback
+from typing import Any, List, Literal
 
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.stdio import stdio_server
@@ -13,6 +14,7 @@ from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage, JSONRPCNotification
 
 from .db import Database
+from .errors import ActorError
 from .git import RealGit
 from .process import RealProcessManager
 from .commands import (
@@ -174,6 +176,7 @@ def _spawn_background_run(
         except Exception as e:
             output = str(e)
             print(f"[actor-mcp] run for '{name}' failed: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
 
         resolved = thread_db.resolve_actor_status(name, pm)
         status = resolved.value
@@ -198,7 +201,7 @@ def _spawn_background_run(
 def new_actor(
     name: str,
     prompt: str | None = None,
-    agent: str = "claude",
+    agent: Literal["claude", "codex"] = "claude",
     dir: str | None = None,
     base: str | None = None,
     no_worktree: bool = False,
@@ -228,8 +231,15 @@ def new_actor(
         config_pairs=config or [],
     )
 
+    if prompt is not None:
+        prompt = prompt.strip()
     if prompt:
-        _spawn_background_run(name, prompt, config_pairs=[], ctx=ctx)
+        try:
+            _spawn_background_run(name, prompt, config_pairs=[], ctx=ctx)
+        except Exception as e:
+            print(f"[actor-mcp] new_actor '{name}' run failed to start: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            return f"Actor '{name}' created at {actor.dir}, but run failed to start: {e}"
         return f"Actor '{name}' created at {actor.dir} and is running."
     return f"Actor '{name}' created at {actor.dir}."
 
@@ -248,6 +258,9 @@ def run_actor(
         prompt: The task for the actor to work on.
         config: Per-run config overrides (e.g. ["model=opus"]). Not saved to actor defaults — use config_actor to change defaults.
     """
+    prompt = prompt.strip()
+    if not prompt:
+        raise ActorError("prompt is required")
     _spawn_background_run(name, prompt, config_pairs=config or [], ctx=ctx)
     return f"Actor '{name}' is running."
 

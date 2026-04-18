@@ -37,6 +37,7 @@ actor new <name> --agent codex "<prompt>"          # create with Codex agent
 actor new <name> --base develop "<prompt>"         # create from specific branch
 actor new <name> --dir /path/to/repo "<prompt>"    # create from another repo
 actor new <name> --no-worktree "<prompt>"          # create without worktree
+actor new <name> --no-strip-api-keys "<prompt>"    # pass API keys through to the agent
 echo "fix it" | actor new <name>                   # prompt from stdin
 ```
 
