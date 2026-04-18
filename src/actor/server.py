@@ -144,53 +144,17 @@ def config_actor(name: str, pairs: List[str] | None = None) -> str:
     return cmd_config(_db(), name=name, config_pairs=pairs or [])
 
 
-@mcp.tool()
-def run_actor(
+def _spawn_background_run(
     name: str,
     prompt: str,
-    create: bool = False,
-    agent: str = "claude",
-    model: str | None = None,
-    dir: str | None = None,
-    base: str | None = None,
-    no_worktree: bool = False,
-    ctx: Context | None = None,
-) -> str:
-    """Create and/or run an actor with a prompt. Returns immediately — the actor runs in the background.
-
-    Args:
-        name: Actor name (becomes the git branch). Use lowercase with hyphens.
-        prompt: The task for the actor to work on.
-        create: If True, create the actor first (with worktree from current repo).
-        agent: Coding agent — "claude" or "codex". Only used with create=True.
-        model: Model override (e.g. "opus", "sonnet"). Saved on create, one-off override otherwise.
-        dir: Base directory for the worktree. Only used with create=True.
-        base: Branch to create the worktree from. Only used with create=True.
-        no_worktree: If True, skip worktree creation. Only used with create=True.
-    """
-    db = _db()
-    git = RealGit()
+    config_pairs: list[str],
+    ctx: Context | None,
+) -> None:
+    """Kick off a run in a background thread; send a channel notification when it finishes."""
     pm = RealProcessManager()
-
-    config_pairs: list[str] = []
-    if model is not None:
-        config_pairs.append(f"model={model}")
-
-    if create:
-        cmd_new(
-            db, git,
-            name=name,
-            dir=dir,
-            no_worktree=no_worktree,
-            base=base,
-            agent_name=agent,
-            config_pairs=config_pairs,
-        )
-
-    actor = db.get_actor(name)
+    actor = _db().get_actor(name)
     agent_impl = _create_agent(actor.agent)
 
-    # Capture session and event loop for channel notification
     session = ctx.session if ctx else None
     try:
         loop = asyncio.get_running_loop()
@@ -205,17 +169,15 @@ def run_actor(
                 thread_db, agent_impl, pm,
                 name=name,
                 prompt=prompt,
-                config_pairs=config_pairs if not create else [],
+                config_pairs=config_pairs,
             )
         except Exception as e:
             output = str(e)
-            print(f"[actor-mcp] run_actor '{name}' failed: {e}", file=sys.stderr)
+            print(f"[actor-mcp] run for '{name}' failed: {e}", file=sys.stderr)
 
-        # Read actual status from DB
         resolved = thread_db.resolve_actor_status(name, pm)
-        status = resolved.value  # "done", "error", "running", etc.
+        status = resolved.value
 
-        # Push channel notification
         if session and loop:
             body = output or f"Finished with status: {status}."
             content = f"[{name}] {body}"
@@ -229,9 +191,64 @@ def run_actor(
             except Exception as e:
                 print(f"[actor-mcp] failed to send channel notification: {e}", file=sys.stderr)
 
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
+    threading.Thread(target=_run, daemon=True).start()
 
+
+@mcp.tool()
+def new_actor(
+    name: str,
+    prompt: str | None = None,
+    agent: str = "claude",
+    dir: str | None = None,
+    base: str | None = None,
+    no_worktree: bool = False,
+    config: List[str] | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """Create a new actor. If a prompt is given, also runs it in the background.
+
+    Args:
+        name: Actor name (becomes the git branch). Use lowercase with hyphens.
+        prompt: Optional prompt to run immediately after creation.
+        agent: Coding agent — "claude" or "codex".
+        dir: Base directory for the worktree (defaults to current working directory).
+        base: Branch to create the worktree from (defaults to current branch).
+        no_worktree: If True, skip worktree creation.
+        config: Config key=value pairs saved as actor defaults (e.g. ["model=opus", "effort=max"]).
+    """
+    db = _db()
+    git = RealGit()
+    actor = cmd_new(
+        db, git,
+        name=name,
+        dir=dir,
+        no_worktree=no_worktree,
+        base=base,
+        agent_name=agent,
+        config_pairs=config or [],
+    )
+
+    if prompt:
+        _spawn_background_run(name, prompt, config_pairs=[], ctx=ctx)
+        return f"Actor '{name}' created at {actor.dir} and is running."
+    return f"Actor '{name}' created at {actor.dir}."
+
+
+@mcp.tool()
+def run_actor(
+    name: str,
+    prompt: str,
+    config: List[str] | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """Run an existing actor with a prompt. Returns immediately — the actor runs in the background.
+
+    Args:
+        name: Actor name.
+        prompt: The task for the actor to work on.
+        config: Per-run config overrides (e.g. ["model=opus"]). Not saved to actor defaults — use config_actor to change defaults.
+    """
+    _spawn_background_run(name, prompt, config_pairs=config or [], ctx=ctx)
     return f"Actor '{name}' is running."
 
 
