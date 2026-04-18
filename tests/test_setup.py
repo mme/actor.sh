@@ -207,6 +207,20 @@ class BundledSkillTests(unittest.TestCase):
 class SetupAtomicSwapTests(unittest.TestCase):
     """Verify --force keeps the old install intact when the new one fails mid-flight."""
 
+    def test_post_swap_mcp_failure_mentions_force_retry(self):
+        from actor.errors import ActorError
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"HOME": tmp}), \
+                 patch("actor.setup._claude_mcp_add",
+                       side_effect=ActorError("`claude mcp add` failed: nope")):
+                with self.assertRaises(ActorError) as ctx:
+                    cmd_setup(for_host="claude-code", scope="user", name="actor", force=False)
+                self.assertIn("skill deployed to", str(ctx.exception))
+                self.assertIn("--force", str(ctx.exception))
+            # Skill should be on disk even though MCP registration failed
+            target = Path(tmp) / ".claude" / "skills" / "actor"
+            self.assertTrue((target / "SKILL.md").exists())
+
     def test_staging_failure_preserves_existing_install(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"HOME": tmp}), \

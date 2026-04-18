@@ -142,6 +142,12 @@ def _run_claude(*args: str, timeout: int = _CLAUDE_MCP_TIMEOUT_SEC) -> subproces
             f"`claude {' '.join(args)}` timed out after {timeout}s. "
             "Try running it manually to see what's happening."
         )
+    except OSError as e:
+        # Catches PermissionError, broken-pipe-style OSError, and friends.
+        raise ActorError(
+            f"could not invoke `claude {' '.join(args)}`: {e}. "
+            "Check that the claude CLI is executable."
+        )
 
 
 def _claude_mcp_remove(name: str, scope: str) -> None:
@@ -211,9 +217,18 @@ def cmd_setup(
     # Swap succeeded — clean up backup and stale MCP registration
     if old_backup is not None:
         shutil.rmtree(old_backup, ignore_errors=True)
-        _claude_mcp_remove(name=name, scope=scope)
 
-    _claude_mcp_add(name=name, scope=scope, for_host=for_host)
+    # From here on the skill is deployed. Wrap MCP steps so a failure tells
+    # the user how to retry just the registration without wiping state.
+    try:
+        if old_backup is not None:
+            _claude_mcp_remove(name=name, scope=scope)
+        _claude_mcp_add(name=name, scope=scope, for_host=for_host)
+    except ActorError as e:
+        raise ActorError(
+            f"skill deployed to {target}, but MCP registration failed: {e}. "
+            "Re-run `actor setup --for ... --force` to retry."
+        )
 
     return (
         f"actor skill installed at {target} and MCP server registered "
