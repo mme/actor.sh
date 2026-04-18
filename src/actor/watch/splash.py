@@ -105,7 +105,7 @@ class Splash(Widget):
 
     def on_mount(self) -> None:
         if self._animate:
-            self.set_interval(1 / 15, self._tick)
+            self.set_interval(1 / 30, self._tick)
 
     def _tick(self) -> None:
         self._frame_dirty = True
