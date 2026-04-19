@@ -371,7 +371,11 @@ def main(argv: Optional[List[str]] = None) -> None:
                     db, agent, proc_mgr, name=args.name,
                 )
                 print(msg, file=sys.stderr)
-                sys.exit(exit_code if exit_code >= 0 else 1)
+                # POSIX convention for signal termination: 128 + signum.
+                # cmd_interactive returns -signum in that case.
+                if exit_code < 0:
+                    sys.exit(128 - exit_code)
+                sys.exit(exit_code)
 
             # Resolve prompt: argument, stdin, or error
             prompt = args.prompt

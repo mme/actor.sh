@@ -457,10 +457,17 @@ class ActorWatchApp(App):
 
     def _sync_detail_view(self) -> None:
         """Switch the detail panel between tabs and an interactive terminal
-        based on whether the currently-selected actor has a live session."""
+        based on whether the currently-selected actor has a live session.
+
+        NoMatches is silently tolerated because this runs from on_ready,
+        on_tree_node_highlighted, and keybindings — the detail layout
+        may not yet be mounted on the first tick.
+        """
+        from textual.css.query import NoMatches
+
         try:
             switcher = self.query_one("#detail-switcher", ContentSwitcher)
-        except Exception:
+        except NoMatches:
             return
         actor = self.query_one(ActorTree).selected_actor
         if actor is None or not self._interactive.has(actor.name):
@@ -475,7 +482,6 @@ class ActorWatchApp(App):
             self._interactive_active = None
             return
 
-        # Unmount any previously-shown terminal, mount this one.
         view = self.query_one("#interactive-view", Vertical)
         for child in list(view.children):
             child.remove()
@@ -529,23 +535,22 @@ class ActorWatchApp(App):
         self._sync_detail_view()
 
     def on_terminal_widget_exit_requested(self, message: TerminalWidget.ExitRequested) -> None:
-        """Ctrl+Z: leave interactive mode but keep the session alive in the bg."""
-        # Find the actor this widget belongs to.
-        name = self._interactive_active
-        if name is None:
+        """Ctrl+Z — leave the widget but keep the subprocess alive."""
+        from textual.css.query import NoMatches
+
+        if self._interactive_active is None:
             return
         try:
-            switcher = self.query_one("#detail-switcher", ContentSwitcher)
-            switcher.current = "tabs-view"
-        except Exception:
+            self.query_one("#detail-switcher", ContentSwitcher).current = "tabs-view"
+        except NoMatches:
             pass
-        # Return focus to the tree.
         self.query_one(ActorTree).focus()
         self._interactive_active = None
 
     def on_terminal_widget_session_exited(self, message: TerminalWidget.SessionExited) -> None:
-        """Child process exited on its own. Close the session and restore logs."""
-        # Find the matching actor in the manager.
+        """Child process exited on its own — close the session, restore logs."""
+        from textual.css.query import NoMatches
+
         target: str | None = None
         for name in self._interactive.live_names():
             info = self._interactive.get(name)
@@ -557,15 +562,13 @@ class ActorWatchApp(App):
         self._interactive.close(target)
         if self._interactive_active == target:
             try:
-                switcher = self.query_one("#detail-switcher", ContentSwitcher)
-                switcher.current = "tabs-view"
-            except Exception:
+                self.query_one("#detail-switcher", ContentSwitcher).current = "tabs-view"
+            except NoMatches:
                 pass
             self._interactive_active = None
         code = message.exit_code
         severity = "information" if code == 0 else "warning"
         self.notify(f"{target} interactive session ended (exit {code})", severity=severity)
-        # Refresh the logs so the new *interactive* run row is visible.
         self._refresh_detail()
 
     def action_dump_diagnostics(self) -> None:
@@ -581,11 +584,9 @@ class ActorWatchApp(App):
 
     def on_unmount(self) -> None:
         """Textual app teardown: kill all live interactive subprocesses so
-        no PTY child outlives the watch process."""
-        try:
-            self._interactive.close_all()
-        except Exception:
-            pass
+        no PTY child outlives the watch process. close_all() already
+        catches per-session failures and routes them to diagnostics."""
+        self._interactive.close_all()
 
     def _focus_detail_content(self, tab_id: str | None = None) -> None:
         if tab_id is None:

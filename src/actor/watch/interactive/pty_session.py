@@ -19,13 +19,18 @@ import pty
 import signal
 import struct
 import termios
+import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+from .diagnostics import DiagnosticRecorder, EventKind
 
-# Observed "best" chunk size that keeps latency low without overwhelming
-# the parser. 64 KiB matches cmdlane; keeps us aligned with how OS delivers.
+
+# 64 KiB chunk keeps latency low without overwhelming the parser.
 _READ_CHUNK = 65536
+# Poll interval when waitpid needs to escalate from SIGTERM to SIGKILL.
+_TERM_POLL_S = 0.05
+_TERM_DEADLINE_S = 0.5
 
 
 class PtySession:
@@ -40,6 +45,7 @@ class PtySession:
         cols: int = 80,
         on_output: Optional[Callable[[bytes], None]] = None,
         on_exit: Optional[Callable[[int], None]] = None,
+        recorder: Optional[DiagnosticRecorder] = None,
     ) -> None:
         if not argv:
             raise ValueError("argv must be non-empty")
@@ -50,35 +56,52 @@ class PtySession:
         self._cols = cols
         self._on_output = on_output
         self._on_exit = on_exit
+        self._recorder = recorder
         self._pid: Optional[int] = None
         self._fd: Optional[int] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._exit_code: Optional[int] = None
         self._exit_fired = False
+        # Pending writes held back by EAGAIN, drained via add_writer.
+        self._write_queue: bytearray = bytearray()
+        self._writer_registered = False
+
+    def set_callbacks(
+        self,
+        *,
+        on_output: Optional[Callable[[bytes], None]] = None,
+        on_exit: Optional[Callable[[int], None]] = None,
+    ) -> None:
+        """Swap callbacks. Used by widget + manager to chain handlers.
+        Pass only the fields you want to replace — omitted args stay."""
+        if on_output is not None:
+            self._on_output = on_output
+        if on_exit is not None:
+            self._on_exit = on_exit
 
     # -- lifecycle ---------------------------------------------------------
 
     def spawn(self) -> None:
-        """Fork + exec the child. Must be called from an async context so
-        the running loop can be used as the read-loop driver."""
         if self._pid is not None:
             raise RuntimeError("already spawned")
 
         pid, fd = pty.fork()
         if pid == 0:
-            # Child: replace process image.
+            # In the child, fds 0/1/2 are already the pty slave after pty.fork.
             try:
-                _set_winsize(0, self._rows, self._cols)  # 0 = our stdin, now the slave
-                if self._env is None:
-                    env = dict(os.environ)
-                else:
-                    env = dict(self._env)
-                # Ensure the child sees a sane TERM — claude uses it for color.
+                _set_winsize(0, self._rows, self._cols)
+                env = dict(os.environ) if self._env is None else dict(self._env)
                 env.setdefault("TERM", "xterm-256color")
                 os.chdir(str(self._cwd))
                 os.execvpe(self._argv[0], self._argv, env)
-            except BaseException:
-                # If exec fails, don't come back into asyncio-land.
+            except BaseException as e:
+                # Can't raise back out of the forked child — its parent
+                # already forked away. Surface an exec-failure hint on
+                # stderr so the user sees "exit 127" with a reason.
+                try:
+                    os.write(2, f"actor: exec failed: {e}\n".encode())
+                except Exception:
+                    pass
                 os._exit(127)
 
         self._pid = pid
@@ -92,31 +115,56 @@ class PtySession:
     # -- I/O ---------------------------------------------------------------
 
     def write(self, data: bytes) -> None:
-        """Write input bytes to the child. Silently no-ops if the session
-        has already exited (caller can check `.exited` if they care)."""
-        if self._fd is None:
+        """Write input bytes to the child. No-ops after the PTY master is
+        closed. Queues + backs off on EAGAIN (full PTY buffer)."""
+        if self._fd is None or not data:
+            return
+        # If we already have pending bytes, append — the writer-drainer
+        # will flush everything in order.
+        if self._write_queue:
+            self._write_queue.extend(data)
+            self._ensure_writer()
             return
         try:
-            os.write(self._fd, data)
+            written = os.write(self._fd, data)
         except OSError as e:
             if e.errno in (errno.EBADF, errno.EIO):
                 self._handle_exit()
                 return
+            if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                self._write_queue.extend(data)
+                self._ensure_writer()
+                return
+            self._record_error(f"write errno {e.errno}: {e}")
             raise
+        if written < len(data):
+            self._write_queue.extend(data[written:])
+            self._ensure_writer()
 
     def resize(self, rows: int, cols: int) -> None:
         if rows <= 0 or cols <= 0:
             return
         self._rows = rows
         self._cols = cols
-        if self._fd is not None:
-            try:
-                _set_winsize(self._fd, rows, cols)
-            except OSError:
-                pass
+        if self._fd is None:
+            return
+        try:
+            _set_winsize(self._fd, rows, cols)
+        except OSError as e:
+            # ENOTTY / EBADF mean the fd is no longer a pty (child exited
+            # mid-resize). Record and proceed with exit handling.
+            self._record_error(f"resize ioctl errno {e.errno}: {e}")
+            if e.errno in (errno.EBADF, errno.ENOTTY):
+                self._handle_exit()
 
     def close(self, signal_no: int = signal.SIGTERM) -> None:
-        """Kill + reap the child. Idempotent. Fires on_exit exactly once."""
+        """Signal + reap the child. Escalates to SIGKILL if the child ignores
+        signal_no. Idempotent. Fires on_exit exactly once.
+
+        Uses os.kill(pid, 0) to probe liveness rather than WNOHANG waitpid
+        so we don't reap here — reaping happens in a single place (_reap)
+        so exit-status translation lives in one place.
+        """
         if self._pid is None and self._exit_fired:
             return
         if self._pid is not None:
@@ -124,10 +172,21 @@ class PtySession:
                 os.kill(self._pid, signal_no)
             except ProcessLookupError:
                 pass
+            deadline = time.monotonic() + _TERM_DEADLINE_S
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(self._pid, 0)  # probe only
+                except ProcessLookupError:
+                    break
+                time.sleep(_TERM_POLL_S)
+            else:
+                try:
+                    os.kill(self._pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
         self._handle_exit()
 
     def kill(self) -> None:
-        """Unconditionally SIGKILL the child."""
         self.close(signal.SIGKILL)
 
     # -- properties --------------------------------------------------------
@@ -162,12 +221,51 @@ class PtySession:
                 return
             if e.errno == errno.EAGAIN:
                 return
+            self._record_error(f"read errno {e.errno}: {e}")
             raise
         if not data:
             self._handle_exit()
             return
         if self._on_output is not None:
-            self._on_output(data)
+            try:
+                self._on_output(data)
+            except Exception as e:  # pragma: no cover — defensive
+                self._record_error(f"on_output raised: {e!r}")
+
+    def _ensure_writer(self) -> None:
+        if self._writer_registered or self._fd is None or self._loop is None:
+            return
+        self._loop.add_writer(self._fd, self._drain_writer)
+        self._writer_registered = True
+
+    def _drain_writer(self) -> None:
+        if self._fd is None or not self._write_queue:
+            self._unregister_writer()
+            return
+        try:
+            written = os.write(self._fd, bytes(self._write_queue))
+        except OSError as e:
+            if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                return
+            if e.errno in (errno.EBADF, errno.EIO):
+                self._unregister_writer()
+                self._handle_exit()
+                return
+            self._record_error(f"drain errno {e.errno}: {e}")
+            self._unregister_writer()
+            return
+        del self._write_queue[:written]
+        if not self._write_queue:
+            self._unregister_writer()
+
+    def _unregister_writer(self) -> None:
+        if not self._writer_registered or self._fd is None or self._loop is None:
+            return
+        try:
+            self._loop.remove_writer(self._fd)
+        except (ValueError, KeyError) as e:
+            self._record_error(f"remove_writer: {e!r}")
+        self._writer_registered = False
 
     def _handle_exit(self) -> None:
         if self._exit_fired:
@@ -176,26 +274,31 @@ class PtySession:
         if self._fd is not None and self._loop is not None:
             try:
                 self._loop.remove_reader(self._fd)
-            except (ValueError, KeyError):
-                pass
+            except (ValueError, KeyError) as e:
+                self._record_error(f"remove_reader: {e!r}")
+            self._unregister_writer()
         self._reap()
         if self._on_exit is not None and self._exit_code is not None:
             self._on_exit(self._exit_code)
 
     def _reap(self) -> None:
         if self._pid is None:
+            if self._exit_code is None:
+                self._exit_code = -1
+            self._close_fd()
             return
         try:
             pid, status = os.waitpid(self._pid, os.WNOHANG)
             if pid == 0:
-                # Still alive; try a blocking wait briefly.
+                # Still alive; close() has already signalled. Block briefly
+                # — SIGKILL guarantees reap in bounded time.
                 pid, status = os.waitpid(self._pid, 0)
         except ChildProcessError:
-            # Already reaped.
-            self._exit_code = self._exit_code if self._exit_code is not None else -1
+            if self._exit_code is None:
+                self._exit_code = -1
             self._pid = None
+            self._close_fd()
             return
-        # Translate status to exit code.
         if os.WIFEXITED(status):
             self._exit_code = os.WEXITSTATUS(status)
         elif os.WIFSIGNALED(status):
@@ -203,12 +306,20 @@ class PtySession:
         else:
             self._exit_code = -1
         self._pid = None
-        if self._fd is not None:
-            try:
-                os.close(self._fd)
-            except OSError:
-                pass
-            self._fd = None
+        self._close_fd()
+
+    def _close_fd(self) -> None:
+        if self._fd is None:
+            return
+        try:
+            os.close(self._fd)
+        except OSError:
+            pass
+        self._fd = None
+
+    def _record_error(self, note: str) -> None:
+        if self._recorder is not None:
+            self._recorder.record(EventKind.ERROR, note=note)
 
 
 # --- low-level helpers ----------------------------------------------------
@@ -219,6 +330,5 @@ def _set_nonblocking(fd: int) -> None:
 
 
 def _set_winsize(fd: int, rows: int, cols: int) -> None:
-    """TIOCSWINSZ: rows, cols, x-pixels, y-pixels."""
     winsize = struct.pack("HHHH", rows, cols, 0, 0)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)

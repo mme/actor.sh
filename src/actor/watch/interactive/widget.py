@@ -1,25 +1,14 @@
-"""Textual widget glueing PtySession + TerminalScreen + input translation.
-
-The widget holds the live pyte screen, receives output from the session,
-and translates user key/mouse events into bytes written to the session.
-Rendering is coalesced through RefreshBatcher so bursty output doesn't
-flicker.
-
-Ctrl+Z is intercepted by the widget (not forwarded to the PTY) and emits
-an `ExitInteractive` message so the host app can swap back to the log
-view. Every other key / mouse event routes through to the child.
-"""
+"""Textual widget glueing PtySession + TerminalScreen + input translation."""
 from __future__ import annotations
 
 import time
-from typing import List, Optional
+from typing import Optional
 
-from rich.console import ConsoleOptions, RenderResult
-from rich.text import Text
 from textual import events
 from textual.message import Message
 from textual.reactive import reactive
 from textual.strip import Strip
+from textual.timer import Timer
 from textual.widget import Widget
 
 from .batcher import RefreshBatcher
@@ -45,21 +34,16 @@ class TerminalWidget(Widget, can_focus=True):
     """
 
     class ExitRequested(Message):
-        """User hit Ctrl+Z to leave interactive mode."""
-
         def __init__(self, widget: "TerminalWidget") -> None:
             self.widget = widget
             super().__init__()
 
     class SessionExited(Message):
-        """The PtySession's child process exited."""
-
         def __init__(self, widget: "TerminalWidget", exit_code: int) -> None:
             self.widget = widget
             self.exit_code = exit_code
             super().__init__()
 
-    # Expose pending output as a reactive so Textual re-renders on change.
     _frame_counter: reactive[int] = reactive(0)
 
     def __init__(
@@ -78,18 +62,16 @@ class TerminalWidget(Widget, can_focus=True):
         self._batcher = RefreshBatcher()
         self._recorder = recorder
         self._exit_code: Optional[int] = None
-        # Render cache: render_line(y) is called once per visible row per
-        # frame. Without this, a 24-row widget walks the pyte buffer 24×
-        # per frame (and the pyte walk itself is the bottleneck).
         self._cached_strips: Optional[list[Strip]] = None
         self._cached_at_frame: int = -1
-        # Wire the session callbacks once at construction time so that
-        # unmounting and re-mounting (e.g. when the user switches actors
-        # and comes back) doesn't lose output or miss the exit event.
-        # The screen is updated unconditionally; render refresh only
-        # happens while we're mounted (post_message is a no-op otherwise).
-        session._on_output = self._on_pty_output  # type: ignore[attr-defined]
-        session._on_exit = self._on_pty_exit      # type: ignore[attr-defined]
+        # Single pending timer for deferred refresh — stacking N timers on
+        # bursty output would waste memory and re-render cycles.
+        self._deferred_timer: Optional[Timer] = None
+        # Callbacks set once at construction; surviving unmount/remount
+        # (the manager owns lifetime, not the DOM). Both callbacks are
+        # set via `set_callbacks` so consumers that need additional hooks
+        # (manager's DB finalize) can chain without clobbering the widget's.
+        session.set_callbacks(on_output=self._on_pty_output, on_exit=self._on_pty_exit)
 
     # -- session callbacks -------------------------------------------------
 
@@ -102,10 +84,17 @@ class TerminalWidget(Widget, can_focus=True):
         if self._batcher.should_refresh_now(now):
             self._flush_refresh(now)
         else:
-            # Schedule a delayed check so max_defer still fires if bytes stop.
-            self.set_timer(self._batcher.max_defer, self._check_deferred_refresh)
+            self._schedule_deferred_refresh()
+
+    def _schedule_deferred_refresh(self) -> None:
+        if self._deferred_timer is not None:
+            return
+        self._deferred_timer = self.set_timer(
+            self._batcher.max_defer, self._check_deferred_refresh,
+        )
 
     def _check_deferred_refresh(self) -> None:
+        self._deferred_timer = None
         now = time.monotonic()
         if self._batcher.should_refresh_now(now):
             self._flush_refresh(now)
@@ -131,7 +120,6 @@ class TerminalWidget(Widget, can_focus=True):
         return Strip.blank(self.size.width)
 
     def _get_strips(self) -> list[Strip]:
-        """Render all lines to Strips once per frame, then reuse."""
         if self._cached_at_frame == self._frame_counter and self._cached_strips is not None:
             return self._cached_strips
         console = self.app.console
@@ -157,7 +145,6 @@ class TerminalWidget(Widget, can_focus=True):
     # -- key input ---------------------------------------------------------
 
     async def on_key(self, event: events.Key) -> None:
-        # Intercept Ctrl+Z — that's our "leave interactive mode" shortcut.
         if event.key == "ctrl+z":
             event.stop()
             event.prevent_default()
@@ -178,9 +165,9 @@ class TerminalWidget(Widget, can_focus=True):
         self._session.write(data)
 
     # -- mouse input -------------------------------------------------------
-
-    async def on_click(self, event: events.Click) -> None:
-        self._handle_mouse_press(event.x, event.y, button=event.button)
+    # Textual fires MouseDown -> MouseUp -> Click. on_click is intentionally
+    # NOT handled here: it would double-send press bytes since on_mouse_down
+    # already emits them.
 
     async def on_mouse_down(self, event: events.MouseDown) -> None:
         self._handle_mouse_press(event.x, event.y, button=event.button)
@@ -195,36 +182,24 @@ class TerminalWidget(Widget, can_focus=True):
         self._session.write(data)
 
     async def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        data = mouse_press_to_bytes(
-            MouseButton.WHEEL_UP, event.x, event.y, self._screen.mouse_mode,
-        )
-        if data is None:
-            return
-        event.stop()
-        if self._recorder is not None:
-            self._recorder.record(EventKind.WRITE, data)
-        self._session.write(data)
+        self._emit_mouse(MouseButton.WHEEL_UP, event.x, event.y, event)
 
     async def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        data = mouse_press_to_bytes(
-            MouseButton.WHEEL_DOWN, event.x, event.y, self._screen.mouse_mode,
-        )
-        if data is None:
-            return
-        event.stop()
-        if self._recorder is not None:
-            self._recorder.record(EventKind.WRITE, data)
-        self._session.write(data)
+        self._emit_mouse(MouseButton.WHEEL_DOWN, event.x, event.y, event)
 
     def _handle_mouse_press(self, x: int, y: int, button: int) -> None:
-        # Textual button: 1=left, 2=middle, 3=right.
         btn_map = {1: MouseButton.LEFT, 2: MouseButton.MIDDLE, 3: MouseButton.RIGHT}
         mbtn = btn_map.get(button)
         if mbtn is None:
             return
-        data = mouse_press_to_bytes(mbtn, x, y, self._screen.mouse_mode)
+        self._emit_mouse(mbtn, x, y)
+
+    def _emit_mouse(self, button: MouseButton, x: int, y: int, event: Optional[events.Event] = None) -> None:
+        data = mouse_press_to_bytes(button, x, y, self._screen.mouse_mode)
         if data is None:
             return
+        if event is not None:
+            event.stop()
         if self._recorder is not None:
             self._recorder.record(EventKind.WRITE, data)
         self._session.write(data)

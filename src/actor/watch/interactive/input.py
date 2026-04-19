@@ -125,17 +125,24 @@ def key_to_bytes(
 # --- Mouse ---------------------------------------------------------------
 
 class MouseButton(Enum):
+    """Button identity. Release is an event phase, not a button — see
+    MouseEventKind. WHEEL_UP / WHEEL_DOWN use xterm's pseudo-button 64/65."""
     LEFT = 0
     MIDDLE = 1
     RIGHT = 2
-    RELEASE = 3    # plain x11 "release" (button=3 in legacy protocol)
     WHEEL_UP = 64
     WHEEL_DOWN = 65
 
 
-@dataclass
+class MouseEventKind(Enum):
+    PRESS = "press"
+    RELEASE = "release"
+
+
+@dataclass(frozen=True)
 class MouseMode:
-    """Flags mirroring DECSET modes the child has enabled."""
+    """Flags mirroring DECSET modes the child has enabled. Immutable so
+    screen.py can safely share an instance with renderers."""
     # DECSET 1000 — report clicks
     tracking: bool = False
     # DECSET 1002 — also report drags (button-event tracking)
@@ -154,7 +161,7 @@ def mouse_press_to_bytes(
     x: int, y: int,
     mode: MouseMode,
 ) -> Optional[bytes]:
-    """Encode a mouse press/wheel event.
+    """Encode a mouse press or wheel event.
 
     `x` and `y` are 0-based cell coordinates within the terminal. We emit
     1-based coordinates per xterm protocol.
@@ -181,14 +188,15 @@ def mouse_press_to_bytes(
 def mouse_release_to_bytes(
     x: int, y: int,
     mode: MouseMode,
+    button: MouseButton = MouseButton.LEFT,
 ) -> Optional[bytes]:
     """Encode a mouse release. SGR terminates with lowercase m; legacy
-    protocol always sends button=3 (RELEASE)."""
+    protocol uses the single "release" button code (3) regardless of which
+    button was released."""
     if not mode.should_report_click():
         return None
     cx = x + 1
     cy = y + 1
     if mode.sgr:
-        # Caller may want to specify the released button; v1 uses 0 (left).
-        return f"\x1b[<0;{cx};{cy}m".encode()
+        return f"\x1b[<{button.value};{cx};{cy}m".encode()
     return bytes([0x1b, ord("["), ord("M"), 32 + 3, 32 + min(cx, 223), 32 + min(cy, 223)])

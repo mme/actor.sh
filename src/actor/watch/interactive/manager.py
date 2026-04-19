@@ -9,7 +9,7 @@ Run row; on session exit, updates it to DONE/ERROR/STOPPED.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -17,13 +17,13 @@ from ...commands import INTERACTIVE_PROMPT
 from ...db import Database
 from ...interfaces import Agent
 from ...types import Run, Status, _now_iso
-from .diagnostics import DiagnosticRecorder
+from .diagnostics import DiagnosticRecorder, EventKind
 from .pty_session import PtySession
 from .screen import TerminalScreen
 from .widget import TerminalWidget
 
 
-@dataclass
+@dataclass(frozen=True)
 class InteractiveSession:
     actor_name: str
     session: PtySession
@@ -47,6 +47,9 @@ class InteractiveSessionManager:
         self._db_opener = db_opener
         self._sessions: Dict[str, InteractiveSession] = {}
         self._recorder = recorder
+        # Sessions closed explicitly via close()/close_all() should be
+        # marked STOPPED rather than DONE/ERROR on finalize.
+        self._stopping: set[str] = set()
 
     # -- queries ----------------------------------------------------------
 
@@ -83,6 +86,7 @@ class InteractiveSessionManager:
             cwd=cwd,
             rows=self.DEFAULT_ROWS,
             cols=self.DEFAULT_COLS,
+            recorder=self._recorder,
         )
         screen = TerminalScreen(rows=self.DEFAULT_ROWS, cols=self.DEFAULT_COLS)
         widget = TerminalWidget(pty_session, screen, recorder=self._recorder)
@@ -98,28 +102,42 @@ class InteractiveSessionManager:
         )
         self._sessions[actor_name] = info
 
-        # Side-channel: when the child exits naturally, close + update DB.
-        def _on_exit(code: int) -> None:
-            self._finalize_run(actor_name, info.run_id, code)
-        widget._session._on_exit = _on_exit  # type: ignore[attr-defined]
+        # Chain on_exit: preserve the widget's handler (which posts the
+        # SessionExited message for UI recovery) AND add DB finalization.
+        widget_on_exit = pty_session._on_exit  # set by widget constructor
+
+        def _chained_on_exit(code: int) -> None:
+            try:
+                self._finalize_run(actor_name, info.run_id, code)
+            finally:
+                if widget_on_exit is not None:
+                    widget_on_exit(code)
+        pty_session.set_callbacks(on_exit=_chained_on_exit)
 
         pty_session.spawn()
         return info
 
     def close(self, actor_name: str) -> None:
-        """Kill the session (if running) and remove it from the registry."""
+        """Kill the session (if running) and remove it from the registry.
+        The run is finalized as STOPPED (app-initiated teardown)."""
         info = self._sessions.pop(actor_name, None)
         if info is None:
             return
-        info.session.close()
-        # _on_exit will have fired via close() -> _handle_exit().
-        # If for some reason it didn't (race), make sure the DB row doesn't
-        # stay RUNNING forever.
+        self._stopping.add(actor_name)
+        try:
+            info.session.close()
+        finally:
+            self._stopping.discard(actor_name)
+        # Belt-and-suspenders: if the on_exit chain didn't run for any
+        # reason, _finalize_run is idempotent on already-done rows.
         self._finalize_run(actor_name, info.run_id, info.session.exit_code or -1)
 
     def close_all(self) -> None:
         for name in list(self._sessions.keys()):
-            self.close(name)
+            try:
+                self.close(name)
+            except Exception as e:
+                self._record_error(f"close_all({name!r}): {e!r}")
 
     # -- DB integration ----------------------------------------------------
 
@@ -141,15 +159,24 @@ class InteractiveSessionManager:
             return run_id
 
     def _finalize_run(self, actor_name: str, run_id: int, exit_code: int) -> None:
-        with self._db_opener() as db:
-            current = db.get_run(run_id)
-            if current is None:
-                return
-            # Don't overwrite a STOPPED status set externally.
-            if current.status == Status.STOPPED:
-                return
-            # Don't double-finalize if already done.
-            if current.status in (Status.DONE, Status.ERROR):
-                return
-            final = Status.DONE if exit_code == 0 else Status.ERROR
-            db.update_run_status(run_id, final, exit_code)
+        try:
+            with self._db_opener() as db:
+                current = db.get_run(run_id)
+                if current is None:
+                    return
+                # Already finalized — don't overwrite.
+                if current.status in (Status.DONE, Status.ERROR, Status.STOPPED):
+                    return
+                if actor_name in self._stopping:
+                    final = Status.STOPPED
+                else:
+                    final = Status.DONE if exit_code == 0 else Status.ERROR
+                db.update_run_status(run_id, final, exit_code)
+        except Exception as e:
+            # DB errors at shutdown shouldn't crash the TUI; surface via
+            # the diagnostics recorder so the user can still extract info.
+            self._record_error(f"finalize_run({actor_name!r}, {run_id}): {e!r}")
+
+    def _record_error(self, note: str) -> None:
+        if self._recorder is not None:
+            self._recorder.record(EventKind.ERROR, note=note)

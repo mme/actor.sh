@@ -766,7 +766,8 @@ class TestCmdInteractive(unittest.TestCase):
         pm.mark_alive(999)
 
         agent = FakeAgent()
-        with self.assertRaises(Exception):
+        from actor.errors import IsRunningError
+        with self.assertRaises(IsRunningError):
             cmd_interactive(
                 db, agent, pm, name="test",
                 runner=lambda argv, cwd, env: 0,

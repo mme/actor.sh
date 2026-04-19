@@ -274,7 +274,13 @@ class CodexAgent(Agent):
         return entries
 
     def interactive_argv(self, session_id: str, config: Config) -> List[str]:
-        return ["codex", "resume", session_id]
+        # Propagate permission + config flags so interactive sessions honor
+        # the same defaults as non-interactive runs (parity with Claude).
+        return [
+            "codex", "resume", session_id,
+            *self._permission_args(config),
+            *self._config_args(config),
+        ]
 
     def stop(self, pid: int) -> None:
         with self._lock:

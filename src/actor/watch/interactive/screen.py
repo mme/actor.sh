@@ -7,6 +7,7 @@ past so the input layer can adjust its encoding.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from typing import List, Tuple
 
 import pyte
@@ -68,14 +69,17 @@ class TerminalScreen:
     def _apply_decset(self, param: int, on: bool) -> None:
         if param == 1:          # DECCKM — application cursor keys
             self.app_cursor = on
-        elif param == 1000:     # X10 / VT200 button-event tracking
-            self.mouse_mode.tracking = on
+            return
+        # MouseMode is frozen; replace wholesale rather than mutate.
+        mode = self.mouse_mode
+        if param == 1000:       # X10 / VT200 button-event tracking
+            self.mouse_mode = replace(mode, tracking=on)
         elif param == 1002:     # button-event tracking with drag
-            self.mouse_mode.drag = on
+            self.mouse_mode = replace(mode, drag=on)
         elif param == 1003:     # any-event tracking
-            self.mouse_mode.any_motion = on
+            self.mouse_mode = replace(mode, any_motion=on)
         elif param == 1006:     # SGR extended mouse coordinates
-            self.mouse_mode.sgr = on
+            self.mouse_mode = replace(mode, sgr=on)
 
     # -- Geometry ----------------------------------------------------------
 

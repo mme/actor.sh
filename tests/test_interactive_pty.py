@@ -87,44 +87,65 @@ class PtySessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_resize_changes_winsize(self):
         sh = _find_binary("sh")
-        # Print LINES / COLUMNS after a resize happens.
+        # Use `read` so the shell blocks between the two stty size calls —
+        # no race between our resize and the first print.
         received: list[bytes] = []
         session = PtySession(
-            argv=[sh, "-c", "stty size; sleep 0.3; stty size"],
+            argv=[sh, "-c", "stty size && read _ && stty size"],
             cwd=pathlib.Path("/tmp"),
             rows=24, cols=80,
             on_output=lambda data: received.append(data),
         )
         session.spawn()
         try:
-            # Let first stty size print.
-            await asyncio.sleep(0.05)
+            # Wait until the first stty prints (one newline).
+            for _ in range(200):
+                if b"\n" in b"".join(received):
+                    break
+                await asyncio.sleep(0.01)
             session.resize(rows=40, cols=120)
-            # Wait for the second stty size.
-            for _ in range(100):
-                joined = b"".join(received)
-                if joined.count(b"\n") >= 2:
+            # Unblock the shell so the second stty runs.
+            session.write(b"x\n")
+            for _ in range(200):
+                if b"".join(received).count(b"\n") >= 2:
                     break
                 await asyncio.sleep(0.01)
         finally:
             session.close()
         joined = b"".join(received).decode("ascii", errors="replace")
-        # At least one occurrence of the new size in the output.
-        self.assertIn("40 120", joined, f"output was: {joined!r}")
+        lines = [ln.strip() for ln in joined.splitlines() if ln.strip()]
+        self.assertEqual(
+            lines[0], "24 80",
+            f"first stty should see initial winsize; got {lines!r}",
+        )
+        self.assertIn(
+            "40 120", lines,
+            f"post-resize stty should see new winsize; got {lines!r}",
+        )
 
     async def test_close_kills_running_child(self):
+        import signal
         sh = _find_binary("sh")
+        # Shell must NOT trap SIGTERM — we want to verify the signal landed.
+        # Some systems' /bin/sh is dash which already passes signals to its
+        # own process group; spawning `sleep` directly keeps the chain simple.
+        sleep_bin = _find_binary("sleep")
         exit_codes: list[int] = []
         session = PtySession(
-            argv=[sh, "-c", "sleep 10"],
+            argv=[sleep_bin, "100"],
             cwd=pathlib.Path("/tmp"),
             on_exit=lambda code: exit_codes.append(code),
         )
         session.spawn()
+        start = asyncio.get_event_loop().time()
         session.close()  # SIGTERM
-        # Exit code is -15 (SIGTERM) or a nonzero code depending on shell.
-        self.assertIsNotNone(session.exit_code)
-        self.assertEqual(len(exit_codes), 1)
+        elapsed = asyncio.get_event_loop().time() - start
+        self.assertLess(elapsed, 2.0, "close() should not block for seconds")
+        self.assertEqual(
+            session.exit_code, -signal.SIGTERM,
+            f"expected -{signal.SIGTERM} (SIGTERM), got {session.exit_code}",
+        )
+        self.assertEqual(exit_codes, [-signal.SIGTERM])
 
     async def test_write_after_exit_is_noop(self):
         sh = _find_binary("sh")

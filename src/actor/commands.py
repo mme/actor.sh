@@ -354,11 +354,7 @@ def cmd_interactive(
 
 
 def _default_interactive_runner(argv: List[str], cwd: Path, env: dict) -> int:
-    """Spawn argv in cwd with the caller's TTY and block until exit.
-
-    Uses subprocess.Popen with stdin/stdout/stderr inherited so the child
-    gets a real terminal. Returns the exit code (or -1 on signal).
-    """
+    """Spawn argv in cwd with the caller's TTY and block until exit."""
     proc = subprocess.Popen(argv, cwd=str(cwd), env=env)
     try:
         return proc.wait()
@@ -368,7 +364,16 @@ def _default_interactive_runner(argv: List[str], cwd: Path, env: dict) -> int:
             return proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
-            return proc.wait()
+            try:
+                return proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # Give up rather than block the shell forever. Surface a
+                # warning so the user can chase a zombie/stuck process.
+                print(
+                    f"warning: child pid {proc.pid} did not exit after SIGKILL",
+                    file=sys.stderr,
+                )
+                return -1
 
 
 # -- cmd_list --
