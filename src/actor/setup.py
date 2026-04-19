@@ -24,6 +24,18 @@ _CLAUDE_MCP_TIMEOUT_SEC = 30
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
+def _rmtree_loud(path: Path) -> None:
+    """Best-effort rmtree; failures surface to stderr instead of disappearing.
+    Used for cleanup paths where a leftover dir is inconvenient but not fatal —
+    we'd rather the user see the warning than have cruft accumulate silently."""
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        print(f"[setup] warning: could not remove {path}: {e}", file=sys.stderr)
+
+
 def _validate_host(host: str) -> None:
     if host not in SUPPORTED_HOSTS:
         raise ActorError(
@@ -94,36 +106,63 @@ def _copy_bundled_skill(target: Path) -> list[str]:
     return copied
 
 
-def _stamp_version(skill_md: Path, version: str) -> None:
-    """Write `version: <value>` into the SKILL.md YAML frontmatter.
+_DEPLOY_BLOCK_BEGIN = "<!-- BEGIN AUTO-UPDATED BY actor setup/update -->"
+_DEPLOY_BLOCK_END = "<!-- END AUTO-UPDATED BY actor setup/update -->"
 
-    If a version line already exists, replace it. Otherwise insert it just
-    above the closing '---' of the frontmatter block.
+
+def _deploy_block(version: str) -> str:
+    """The version-check section written into SKILL.md's body at deploy time."""
+    return (
+        f"{_DEPLOY_BLOCK_BEGIN}\n"
+        f"## Version and updates\n"
+        f"\n"
+        f"This skill was deployed from **actor-sh {version}**. The MCP server announces its "
+        f"running version in its `instructions` field (`actor-sh MCP version: …`).\n"
+        f"\n"
+        f"**Version check, once per session:** if the server's announced version differs from "
+        f"`{version}`, the user has upgraded `actor-sh` but the deployed skill wasn't refreshed. "
+        f"Tell them:\n"
+        f"\n"
+        f"> Your actor skill is from an older version of actor-sh (skill: `{version}`, server: "
+        f"`<what the MCP instructions show>`). Run `actor update` to refresh it, then restart "
+        f"this session.\n"
+        f"\n"
+        f"Do the comparison once per session — not before every tool call.\n"
+        f"{_DEPLOY_BLOCK_END}"
+    )
+
+
+def _stamp_deploy_block(skill_md: Path, version: str) -> None:
+    """Replace the content between the deploy markers in SKILL.md with a freshly
+    generated block that includes the installed version and the drift-check
+    instructions.
+
+    The markers must already exist in the file (the source SKILL.md checks in
+    empty placeholders). If they're missing, error — either the bundled skill
+    is malformed or the deployed file was manually edited; either way the caller
+    should surface a clear message.
+
+    Write is atomic via os.replace so a partial write (disk full, interrupt)
+    can't leave SKILL.md truncated.
     """
     text = skill_md.read_text()
-    lines = text.splitlines(keepends=True)
-    if not lines or not lines[0].rstrip() == "---":
-        raise ActorError(f"{skill_md} has no YAML frontmatter")
-
-    # Find the closing '---'
-    close_idx = None
-    for i, line in enumerate(lines[1:], start=1):
-        if line.rstrip() == "---":
-            close_idx = i
-            break
-    if close_idx is None:
-        raise ActorError(f"{skill_md} has no closing '---' in frontmatter")
-
-    # Find an existing 'version:' line within the frontmatter
-    version_line = f"version: {version}\n"
-    for i in range(1, close_idx):
-        if lines[i].startswith("version:"):
-            lines[i] = version_line
-            skill_md.write_text("".join(lines))
-            return
-    # Not present — insert just before close
-    lines.insert(close_idx, version_line)
-    skill_md.write_text("".join(lines))
+    begin_idx = text.find(_DEPLOY_BLOCK_BEGIN)
+    end_idx = text.find(_DEPLOY_BLOCK_END)
+    if begin_idx < 0 or end_idx < 0 or end_idx < begin_idx:
+        raise ActorError(
+            f"{skill_md} is missing the deploy-block markers "
+            f"({_DEPLOY_BLOCK_BEGIN} / {_DEPLOY_BLOCK_END}). "
+            "Re-run `actor setup` to restore a correct SKILL.md."
+        )
+    end_idx += len(_DEPLOY_BLOCK_END)
+    new_text = text[:begin_idx] + _deploy_block(version) + text[end_idx:]
+    # Defensive self-check: any future refactor of _deploy_block that drops a
+    # marker would silently render every subsequent update un-parseable.
+    if _DEPLOY_BLOCK_BEGIN not in new_text or _DEPLOY_BLOCK_END not in new_text:
+        raise ActorError("generated deploy block lost its markers (actor-sh bug)")
+    tmp = skill_md.with_suffix(skill_md.suffix + ".tmp")
+    tmp.write_text(new_text)
+    os.replace(tmp, skill_md)
 
 
 def _run_claude(*args: str, timeout: int = _CLAUDE_MCP_TIMEOUT_SEC) -> subprocess.CompletedProcess[str]:
@@ -198,7 +237,7 @@ def cmd_setup(
     old_backup: Path | None = None
     try:
         _copy_bundled_skill(staging)
-        _stamp_version(staging / "SKILL.md", __version__)
+        _stamp_deploy_block(staging / "SKILL.md", __version__)
 
         if target.exists():
             old_backup = parent / f".{name}-old-{os.getpid()}"
@@ -213,7 +252,7 @@ def cmd_setup(
         raise
     # Swap succeeded — clean up backup and stale MCP registration
     if old_backup is not None:
-        shutil.rmtree(old_backup, ignore_errors=True)
+        _rmtree_loud(old_backup)
 
     # From here on the skill is deployed. Wrap MCP steps so a failure tells
     # the user how to retry just the registration without wiping state.
@@ -259,11 +298,33 @@ def cmd_update(
             f"Run 'actor setup --for {for_host} --scope {scope}' first."
         )
 
-    before = (target / "SKILL.md").read_text()
-    _copy_bundled_skill(target)
-    _stamp_version(target / "SKILL.md", new_version)
+    before_text = (target / "SKILL.md").read_text()
+    prev_version = _parse_deployed_version(before_text)
 
-    prev_version = _parse_frontmatter_version(before) or "unknown"
+    # Atomic swap: stage the refreshed skill in a sibling temp dir, stamp, then
+    # rename-swap. Protects the deployed skill from partial writes if the
+    # stamp step fails mid-flight.
+    staging = Path(tempfile.mkdtemp(dir=target.parent, prefix=f".{name}-staging-"))
+    backup = target.parent / f".{name}-old-{os.getpid()}"
+    try:
+        _copy_bundled_skill(staging)
+        _stamp_deploy_block(staging / "SKILL.md", new_version)
+        target.rename(backup)
+        staging.rename(target)
+    except Exception:
+        if backup.exists() and not target.exists():
+            backup.rename(target)
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    _rmtree_loud(backup)
+
+    if prev_version is None:
+        return (
+            f"actor skill at {target} refreshed to {new_version}. "
+            "(Couldn't read the prior version — the deployed skill may have been "
+            "edited by hand or predates version stamping.) "
+            "Restart your Claude Code session to pick up the changes."
+        )
     if prev_version == new_version:
         return f"actor skill at {target} is already at version {new_version}."
     return (
@@ -272,13 +333,17 @@ def cmd_update(
     )
 
 
-def _parse_frontmatter_version(text: str) -> str | None:
-    lines = text.splitlines()
-    if not lines or lines[0].rstrip() != "---":
+# Anchored on the "deployed from" phrase so future edits to the block
+# prose can't accidentally match a different bold span.
+_VERSION_IN_BLOCK_RE = re.compile(r"deployed from \*\*actor-sh ([^\*]+)\*\*")
+
+
+def _parse_deployed_version(text: str) -> str | None:
+    """Extract the installed version from the deploy block, if present."""
+    begin = text.find(_DEPLOY_BLOCK_BEGIN)
+    end = text.find(_DEPLOY_BLOCK_END)
+    if begin < 0 or end < 0 or end < begin:
         return None
-    for line in lines[1:]:
-        if line.rstrip() == "---":
-            return None
-        if line.startswith("version:"):
-            return line.split(":", 1)[1].strip().strip("\"'")
-    return None
+    block = text[begin:end]
+    m = _VERSION_IN_BLOCK_RE.search(block)
+    return m.group(1).strip() if m else None

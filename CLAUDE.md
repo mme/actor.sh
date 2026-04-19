@@ -83,6 +83,28 @@ Tests use in-memory SQLite and fake implementations (FakeAgent, FakeGit, FakePro
 - **Worktrees:** `~/.actor/worktrees/<actor-name>/`
 - **Claude logs:** `~/.claude/projects/<encoded-dir>/<session-id>.jsonl`
 
+## Releasing
+
+The package uses dynamic versioning via `hatchling` + `hatch-vcs` — the version
+is derived from the latest git tag at build time. There is no hardcoded
+`version = "..."` in `pyproject.toml`.
+
+`.github/workflows/release.yml` runs on every push to `main` that touches
+non-doc/non-CI paths:
+
+1. Run unit tests.
+2. Read the latest `v*` tag, bump the patch (or whatever `workflow_dispatch`
+   input `bump` requests), compute the new tag `vX.Y.Z`.
+3. Create and push the tag — no commit back to `main`.
+4. `uv build` — hatch-vcs stamps the wheel with `X.Y.Z`.
+5. Publish to PyPI via trusted publishing (OIDC, no tokens).
+6. Create a GitHub release with auto-generated notes + wheel attached.
+
+Local dev installs (`uv sync`) get a PEP 440 dev version like
+`0.1.4.dev3+g1a2b3c4` derived from git state at install time, so
+`actor --version`, the MCP server's announced version, and the deployed
+SKILL.md all agree and the drift check still works.
+
 ## Architecture notes
 
 - Commands are pure functions that take a `Database` + interfaces and return strings. Side effects go through the `Agent`, `GitOps`, and `ProcessManager` ABCs — this is what makes everything testable with fakes.

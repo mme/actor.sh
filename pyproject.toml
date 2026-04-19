@@ -1,10 +1,10 @@
 [build-system]
-requires = ["uv_build>=0.7,<1"]
-build-backend = "uv_build"
+requires = ["hatchling>=1.25", "hatch-vcs>=0.4"]
+build-backend = "hatchling.build"
 
 [project]
 name = "actor-sh"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Manage coding agents in parallel"
 readme = "README.md"
 license = "MIT"
@@ -39,8 +39,15 @@ actor = "actor.cli:main"
 Homepage = "https://github.com/mme/actor.sh"
 Repository = "https://github.com/mme/actor.sh"
 
-[tool.uv]
-package = true
+[tool.hatch.version]
+source = "vcs"
 
-[tool.uv.build-backend]
-module-name = "actor"
+[tool.hatch.version.raw-options]
+# Explicit so a future hatch-vcs default change doesn't silently produce
+# surprising versions from our vX.Y.Z tags. setuptools-scm uses tag_regex.
+tag_regex = '^v(?P<version>\d+\.\d+\.\d+.*)$'
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/actor"]
+# Non-Python files inside the package tree (e.g. the bundled skill .md files
+# at src/actor/_skill/*.md) ship automatically with the package.
