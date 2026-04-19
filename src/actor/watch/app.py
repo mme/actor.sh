@@ -114,7 +114,10 @@ class ActorWatchApp(App):
         Binding("l", "show_tab('logs')", "Logs"),
         Binding("d", "show_tab('diff')", "Diff"),
         Binding("i", "show_tab('info')", "Info"),
-        Binding("enter", "enter_interactive", "Interactive", show=True),
+        # priority=True so we run before Tree's built-in Enter binding (which
+        # would otherwise consume the event for select_cursor and swallow it).
+        # Also ensures the footer shows it.
+        Binding("enter", "enter_interactive", "Interactive", show=True, priority=True),
         Binding("ctrl+shift+d", "dump_diagnostics", show=False),
     ]
 
