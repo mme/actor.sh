@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from rich.text import Text
 from rich.theme import Theme as RichTheme
 
@@ -10,6 +12,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
+    ContentSwitcher,
     DataTable,
     Footer,
     RichLog,
@@ -19,9 +22,13 @@ from textual.widgets import (
 )
 
 from ..db import Database
+from ..interfaces import binary_exists
 from ..process import RealProcessManager
-from ..types import Actor, Status
-from ..cli import _db_path
+from ..types import Actor, AgentKind, Status
+from ..cli import _db_path, _create_agent
+from .interactive.diagnostics import DiagnosticRecorder
+from .interactive.manager import InteractiveSessionManager
+from .interactive.widget import TerminalWidget
 from .patches import apply_patches
 from .splash import Splash
 from .themes import CLAUDE_DARK, CLAUDE_LIGHT
@@ -107,6 +114,8 @@ class ActorWatchApp(App):
         Binding("l", "show_tab('logs')", "Logs"),
         Binding("d", "show_tab('diff')", "Diff"),
         Binding("i", "show_tab('info')", "Info"),
+        Binding("enter", "enter_interactive", "Interactive", show=True),
+        Binding("ctrl+shift+d", "dump_diagnostics", show=False),
     ]
 
     _prev_statuses: dict[str, Status] = {}
@@ -117,6 +126,13 @@ class ActorWatchApp(App):
     def __init__(self, animate: bool = True) -> None:
         super().__init__()
         self._animate = animate
+        self._diagnostics = DiagnosticRecorder(capacity=2048)
+        self._interactive = InteractiveSessionManager(
+            db_opener=lambda: Database.open(_db_path()),
+            recorder=self._diagnostics,
+        )
+        # Actor whose terminal widget is currently mounted, if any.
+        self._interactive_active: str | None = None
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if self._splash_active and action != "quit":
@@ -129,16 +145,19 @@ class ActorWatchApp(App):
                 yield Static(" ★ ACTOR.SH", id="actor-title")
                 yield ActorTree()
             with Vertical(id="detail-panel"):
-                with TabbedContent(id="tabs"):
-                    with TabPane("Logs", id="logs"):
-                        yield RichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False)
-                    with TabPane("Diff", id="diff"):
-                        yield VerticalScroll(id="diff-scroll")
-                    with TabPane("Info", id="info"):
-                        yield VerticalScroll(
-                            Static("Select an actor", id="info-content"),
-                            DataTable(id="runs-table"),
-                        )
+                with ContentSwitcher(id="detail-switcher", initial="tabs-view"):
+                    with Vertical(id="tabs-view"):
+                        with TabbedContent(id="tabs"):
+                            with TabPane("Logs", id="logs"):
+                                yield RichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False)
+                            with TabPane("Diff", id="diff"):
+                                yield VerticalScroll(id="diff-scroll")
+                            with TabPane("Info", id="info"):
+                                yield VerticalScroll(
+                                    Static("Select an actor", id="info-content"),
+                                    DataTable(id="runs-table"),
+                                )
+                    yield Vertical(id="interactive-view")
         yield Splash(id="splash", animate=self._animate)
         yield Static("Loading...", id="status-bar")
         yield Footer(show_command_palette=False)
@@ -424,6 +443,141 @@ class ActorWatchApp(App):
     def on_tree_node_highlighted(self, event) -> None:
         self._refresh_detail()
         self._maybe_refresh_diff()
+        self._sync_detail_view()
+
+    # -- Interactive mode ----------------------------------------------------
+
+    def _sync_detail_view(self) -> None:
+        """Switch the detail panel between tabs and an interactive terminal
+        based on whether the currently-selected actor has a live session."""
+        try:
+            switcher = self.query_one("#detail-switcher", ContentSwitcher)
+        except Exception:
+            return
+        actor = self.query_one(ActorTree).selected_actor
+        if actor is None or not self._interactive.has(actor.name):
+            if switcher.current != "tabs-view":
+                switcher.current = "tabs-view"
+                self._interactive_active = None
+            return
+
+        info = self._interactive.get(actor.name)
+        if info is None:
+            switcher.current = "tabs-view"
+            self._interactive_active = None
+            return
+
+        # Unmount any previously-shown terminal, mount this one.
+        view = self.query_one("#interactive-view", Vertical)
+        for child in list(view.children):
+            child.remove()
+        view.mount(info.widget)
+        switcher.current = "interactive-view"
+        self._interactive_active = actor.name
+        info.widget.focus()
+
+    def action_enter_interactive(self) -> None:
+        """Enter key on the tree: start an interactive session for the
+        selected actor (or show its existing one)."""
+        # Only trigger if the tree has focus — otherwise leave Enter alone
+        # for the other widgets that may consume it.
+        if not self._tree_has_focus():
+            return
+
+        actor = self.query_one(ActorTree).selected_actor
+        if actor is None:
+            return
+
+        if self._interactive.has(actor.name):
+            self._sync_detail_view()
+            return
+
+        status = self._prev_statuses.get(actor.name, Status.IDLE)
+        if status == Status.RUNNING:
+            self.notify(f"{actor.name} is currently running — stop it first",
+                        severity="error")
+            return
+        if actor.agent_session is None:
+            self.notify(f"{actor.name} has no session yet — run it first",
+                        severity="error")
+            return
+        if not binary_exists(actor.agent.binary_name):
+            self.notify(f"agent binary '{actor.agent.binary_name}' not on PATH",
+                        severity="error")
+            return
+
+        try:
+            self._interactive.create(
+                actor_name=actor.name,
+                agent=_create_agent(actor.agent),
+                session_id=actor.agent_session,
+                cwd=Path(actor.dir),
+                config=dict(actor.config),
+            )
+        except Exception as e:
+            self.notify(f"failed to start interactive session: {e}", severity="error")
+            return
+
+        self._sync_detail_view()
+
+    def on_terminal_widget_exit_requested(self, message: TerminalWidget.ExitRequested) -> None:
+        """Ctrl+Z: leave interactive mode but keep the session alive in the bg."""
+        # Find the actor this widget belongs to.
+        name = self._interactive_active
+        if name is None:
+            return
+        try:
+            switcher = self.query_one("#detail-switcher", ContentSwitcher)
+            switcher.current = "tabs-view"
+        except Exception:
+            pass
+        # Return focus to the tree.
+        self.query_one(ActorTree).focus()
+        self._interactive_active = None
+
+    def on_terminal_widget_session_exited(self, message: TerminalWidget.SessionExited) -> None:
+        """Child process exited on its own. Close the session and restore logs."""
+        # Find the matching actor in the manager.
+        target: str | None = None
+        for name in self._interactive.live_names():
+            info = self._interactive.get(name)
+            if info is not None and info.widget is message.widget:
+                target = name
+                break
+        if target is None:
+            return
+        self._interactive.close(target)
+        if self._interactive_active == target:
+            try:
+                switcher = self.query_one("#detail-switcher", ContentSwitcher)
+                switcher.current = "tabs-view"
+            except Exception:
+                pass
+            self._interactive_active = None
+        code = message.exit_code
+        severity = "information" if code == 0 else "warning"
+        self.notify(f"{target} interactive session ended (exit {code})", severity=severity)
+        # Refresh the logs so the new *interactive* run row is visible.
+        self._refresh_detail()
+
+    def action_dump_diagnostics(self) -> None:
+        """Dump the terminal-I/O diagnostics ring buffer to the notification
+        system and stderr. Hidden binding for flicker post-mortems."""
+        import sys
+        dump = self._diagnostics.format(limit=200)
+        print(f"--- terminal diagnostics ({len(self._diagnostics)} events) ---",
+              file=sys.stderr)
+        print(dump, file=sys.stderr)
+        print("--- end ---", file=sys.stderr)
+        self.notify(f"dumped {len(self._diagnostics)} diagnostic events to stderr")
+
+    def on_unmount(self) -> None:
+        """Textual app teardown: kill all live interactive subprocesses so
+        no PTY child outlives the watch process."""
+        try:
+            self._interactive.close_all()
+        except Exception:
+            pass
 
     def _focus_detail_content(self, tab_id: str | None = None) -> None:
         if tab_id is None:

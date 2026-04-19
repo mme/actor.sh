@@ -219,6 +219,18 @@ class Database:
         if cur.rowcount == 0:
             raise ActorError("run not found")
 
+    def get_run(self, run_id: int) -> Optional[Run]:
+        cur = self._conn.execute(
+            """SELECT id, actor_name, prompt, status, exit_code, pid, config,
+                      started_at, finished_at
+               FROM runs WHERE id = ?""",
+            (run_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_run(row)
+
     def latest_run(self, actor_name: str) -> Optional[Run]:
         cur = self._conn.execute(
             """SELECT id, actor_name, prompt, status, exit_code, pid, config,
