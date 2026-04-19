@@ -148,18 +148,29 @@ _PYTE_COLOR_ALIASES = {
 }
 
 
+_HEX_RE = re.compile(r"^#?[0-9a-fA-F]{6}$")
+
+
 def _resolve_color(color: str) -> str | None:
-    """pyte uses names or '#rrggbb' hex; rich handles hex directly."""
-    if color is None:
+    """Map a pyte color string to a rich-compatible color spec.
+
+    Pyte emits:
+      - 'default'           — terminal default (return None → rich skips)
+      - named colors        — 'red', 'brightblue', etc.
+      - 6-char hex          — 'RRGGBB' or '#RRGGBB' (truecolor SGR)
+      - 1-3 digit numeric   — '42' (256-palette SGR)
+    """
+    if color is None or color == "default":
         return None
-    if color.startswith("#") and len(color) == 7:
-        return color
     if color in _PYTE_COLOR_ALIASES:
         return _PYTE_COLOR_ALIASES[color]
-    # Numeric 256-color strings from pyte come through as e.g. "42"
-    if color.isdigit():
+    # Truecolor: hex string with or without the leading '#'.
+    if _HEX_RE.match(color):
+        return color if color.startswith("#") else f"#{color}"
+    # 256-palette index. isdigit() also matches hex digit strings like
+    # '999999' — the hex check above must run first.
+    if color.isdigit() and 0 <= int(color) <= 255:
         return f"color({color})"
-    # Fall back: treat unknown as no color.
     return None
 
 
@@ -168,12 +179,23 @@ def _char_style(char: Char) -> Style:
     bg = _resolve_color(char.bg)
     if char.reverse:
         fg, bg = bg, fg
-    return Style(
-        color=fg,
-        bgcolor=bg,
-        bold=char.bold,
-        italic=char.italics,
-        underline=char.underscore,
-        strike=char.strikethrough,
-        blink=char.blink,
-    )
+    try:
+        return Style(
+            color=fg,
+            bgcolor=bg,
+            bold=char.bold,
+            italic=char.italics,
+            underline=char.underscore,
+            strike=char.strikethrough,
+            blink=char.blink,
+        )
+    except Exception:
+        # Any unexpected color string (new pyte encoding, malformed sequence)
+        # should degrade to plain text rather than crash the render loop.
+        return Style(
+            bold=char.bold,
+            italic=char.italics,
+            underline=char.underscore,
+            strike=char.strikethrough,
+            blink=char.blink,
+        )

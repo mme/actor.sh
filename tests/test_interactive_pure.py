@@ -18,7 +18,7 @@ from actor.watch.interactive.input import (
     mouse_press_to_bytes,
     mouse_release_to_bytes,
 )
-from actor.watch.interactive.screen import TerminalScreen
+from actor.watch.interactive.screen import TerminalScreen, _resolve_color
 
 
 # --- Screen ---------------------------------------------------------------
@@ -78,6 +78,35 @@ class TerminalScreenTests(unittest.TestCase):
         self.assertTrue(s.mouse_mode.sgr)
         s.feed(b"\x1b[?1000l")
         self.assertFalse(s.mouse_mode.tracking)
+
+    def test_resolve_color_handles_pyte_encodings(self):
+        # Named pyte aliases
+        self.assertEqual(_resolve_color("red"), "color(1)")
+        self.assertEqual(_resolve_color("brightgreen"), "color(10)")
+        # "default" is terminal default — no color.
+        self.assertIsNone(_resolve_color("default"))
+        self.assertIsNone(_resolve_color(None))
+        # Truecolor hex: digit-only (was the crash case — '999999' must not
+        # be treated as a 256-palette index).
+        self.assertEqual(_resolve_color("999999"), "#999999")
+        self.assertEqual(_resolve_color("ff00aa"), "#ff00aa")
+        # With leading '#' too.
+        self.assertEqual(_resolve_color("#123456"), "#123456")
+        # 256-palette index (1-3 digits, <=255).
+        self.assertEqual(_resolve_color("42"), "color(42)")
+        self.assertEqual(_resolve_color("255"), "color(255)")
+        # Out-of-range palette index falls back to None.
+        self.assertIsNone(_resolve_color("256"))
+        # Garbage degrades to None, not crash.
+        self.assertIsNone(_resolve_color("not-a-color"))
+
+    def test_rendering_tolerates_truecolor_fg(self):
+        """Regression: claude uses truecolor — ensure render_lines doesn't crash."""
+        s = TerminalScreen(rows=2, cols=10)
+        # 24-bit SGR: CSI 38 ; 2 ; R ; G ; B m
+        s.feed(b"\x1b[38;2;153;153;153mX\x1b[0m")
+        lines = s.render_lines()
+        self.assertEqual(lines[0].plain[0], "X")
 
     def test_cursor_overlay_inverts_single_cell(self):
         s = TerminalScreen(rows=2, cols=5)
