@@ -62,17 +62,16 @@ class _FakeAgent:
 
 
 def _ensure_actor(db: Database, name: str, session: str = "sess-1") -> None:
-    """Insert an actor row the manager needs for its Run insert + touch."""
-    import json
-    db._conn.execute(
-        """INSERT INTO actors (name, agent, agent_session, dir, source_repo,
-                               base_branch, worktree, parent, config,
-                               created_at, updated_at)
-           VALUES (?, 'claude', ?, '/tmp', NULL, NULL, 0, NULL, '{}',
-                   '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')""",
-        (name, session),
+    """Insert an actor via the public cmd_new so we don't hardcode schema."""
+    from actor import cmd_new
+    from tests.test_actor import FakeGit
+    git = FakeGit()
+    cmd_new(
+        db, git,
+        name=name, dir="/tmp", no_worktree=True, base=None,
+        agent_name="claude", config_pairs=[],
     )
-    db._conn.commit()
+    db.update_actor_session(name, session)
 
 
 class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):

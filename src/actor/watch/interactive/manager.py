@@ -127,9 +127,15 @@ class InteractiveSessionManager:
         try:
             info.session.close()
         finally:
-            self._stopping.discard(actor_name)
-        # In case the on_exit chain didn't fire — _finalize_run is idempotent.
-        self._finalize_run(actor_name, info.run_id, info.session.exit_code or -1)
+            # Always finalize the run, even if session.close() raises
+            # (incl. KeyboardInterrupt during the close poll). Otherwise
+            # the DB row would stay RUNNING forever.
+            try:
+                self._finalize_run(
+                    actor_name, info.run_id, info.session.exit_code or -1,
+                )
+            finally:
+                self._stopping.discard(actor_name)
 
     def close_all(self) -> None:
         for name in list(self._sessions.keys()):

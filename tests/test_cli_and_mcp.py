@@ -126,6 +126,38 @@ class RunCommandTests(unittest.TestCase):
         cmd_run.assert_called_once()
         self.assertEqual(cmd_run.call_args.kwargs["config_pairs"], ["model=opus"])
 
+    def test_run_dash_i_dispatches_to_cmd_interactive(self):
+        """`actor run foo -i` must route through cmd_interactive, not cmd_run."""
+        cmd_interactive = MagicMock(return_value=(0, "ok"))
+        cmd_run = MagicMock(return_value="should-not-run")
+        fake_db = MagicMock()
+        with patch("actor.cli.cmd_interactive", cmd_interactive), \
+             patch("actor.cli.cmd_run", cmd_run), \
+             patch("actor.cli.Database") as db_cls, \
+             patch("actor.cli._create_agent", return_value=MagicMock()):
+            db_cls.open.return_value = fake_db
+            with patch("sys.stderr", io.StringIO()):
+                with self.assertRaises(SystemExit) as ctx:
+                    main(["run", "foo", "-i"])
+        self.assertEqual(ctx.exception.code, 0)
+        cmd_interactive.assert_called_once()
+        self.assertEqual(cmd_interactive.call_args.kwargs.get("name"), "foo")
+        cmd_run.assert_not_called()
+
+    def test_run_dash_i_maps_signal_to_posix_exit(self):
+        """Negative exit code from cmd_interactive (signal) → 128 + signum."""
+        import signal as _sig
+        cmd_interactive = MagicMock(return_value=(-_sig.SIGTERM, "stopped"))
+        fake_db = MagicMock()
+        with patch("actor.cli.cmd_interactive", cmd_interactive), \
+             patch("actor.cli.Database") as db_cls, \
+             patch("actor.cli._create_agent", return_value=MagicMock()):
+            db_cls.open.return_value = fake_db
+            with patch("sys.stderr", io.StringIO()):
+                with self.assertRaises(SystemExit) as ctx:
+                    main(["run", "foo", "-i"])
+        self.assertEqual(ctx.exception.code, 128 + _sig.SIGTERM)
+
     def test_run_without_prompt_and_tty_exits_nonzero(self):
         fake_db = MagicMock()
         with patch("actor.cli.Database") as db_cls:

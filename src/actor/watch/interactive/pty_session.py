@@ -23,9 +23,14 @@ from .diagnostics import DiagnosticRecorder, EventKind
 
 # 64 KiB chunk keeps latency low without overwhelming the parser.
 _READ_CHUNK = 65536
-# Poll interval when waitpid needs to escalate from SIGTERM to SIGKILL.
+# Liveness-probe poll for close()'s kill(pid, 0) loop before SIGKILL escalation.
 _TERM_POLL_S = 0.05
 _TERM_DEADLINE_S = 0.5
+# Short poll used by _reap() when the child hasn't quite exited yet but we
+# also don't want to block the asyncio loop indefinitely on a natural-EOF
+# path (EIO/EBADF from os.read can arrive before the child is reaped).
+_REAP_POLL_S = 0.02
+_REAP_DEADLINE_S = 0.5
 
 
 class PtySession:
@@ -282,19 +287,43 @@ class PtySession:
                 self._exit_code = -1
             self._close_fd()
             return
-        try:
-            pid, status = os.waitpid(self._pid, os.WNOHANG)
-            if pid == 0:
-                # Still alive; close() has already signalled. Block briefly
-                # — SIGKILL guarantees reap in bounded time.
-                pid, status = os.waitpid(self._pid, 0)
-        except ChildProcessError:
-            if self._exit_code is None:
-                self._exit_code = -1
-            self._pid = None
-            self._close_fd()
-            return
-        if os.WIFEXITED(status):
+        status: Optional[int] = None
+        # Try WNOHANG first; then poll up to _REAP_DEADLINE_S so we don't
+        # block the asyncio loop indefinitely on paths where close() didn't
+        # SIGKILL (e.g. EOF on the master fd while the child is still
+        # running briefly). Escalate to SIGKILL if the deadline expires.
+        deadline = time.monotonic() + _REAP_DEADLINE_S
+        while True:
+            try:
+                pid, status = os.waitpid(self._pid, os.WNOHANG)
+            except ChildProcessError:
+                if self._exit_code is None:
+                    self._exit_code = -1
+                self._pid = None
+                self._close_fd()
+                return
+            if pid != 0:
+                break
+            if time.monotonic() >= deadline:
+                try:
+                    os.kill(self._pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                # One last blocking wait now that SIGKILL is in flight —
+                # guaranteed to return in ~ms.
+                try:
+                    pid, status = os.waitpid(self._pid, 0)
+                except ChildProcessError:
+                    if self._exit_code is None:
+                        self._exit_code = -1
+                    self._pid = None
+                    self._close_fd()
+                    return
+                break
+            time.sleep(_REAP_POLL_S)
+        if status is None:
+            self._exit_code = -1
+        elif os.WIFEXITED(status):
             self._exit_code = os.WEXITSTATUS(status)
         elif os.WIFSIGNALED(status):
             self._exit_code = -os.WTERMSIG(status)

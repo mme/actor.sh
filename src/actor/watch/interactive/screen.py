@@ -160,8 +160,10 @@ def _char_style(char: Char) -> Style:
             underline=char.underscore,
             strike=char.strikethrough, blink=char.blink,
         )
-    except Exception:
-        # Unknown color encoding: drop color rather than crash render.
+    except (ValueError, TypeError):
+        # Unknown color encoding from rich: drop color rather than crash.
+        # Other exceptions (AttributeError from malformed Char, etc.) are
+        # bugs; let them surface.
         return Style(
             bold=char.bold, italic=char.italics,
             underline=char.underscore,

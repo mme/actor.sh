@@ -200,5 +200,64 @@ class PtySessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"hello-pty-env", b"".join(received))
 
 
+class PtySessionFailurePathsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exec_failure_yields_exit_127(self):
+        """A bogus binary should surface via on_exit with code 127 rather
+        than hanging or raising in the parent."""
+        exit_codes: list[int] = []
+        session = PtySession(
+            argv=["/nonexistent/binary-xyz-nope"],
+            cwd=pathlib.Path("/tmp"),
+            on_exit=lambda code: exit_codes.append(code),
+        )
+        session.spawn()
+        for _ in range(200):
+            if exit_codes:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(exit_codes, [127])
+
+    async def test_write_handles_eagain(self):
+        """os.write raising EAGAIN must queue the bytes rather than crash;
+        the drainer flushes them once the fd is writable."""
+        from unittest.mock import patch
+        import errno as _errno
+
+        cat = _find_binary("cat")
+        session = PtySession(
+            argv=[cat],
+            cwd=pathlib.Path("/tmp"),
+        )
+        session.spawn()
+        try:
+            # Make the first write raise EAGAIN. Later writes (via drainer)
+            # fall through to the real os.write so the session stays alive.
+            real_write = os.write
+            call = {"n": 0}
+
+            def fake_write(fd, data):
+                call["n"] += 1
+                if call["n"] == 1:
+                    raise OSError(_errno.EAGAIN, "fake")
+                return real_write(fd, data)
+
+            with patch("actor.watch.interactive.pty_session.os.write",
+                       side_effect=fake_write):
+                session.write(b"hello\n")
+                # The initial write got EAGAIN → queued.
+                self.assertEqual(
+                    bytes(session._write_queue), b"hello\n",
+                    "EAGAIN should have queued the bytes",
+                )
+                # Let the add_writer drainer fire.
+                for _ in range(50):
+                    if not session._write_queue:
+                        break
+                    await asyncio.sleep(0.01)
+            self.assertEqual(session._write_queue, bytearray())
+        finally:
+            session.close()
+
+
 if __name__ == "__main__":
     unittest.main()

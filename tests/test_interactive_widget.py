@@ -139,6 +139,60 @@ class TerminalWidgetIntegrationTests(unittest.IsolatedAsyncioTestCase):
             app._session.close()
 
 
+class RenderCacheTests(unittest.IsolatedAsyncioTestCase):
+    """The widget's render_line cache should build the strip list once
+    per _frame_counter and reuse it for every visible row."""
+
+    async def test_cache_hits_across_rows_in_same_frame(self):
+        cat = _find_binary("cat")
+        app = _HostApp([cat], pathlib.Path("/tmp"))
+        async with app.run_test(size=(40, 10)) as pilot:
+            calls = {"n": 0}
+            real = app.widget._screen.render_lines
+
+            def counting_render_lines():
+                calls["n"] += 1
+                return real()
+
+            app.widget._screen.render_lines = counting_render_lines  # type: ignore
+            # Invalidate any cache Textual populated during pilot setup.
+            app.widget._cached_strips = None
+            app.widget._cached_at_frame = -1
+            calls["n"] = 0
+            for y in range(app.widget._screen.rows):
+                app.widget.render_line(y)
+            self.assertEqual(
+                calls["n"], 1,
+                "render_line should build once per frame and cache; "
+                f"got {calls['n']} calls for {app.widget._screen.rows} rows",
+            )
+            app._session.close()
+
+    async def test_cache_invalidates_on_frame_bump(self):
+        cat = _find_binary("cat")
+        app = _HostApp([cat], pathlib.Path("/tmp"))
+        async with app.run_test(size=(40, 10)) as pilot:
+            calls = {"n": 0}
+            real = app.widget._screen.render_lines
+
+            def counting_render_lines():
+                calls["n"] += 1
+                return real()
+
+            app.widget._screen.render_lines = counting_render_lines  # type: ignore
+            app.widget._cached_strips = None
+            app.widget._cached_at_frame = -1
+            calls["n"] = 0
+            app.widget.render_line(0)
+            app.widget._frame_counter += 1
+            app.widget.render_line(0)
+            self.assertEqual(
+                calls["n"], 2,
+                f"frame bump should invalidate the cache; got {calls['n']} calls",
+            )
+            app._session.close()
+
+
 class MouseInputTests(unittest.IsolatedAsyncioTestCase):
     """Verify Textual mouse events reach the PTY as SGR-encoded bytes, and
     that we don't double-send on click (MouseDown + Click in Textual)."""
@@ -179,18 +233,16 @@ class MouseInputTests(unittest.IsolatedAsyncioTestCase):
             app.widget._session.write = lambda data, _orig=orig, w=written: (
                 w.append(data), _orig(data),
             )[1]
-            app.widget.post_message(
-                __import__("textual.events", fromlist=["MouseScrollUp"]).MouseScrollUp(
-                    widget=app.widget,
-                    x=1, y=1, delta_x=0, delta_y=-1,
-                    button=0, shift=False, meta=False, ctrl=False,
-                    screen_x=1, screen_y=1,
-                )
+            # Invoke the handler directly rather than forging a Textual event —
+            # the event signature varies across versions, but the handler is
+            # the part we own.
+            from actor.watch.interactive.input import MouseButton
+            app.widget._emit_mouse(MouseButton.WHEEL_UP, x=2, y=3)
+            await pilot.pause(0.02)
+            self.assertEqual(
+                written, [b"\x1b[<64;3;4M"],
+                f"expected SGR wheel-up sequence at (x+1=3, y+1=4); got {written!r}",
             )
-            # Skip if the Textual signature differs across versions; the
-            # important behavior is exercised in pure tests.
-
-            # At a minimum, make sure no exception escaped.
             app._session.close()
 
 
