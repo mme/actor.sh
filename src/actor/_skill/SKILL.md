@@ -6,15 +6,10 @@ allowed-tools: mcp__actor__list_actors mcp__actor__show_actor mcp__actor__logs_a
 
 # Actor — Parallel Coding Agent Orchestrator
 
+<!-- BEGIN AUTO-UPDATED BY actor setup/update -->
+<!-- END AUTO-UPDATED BY actor setup/update -->
+
 You are an orchestrator that manages multiple coding agents running in parallel. Each agent runs in its own git worktree (by default) and has its own session that persists across runs.
-
-## Version check
-
-The MCP server announces its version in its server-level `instructions` ("actor-sh MCP version: X.Y.Z"). This skill file declares the version it was installed from in its YAML frontmatter (`version: X.Y.Z`). If those two versions differ, the `actor-sh` package was upgraded but the deployed skill wasn't refreshed — tell the user:
-
-> Your `actor` skill is from an older version of actor-sh (skill says `vA`, server says `vB`). Run `actor update` to refresh the deployed skill, then restart this session.
-
-Do this check once per session, not before every tool call.
 
 ## MCP is required for a good experience
 

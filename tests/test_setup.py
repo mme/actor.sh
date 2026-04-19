@@ -11,9 +11,11 @@ from actor.errors import ActorError
 from actor.setup import (
     cmd_setup,
     cmd_update,
-    _parse_frontmatter_version,
+    _DEPLOY_BLOCK_BEGIN,
+    _DEPLOY_BLOCK_END,
+    _parse_deployed_version,
     _skill_target_dir,
-    _stamp_version,
+    _stamp_deploy_block,
 )
 
 
@@ -39,54 +41,63 @@ class TargetResolutionTests(unittest.TestCase):
             _skill_target_dir("cursor", "user", "actor")
 
 
-class StampVersionTests(unittest.TestCase):
-    def test_inserts_when_absent(self):
-        with tempfile.NamedTemporaryFile("w+", suffix=".md", delete=False) as f:
-            f.write("---\nname: actor\ndescription: x\n---\n\nbody\n")
-            path = Path(f.name)
-        try:
-            _stamp_version(path, "1.2.3")
-            out = path.read_text()
-            self.assertIn("version: 1.2.3", out)
-            self.assertEqual(out.count("version:"), 1)
-        finally:
-            path.unlink()
+def _fake_skill_md(tmp: Path) -> Path:
+    """A minimal SKILL.md with the deploy-block markers in place."""
+    path = tmp / "SKILL.md"
+    path.write_text(
+        "---\nname: actor\n---\n\n# Actor\n\n"
+        f"{_DEPLOY_BLOCK_BEGIN}\n"
+        f"{_DEPLOY_BLOCK_END}\n\n"
+        "body content\n"
+    )
+    return path
 
-    def test_replaces_existing(self):
-        with tempfile.NamedTemporaryFile("w+", suffix=".md", delete=False) as f:
-            f.write("---\nname: actor\nversion: 0.1.0\ndescription: x\n---\n\nbody\n")
-            path = Path(f.name)
-        try:
-            _stamp_version(path, "2.0.0")
-            out = path.read_text()
-            self.assertIn("version: 2.0.0", out)
-            self.assertNotIn("version: 0.1.0", out)
-            self.assertEqual(out.count("version:"), 1)
-        finally:
-            path.unlink()
 
-    def test_missing_frontmatter_raises(self):
-        with tempfile.NamedTemporaryFile("w+", suffix=".md", delete=False) as f:
-            f.write("# hello\nno frontmatter\n")
-            path = Path(f.name)
-        try:
+class StampDeployBlockTests(unittest.TestCase):
+    def test_fills_empty_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _fake_skill_md(Path(tmp))
+            _stamp_deploy_block(path, "1.2.3")
+            out = path.read_text()
+            self.assertIn("actor-sh 1.2.3", out)
+            # Markers still there, exactly once each
+            self.assertEqual(out.count(_DEPLOY_BLOCK_BEGIN), 1)
+            self.assertEqual(out.count(_DEPLOY_BLOCK_END), 1)
+
+    def test_replaces_existing_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _fake_skill_md(Path(tmp))
+            _stamp_deploy_block(path, "1.0.0")
+            _stamp_deploy_block(path, "2.0.0")
+            out = path.read_text()
+            self.assertIn("actor-sh 2.0.0", out)
+            self.assertNotIn("actor-sh 1.0.0", out)
+            # Body outside the block is preserved
+            self.assertIn("body content", out)
+
+    def test_missing_markers_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "SKILL.md"
+            path.write_text("# hello\nno markers\n")
             with self.assertRaises(ActorError):
-                _stamp_version(path, "1.0.0")
-        finally:
-            path.unlink()
+                _stamp_deploy_block(path, "1.0.0")
 
 
-class FrontmatterParseTests(unittest.TestCase):
-    def test_extracts_version(self):
-        text = "---\nname: actor\nversion: 0.3.1\n---\nbody\n"
-        self.assertEqual(_parse_frontmatter_version(text), "0.3.1")
+class DeployedVersionParseTests(unittest.TestCase):
+    def test_extracts_version_from_block(self):
+        block = (
+            f"# Actor\n{_DEPLOY_BLOCK_BEGIN}\n"
+            "This skill was deployed from **actor-sh 0.3.1**. …\n"
+            f"{_DEPLOY_BLOCK_END}\n"
+        )
+        self.assertEqual(_parse_deployed_version(block), "0.3.1")
 
-    def test_no_frontmatter_returns_none(self):
-        self.assertIsNone(_parse_frontmatter_version("# no frontmatter"))
+    def test_no_block_returns_none(self):
+        self.assertIsNone(_parse_deployed_version("# no markers"))
 
-    def test_no_version_key_returns_none(self):
-        text = "---\nname: actor\n---\nbody\n"
-        self.assertIsNone(_parse_frontmatter_version(text))
+    def test_empty_block_returns_none(self):
+        text = f"{_DEPLOY_BLOCK_BEGIN}\n{_DEPLOY_BLOCK_END}\n"
+        self.assertIsNone(_parse_deployed_version(text))
 
 
 class SetupEndToEndTests(unittest.TestCase):
@@ -103,7 +114,7 @@ class SetupEndToEndTests(unittest.TestCase):
                 target = Path(tmp) / ".claude" / "skills" / "actor"
                 self.assertTrue((target / "SKILL.md").exists())
                 self.assertTrue((target / "cli.md").exists())
-                self.assertIn("version: ", (target / "SKILL.md").read_text())
+                self.assertIn("actor-sh ", (target / "SKILL.md").read_text())
                 mcp_add.assert_called_once_with(name="actor", scope="user", for_host="claude-code")
                 mcp_remove.assert_not_called()  # nothing to clobber on first install
                 self.assertIn("installed", msg)
@@ -129,11 +140,11 @@ class UpdateEndToEndTests(unittest.TestCase):
                 cmd_setup(for_host="claude-code", scope="user", name="actor")
                 skill = Path(tmp) / ".claude" / "skills" / "actor" / "SKILL.md"
 
-                lines = skill.read_text().splitlines(keepends=True)
-                for i, line in enumerate(lines):
-                    if line.startswith("version:"):
-                        lines[i] = "version: 0.0.0-old\n"
-                skill.write_text("".join(lines))
+                # Simulate a stale deploy by rewriting the version string.
+                text = skill.read_text()
+                import re
+                text = re.sub(r"\*\*actor-sh [^\*]+\*\*", "**actor-sh 0.0.0-old**", text)
+                skill.write_text(text)
 
                 msg = cmd_update(for_host="claude-code", scope="user", name="actor")
                 self.assertIn("updated from 0.0.0-old", msg)
@@ -229,7 +240,7 @@ class SetupAtomicSwapTests(unittest.TestCase):
                 cmd_setup(for_host="claude-code", scope="user", name="actor")
                 target = Path(tmp) / ".claude" / "skills" / "actor"
                 first_text = (target / "SKILL.md").read_text()
-                self.assertIn("version: ", first_text)
+                self.assertIn("actor-sh ", first_text)
 
             # Second install, but _copy_bundled_skill raises mid-way. The
             # existing install must survive.
@@ -252,13 +263,12 @@ class SetupAtomicSwapTests(unittest.TestCase):
 class SetupVersionAssertionTests(unittest.TestCase):
     def test_stamped_version_matches_package_version(self):
         from actor import __version__
-        from actor.setup import _parse_frontmatter_version
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"HOME": tmp}), \
                  patch("actor.setup._claude_mcp_add"):
                 cmd_setup(for_host="claude-code", scope="user", name="actor")
                 skill = Path(tmp) / ".claude" / "skills" / "actor" / "SKILL.md"
-                self.assertEqual(_parse_frontmatter_version(skill.read_text()), __version__)
+                self.assertEqual(_parse_deployed_version(skill.read_text()), __version__)
 
 
 if __name__ == "__main__":
