@@ -89,12 +89,12 @@ The package uses dynamic versioning via `hatchling` + `hatch-vcs` — the versio
 is derived from the latest git tag at build time. There is no hardcoded
 `version = "..."` in `pyproject.toml`.
 
-`.github/workflows/release.yml` runs on every push to `main` that touches
-non-doc/non-CI paths:
+`.github/workflows/release.yml` is triggered manually via
+`workflow_dispatch` (run it from the GitHub Actions UI or
+`gh workflow run release.yml -f bump=patch|minor|major`):
 
 1. Run unit tests.
-2. Read the latest `v*` tag, bump the patch (or whatever `workflow_dispatch`
-   input `bump` requests), compute the new tag `vX.Y.Z`.
+2. Read the latest `v*` tag, bump per the `bump` input, compute `vX.Y.Z`.
 3. Create and push the tag — no commit back to `main`.
 4. `uv build` — hatch-vcs stamps the wheel with `X.Y.Z`.
 5. Publish to PyPI via trusted publishing (OIDC, no tokens).
