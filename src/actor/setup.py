@@ -24,6 +24,18 @@ _CLAUDE_MCP_TIMEOUT_SEC = 30
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
+def _rmtree_loud(path: Path) -> None:
+    """Best-effort rmtree; failures surface to stderr instead of disappearing.
+    Used for cleanup paths where a leftover dir is inconvenient but not fatal —
+    we'd rather the user see the warning than have cruft accumulate silently."""
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        print(f"[setup] warning: could not remove {path}: {e}", file=sys.stderr)
+
+
 def _validate_host(host: str) -> None:
     if host not in SUPPORTED_HOSTS:
         raise ActorError(
@@ -240,7 +252,7 @@ def cmd_setup(
         raise
     # Swap succeeded — clean up backup and stale MCP registration
     if old_backup is not None:
-        shutil.rmtree(old_backup, ignore_errors=True)
+        _rmtree_loud(old_backup)
 
     # From here on the skill is deployed. Wrap MCP steps so a failure tells
     # the user how to retry just the registration without wiping state.
@@ -304,7 +316,7 @@ def cmd_update(
             backup.rename(target)
         shutil.rmtree(staging, ignore_errors=True)
         raise
-    shutil.rmtree(backup, ignore_errors=True)
+    _rmtree_loud(backup)
 
     if prev_version is None:
         return (
