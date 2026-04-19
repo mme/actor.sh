@@ -64,9 +64,9 @@ jobs:
       - name: Create local tag
         env:
           NEW_TAG: ${{ steps.tag.outputs.new_tag }}
-        # Local tag only; hatch-vcs reads from local git state at build time.
-        # We don't push until after PyPI publish succeeds so a failed build
-        # doesn't orphan a tag on origin that no wheel backs.
+        # Local tag only; hatch-vcs reads from local git state at build
+        # time. We push to origin after the build succeeds (see the Push
+        # step below) — a failed build never orphans a tag on origin.
         run: git tag "${NEW_TAG}"
 
       - name: Build
