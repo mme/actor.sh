@@ -307,16 +307,16 @@ class DiagnosticRecorderTests(unittest.TestCase):
         events = r.recent()
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].kind, EventKind.READ)
-        self.assertEqual(events[0].size, 11)
-        self.assertEqual(events[0].preview, b"hello world")
+        self.assertEqual(events[0].full_size, 11)
+        self.assertEqual(events[0].preview_bytes, b"hello world")
 
     def test_preview_truncated(self):
         r = DiagnosticRecorder()
         long = b"x" * 200
         r.record(EventKind.WRITE, long)
         ev = r.recent()[0]
-        self.assertEqual(ev.size, 200)
-        self.assertEqual(len(ev.preview), 32)
+        self.assertEqual(ev.full_size, 200)
+        self.assertEqual(len(ev.preview_bytes), 32)
 
     def test_ring_buffer_overwrites(self):
         r = DiagnosticRecorder(capacity=3)
@@ -324,8 +324,8 @@ class DiagnosticRecorderTests(unittest.TestCase):
             r.record(EventKind.READ, str(i).encode())
         events = r.recent()
         self.assertEqual(len(events), 3)
-        self.assertEqual(events[0].preview, b"2")
-        self.assertEqual(events[-1].preview, b"4")
+        self.assertEqual(events[0].preview_bytes, b"2")
+        self.assertEqual(events[-1].preview_bytes, b"4")
 
     def test_recent_limit(self):
         r = DiagnosticRecorder(capacity=10)
@@ -333,8 +333,8 @@ class DiagnosticRecorderTests(unittest.TestCase):
             r.record(EventKind.READ, str(i).encode())
         last2 = r.recent(limit=2)
         self.assertEqual(len(last2), 2)
-        self.assertEqual(last2[0].preview, b"3")
-        self.assertEqual(last2[1].preview, b"4")
+        self.assertEqual(last2[0].preview_bytes, b"3")
+        self.assertEqual(last2[1].preview_bytes, b"4")
 
     def test_clear(self):
         r = DiagnosticRecorder()

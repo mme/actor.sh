@@ -1,15 +1,7 @@
 """Key + mouse event -> byte sequence translator.
 
-Pure. Takes abstracted events (Textual-friendly but not Textual-bound) and
-produces the ANSI bytes to write into the PTY master fd.
-
-References:
-- xterm control sequences: https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-- DECCKM (application cursor keys) flips arrow sequences between CSI A/B/C/D
-  (\x1b[A …) and SS3 A/B/C/D (\x1bOA …).
-- Mouse reporting modes (DECSET 1000 / 1002 / 1003) and SGR (1006) for
-  extended coordinates. We only support click-tracking (1000) + SGR (1006)
-  in v1, which covers claude-code's cursor mode usage.
+Reference: xterm control sequences at
+https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
 """
 from __future__ import annotations
 
@@ -18,10 +10,8 @@ from enum import Enum
 from typing import Dict, Optional
 
 
-# --- Keymap --------------------------------------------------------------
-
-# CSI- vs SS3-prefixed cursor/nav keys. When app_cursor is True, the PTY
-# is in DECCKM app-cursor mode and wants SS3 (\x1bO…) for arrows/home/end.
+# DECCKM (param 1) flips arrow/nav keys between CSI (\x1b[A …) and
+# SS3 (\x1bOA …). The child advertises its preference via DECSET.
 _CSI: Dict[str, str] = {
     "up":        "\x1b[A",
     "down":      "\x1b[B",
@@ -141,15 +131,11 @@ class MouseEventKind(Enum):
 
 @dataclass(frozen=True)
 class MouseMode:
-    """Flags mirroring DECSET modes the child has enabled. Immutable so
-    screen.py can safely share an instance with renderers."""
-    # DECSET 1000 — report clicks
+    """DECSET mouse-reporting modes the child has enabled.
+    tracking=1000, drag=1002, any_motion=1003, sgr=1006."""
     tracking: bool = False
-    # DECSET 1002 — also report drags (button-event tracking)
     drag: bool = False
-    # DECSET 1003 — report all motion
     any_motion: bool = False
-    # DECSET 1006 — SGR extended coords (recommended; unlocks large terminals)
     sgr: bool = False
 
     def should_report_click(self) -> bool:
@@ -161,15 +147,10 @@ def mouse_press_to_bytes(
     x: int, y: int,
     mode: MouseMode,
 ) -> Optional[bytes]:
-    """Encode a mouse press or wheel event.
-
-    `x` and `y` are 0-based cell coordinates within the terminal. We emit
-    1-based coordinates per xterm protocol.
-    Returns None if the child hasn't enabled any mouse tracking.
-    """
+    """Encode a mouse press or wheel event. 0-based cell coords in;
+    1-based xterm-protocol coords out. None if tracking is off."""
     if not mode.should_report_click():
-        # Wheel events are useful even without click tracking (many TUIs
-        # interpret them as scroll); xterm still requires tracking to be on.
+        # Wheel/scroll events require tracking to be on per xterm protocol.
         return None
 
     cb = button.value
@@ -190,9 +171,8 @@ def mouse_release_to_bytes(
     mode: MouseMode,
     button: MouseButton = MouseButton.LEFT,
 ) -> Optional[bytes]:
-    """Encode a mouse release. SGR terminates with lowercase m; legacy
-    protocol uses the single "release" button code (3) regardless of which
-    button was released."""
+    """SGR mode distinguishes the released button (lowercase m terminator).
+    Legacy X10 emits a single "release" code (3) regardless of button."""
     if not mode.should_report_click():
         return None
     cx = x + 1

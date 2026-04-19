@@ -118,8 +118,8 @@ class InteractiveSessionManager:
         return info
 
     def close(self, actor_name: str) -> None:
-        """Kill the session (if running) and remove it from the registry.
-        The run is finalized as STOPPED (app-initiated teardown)."""
+        """App-initiated teardown. Run is marked STOPPED (not ERROR) so
+        the status distinguishes `quit watch` from the child exiting."""
         info = self._sessions.pop(actor_name, None)
         if info is None:
             return
@@ -128,8 +128,7 @@ class InteractiveSessionManager:
             info.session.close()
         finally:
             self._stopping.discard(actor_name)
-        # Belt-and-suspenders: if the on_exit chain didn't run for any
-        # reason, _finalize_run is idempotent on already-done rows.
+        # In case the on_exit chain didn't fire — _finalize_run is idempotent.
         self._finalize_run(actor_name, info.run_id, info.session.exit_code or -1)
 
     def close_all(self) -> None:
@@ -164,7 +163,6 @@ class InteractiveSessionManager:
                 current = db.get_run(run_id)
                 if current is None:
                     return
-                # Already finalized — don't overwrite.
                 if current.status in (Status.DONE, Status.ERROR, Status.STOPPED):
                     return
                 if actor_name in self._stopping:
@@ -173,8 +171,7 @@ class InteractiveSessionManager:
                     final = Status.DONE if exit_code == 0 else Status.ERROR
                 db.update_run_status(run_id, final, exit_code)
         except Exception as e:
-            # DB errors at shutdown shouldn't crash the TUI; surface via
-            # the diagnostics recorder so the user can still extract info.
+            # DB errors at shutdown shouldn't crash the TUI.
             self._record_error(f"finalize_run({actor_name!r}, {run_id}): {e!r}")
 
     def _record_error(self, note: str) -> None:

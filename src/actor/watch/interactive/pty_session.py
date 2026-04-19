@@ -1,13 +1,8 @@
-"""Interactive PTY session: fork + execvpe, non-blocking read, resize, kill.
+"""Interactive PTY session lifetime (fork + execvpe, async read, resize, kill).
 
-One PtySession owns:
-  - a forked child process
-  - the master PTY file descriptor
-  - the on_output callback that receives bytes as they arrive
-  - the on_exit callback that fires when the child exits
-
-No Textual / rendering concerns live here — that's widget.py's job.
-asyncio-based: add_reader schedules the read callback on the event loop.
+Callback-based: on_output gets each chunk as it arrives; on_exit fires
+once when the child is reaped. Textual / rendering concerns live in
+widget.py.
 """
 from __future__ import annotations
 

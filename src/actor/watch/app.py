@@ -114,10 +114,9 @@ class ActorWatchApp(App):
         Binding("l", "show_tab('logs')", "Logs"),
         Binding("d", "show_tab('diff')", "Diff"),
         Binding("i", "show_tab('info')", "Info"),
-        # Note: Enter is NOT bound here — we can't intercept it at the app
-        # level without stealing it from the embedded terminal widget.
-        # Interactive-mode entry is driven off Tree.NodeSelected (see the
-        # on_tree_node_selected handler); ActorTree owns the footer label.
+        # Enter is handled by the Tree's NodeSelected message, not an app
+        # binding — a priority binding here would steal Enter from the
+        # embedded terminal widget.
         Binding("ctrl+shift+d", "dump_diagnostics", show=False),
     ]
 
@@ -449,7 +448,6 @@ class ActorWatchApp(App):
         self._sync_detail_view()
 
     def on_tree_node_selected(self, event) -> None:
-        """Enter pressed on a tree node: start/show interactive session."""
         event.stop()
         self.action_enter_interactive()
 
@@ -535,7 +533,6 @@ class ActorWatchApp(App):
         self._sync_detail_view()
 
     def on_terminal_widget_exit_requested(self, message: TerminalWidget.ExitRequested) -> None:
-        """Ctrl+Z — leave the widget but keep the subprocess alive."""
         from textual.css.query import NoMatches
 
         if self._interactive_active is None:
@@ -548,7 +545,6 @@ class ActorWatchApp(App):
         self._interactive_active = None
 
     def on_terminal_widget_session_exited(self, message: TerminalWidget.SessionExited) -> None:
-        """Child process exited on its own — close the session, restore logs."""
         from textual.css.query import NoMatches
 
         target: str | None = None
@@ -572,8 +568,6 @@ class ActorWatchApp(App):
         self._refresh_detail()
 
     def action_dump_diagnostics(self) -> None:
-        """Dump the terminal-I/O diagnostics ring buffer to the notification
-        system and stderr. Hidden binding for flicker post-mortems."""
         import sys
         dump = self._diagnostics.format(limit=200)
         print(f"--- terminal diagnostics ({len(self._diagnostics)} events) ---",

@@ -289,15 +289,8 @@ def cmd_interactive(
     name: str,
     runner: Optional[Callable[[List[str], Path, dict], int]] = None,
 ) -> Tuple[int, str]:
-    """Enter an interactive session for an existing actor.
-
-    Creates a Run with prompt INTERACTIVE_PROMPT before spawning, runs the
-    agent in a real TTY (stdin/stdout/stderr inherited), and updates the Run
-    when the process exits. Returns (exit_code, status_message).
-
-    `runner` is injectable for testing: takes (argv, cwd, env) and returns
-    the child's exit code. Default uses subprocess.Popen with TTY inheritance.
-    """
+    """`runner` is injectable so tests can drive without spawning a real
+    subprocess. Returns (exit_code, status_message)."""
     actor = db.get_actor(name)
 
     status = db.resolve_actor_status(name, proc_mgr)
@@ -354,7 +347,6 @@ def cmd_interactive(
 
 
 def _default_interactive_runner(argv: List[str], cwd: Path, env: dict) -> int:
-    """Spawn argv in cwd with the caller's TTY and block until exit."""
     proc = subprocess.Popen(argv, cwd=str(cwd), env=env)
     try:
         return proc.wait()

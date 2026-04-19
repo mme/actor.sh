@@ -17,21 +17,21 @@ from typing import Callable, Deque, List, Optional
 
 
 class EventKind(str, Enum):
-    READ = "read"            # bytes read from PTY master
-    WRITE = "write"          # bytes written to PTY master
-    REFRESH = "refresh"      # widget re-render fired
-    REFRESH_SKIP = "skip"    # batcher coalesced
-    RESIZE = "resize"        # PTY + screen resize
-    EXIT = "exit"            # child process exited
-    ERROR = "error"          # unexpected condition
+    READ = "read"
+    WRITE = "write"
+    REFRESH = "refresh"
+    REFRESH_SKIP = "skip"
+    RESIZE = "resize"
+    EXIT = "exit"
+    ERROR = "error"
 
 
 @dataclass(frozen=True)
 class TerminalEvent:
     t: float
     kind: EventKind
-    size: int
-    preview: bytes
+    full_size: int
+    preview_bytes: bytes
     note: str
 
 
@@ -58,15 +58,14 @@ class DiagnosticRecorder:
         self._events.append(TerminalEvent(
             t=self._now(),
             kind=kind,
-            size=size,
-            preview=preview,
+            full_size=size,
+            preview_bytes=preview,
             note=note,
         ))
 
     def recent(self, limit: Optional[int] = None) -> List[TerminalEvent]:
         if limit is None or limit >= len(self._events):
             return list(self._events)
-        # newest `limit` events, oldest-first
         items = list(self._events)
         return items[-limit:]
 
@@ -77,11 +76,10 @@ class DiagnosticRecorder:
         return len(self._events)
 
     def format(self, limit: Optional[int] = None) -> str:
-        """Human-readable dump for stderr / logs."""
         lines: List[str] = []
         for ev in self.recent(limit):
-            preview = ev.preview.decode("ascii", errors="replace").replace("\x1b", "\\x1b")
+            preview = ev.preview_bytes.decode("ascii", errors="replace").replace("\x1b", "\\x1b")
             lines.append(
-                f"  t={ev.t:.4f} {ev.kind.value:8s} size={ev.size:5d}  {preview!r}  {ev.note}"
+                f"  t={ev.t:.4f} {ev.kind.value:8s} size={ev.full_size:5d}  {preview!r}  {ev.note}"
             )
         return "\n".join(lines)

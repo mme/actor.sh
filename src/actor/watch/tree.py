@@ -15,9 +15,8 @@ RUNNING_FRAMES = ["♤", "♡", "♢", "♧"]
 class ActorTree(Tree[Actor]):
     """Left panel showing all actors as a tree."""
 
-    # Relabel Tree's default Enter binding so the footer shows a useful
-    # hint. The action (select_cursor) is inherited and posts NodeSelected,
-    # which the app handles to open an interactive session.
+    # Relabel Tree's inherited Enter binding so the footer shows the
+    # actor.sh-specific action name; select_cursor itself is inherited.
     BINDINGS = [
         Binding("enter", "select_cursor", "Interactive", show=True),
     ]
