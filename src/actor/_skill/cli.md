@@ -51,7 +51,12 @@ actor new fix-nav
 actor run fix-nav "continue fixing"
 actor run fix-nav --config model=opus "..."                                 # per-run override (not saved)
 echo "fix it" | actor run fix-nav                                           # prompt from stdin
+actor run fix-nav -i                                                        # resume interactively in the current TTY
 ```
+
+`-i` (interactive) drops you into a live Claude/Codex session that resumes
+the actor's prior conversation. Tracked as a Run with prompt `*interactive*`
+so it shows up in `actor show` / the watch dashboard alongside normal runs.
 
 ## Change actor configuration
 

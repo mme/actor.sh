@@ -116,6 +116,18 @@ stop_actor(name="fix-nav")
 discard_actor(name="fix-nav")                                               # worktree stays on disk
 ```
 
+### Interactive sessions
+
+Live Claude / Codex terminal sessions can be embedded in `actor watch`:
+
+- In the watch tree, select an actor and press **Enter** — the detail pane swaps to an embedded terminal running `claude --resume <session_id>` (or `codex resume <session_id>`) in the actor's worktree.
+- The actor must not be RUNNING and must already have a session (i.e. it's been run at least once).
+- **Ctrl+Z** leaves interactive mode but keeps the subprocess alive. Selecting a different actor in the tree shows that actor's logs (or its own live terminal if it also has one); coming back restores the session.
+- Quitting watch kills all live subprocesses and marks their runs STOPPED.
+- Each interactive session creates a Run with prompt `*interactive*` so it shows up in `show_actor` and `logs_actor` alongside normal runs.
+
+From the CLI: `actor run <name> -i` does the same thing but uses your existing TTY (no embedded widget).
+
 ## Workflow Examples
 
 ### User: "spin up an actor to refactor the auth module"
