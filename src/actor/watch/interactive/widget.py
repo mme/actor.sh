@@ -78,6 +78,11 @@ class TerminalWidget(Widget, can_focus=True):
         self._batcher = RefreshBatcher()
         self._recorder = recorder
         self._exit_code: Optional[int] = None
+        # Render cache: render_line(y) is called once per visible row per
+        # frame. Without this, a 24-row widget walks the pyte buffer 24×
+        # per frame (and the pyte walk itself is the bottleneck).
+        self._cached_strips: Optional[list[Strip]] = None
+        self._cached_at_frame: int = -1
         # Wire the session callbacks once at construction time so that
         # unmounting and re-mounting (e.g. when the user switches actors
         # and comes back) doesn't lose output or miss the exit event.
@@ -120,13 +125,22 @@ class TerminalWidget(Widget, can_focus=True):
     # -- rendering ---------------------------------------------------------
 
     def render_line(self, y: int) -> Strip:
-        lines = self._cached_lines()
-        if 0 <= y < len(lines):
-            return Strip(lines[y].render(self.app.console))
+        strips = self._get_strips()
+        if 0 <= y < len(strips):
+            return strips[y]
         return Strip.blank(self.size.width)
 
-    def _cached_lines(self) -> List[Text]:
-        return self._screen.render_lines()
+    def _get_strips(self) -> list[Strip]:
+        """Render all lines to Strips once per frame, then reuse."""
+        if self._cached_at_frame == self._frame_counter and self._cached_strips is not None:
+            return self._cached_strips
+        console = self.app.console
+        self._cached_strips = [
+            Strip(list(line.render(console)))
+            for line in self._screen.render_lines()
+        ]
+        self._cached_at_frame = self._frame_counter
+        return self._cached_strips
 
     # -- resize ------------------------------------------------------------
 

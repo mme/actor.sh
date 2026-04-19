@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from textual.binding import Binding
 from textual.widgets import Tree
 
 from ..types import Actor, Status
@@ -13,6 +14,13 @@ RUNNING_FRAMES = ["♤", "♡", "♢", "♧"]
 
 class ActorTree(Tree[Actor]):
     """Left panel showing all actors as a tree."""
+
+    # Relabel Tree's default Enter binding so the footer shows a useful
+    # hint. The action (select_cursor) is inherited and posts NodeSelected,
+    # which the app handles to open an interactive session.
+    BINDINGS = [
+        Binding("enter", "select_cursor", "Interactive", show=True),
+    ]
 
     DEFAULT_CSS = """
     ActorTree {
