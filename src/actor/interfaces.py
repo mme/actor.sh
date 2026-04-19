@@ -49,6 +49,10 @@ class Agent(abc.ABC):
     def stop(self, pid: int) -> None:
         """Kill a running agent process."""
 
+    @abc.abstractmethod
+    def interactive_argv(self, session_id: str, config: Config) -> List[str]:
+        """Argv to launch an interactive session (TTY / PTY). No prompt."""
+
 
 class GitOps(abc.ABC):
     @abc.abstractmethod

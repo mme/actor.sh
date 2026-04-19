@@ -20,6 +20,7 @@ from actor import (
     Database,
     # Commands
     cmd_new, cmd_run, cmd_list, cmd_show, cmd_stop, cmd_config, cmd_logs, cmd_discard,
+    cmd_interactive, INTERACTIVE_PROMPT,
     # Helpers
     truncate, format_duration,
 )
@@ -101,6 +102,9 @@ class FakeAgent(Agent):
             err = self.next_stop_error
             self.next_stop_error = None
             raise err
+
+    def interactive_argv(self, session_id, config):
+        return ["fake-agent", "--resume", session_id]
 
 
 class FakeGitCall:
@@ -682,6 +686,128 @@ class TestCmdRun(unittest.TestCase):
         self.assertIsNotNone(latest, "run row should exist marked as error")
         self.assertEqual(latest.status, Status.ERROR)
         self.assertEqual(latest.exit_code, -1)
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  Test: cmd_interactive
+# ──────────────────────────────────────────────────────────────────────
+
+class TestCmdInteractive(unittest.TestCase):
+
+    def _db(self) -> Database:
+        return Database.open(":memory:")
+
+    def _actor_with_session(self, db: Database, name: str = "test", session: str = "S1"):
+        create_actor(db, name)
+        db.update_actor_session(name, session)
+
+    def test_interactive_creates_run_and_marks_done_on_success(self):
+        db = self._db()
+        self._actor_with_session(db)
+        pm = FakeProcessManager()
+        agent = FakeAgent()
+        captured: dict = {}
+
+        def runner(argv, cwd, env):
+            captured["argv"] = argv
+            captured["cwd"] = cwd
+            captured["actor_name_env"] = env.get("ACTOR_NAME")
+            return 0
+
+        exit_code, _ = cmd_interactive(
+            db, agent, pm, name="test", runner=runner,
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(captured["argv"], ["fake-agent", "--resume", "S1"])
+        self.assertEqual(Path(captured["cwd"]).resolve(), Path("/tmp").resolve())
+        self.assertEqual(captured["actor_name_env"], "test")
+
+        latest = db.latest_run("test")
+        self.assertEqual(latest.prompt, INTERACTIVE_PROMPT)
+        self.assertEqual(latest.status, Status.DONE)
+        self.assertEqual(latest.exit_code, 0)
+
+    def test_interactive_nonzero_exit_marks_error(self):
+        db = self._db()
+        self._actor_with_session(db)
+        pm = FakeProcessManager()
+        agent = FakeAgent()
+
+        exit_code, _ = cmd_interactive(
+            db, agent, pm, name="test",
+            runner=lambda argv, cwd, env: 2,
+        )
+        self.assertEqual(exit_code, 2)
+        latest = db.latest_run("test")
+        self.assertEqual(latest.status, Status.ERROR)
+        self.assertEqual(latest.exit_code, 2)
+
+    def test_interactive_requires_session(self):
+        db = self._db()
+        create_actor(db, "test")  # no session
+        pm = FakeProcessManager()
+        agent = FakeAgent()
+        with self.assertRaises(ActorError):
+            cmd_interactive(
+                db, agent, pm, name="test",
+                runner=lambda argv, cwd, env: 0,
+            )
+
+    def test_interactive_rejects_running_actor(self):
+        db = self._db()
+        self._actor_with_session(db)
+        pm = FakeProcessManager()
+        run = Run(
+            id=0, actor_name="test", prompt="go", status=Status.RUNNING,
+            exit_code=None, pid=999, config={},
+            started_at="2026-01-01T00:00:00Z", finished_at=None,
+        )
+        db.insert_run(run)
+        pm.mark_alive(999)
+
+        agent = FakeAgent()
+        with self.assertRaises(Exception):
+            cmd_interactive(
+                db, agent, pm, name="test",
+                runner=lambda argv, cwd, env: 0,
+            )
+
+    def test_interactive_runner_exception_marks_error(self):
+        db = self._db()
+        self._actor_with_session(db)
+        pm = FakeProcessManager()
+        agent = FakeAgent()
+
+        def boom(argv, cwd, env):
+            raise RuntimeError("something went wrong")
+
+        with self.assertRaises(RuntimeError):
+            cmd_interactive(
+                db, agent, pm, name="test", runner=boom,
+            )
+        latest = db.latest_run("test")
+        self.assertEqual(latest.status, Status.ERROR)
+        self.assertEqual(latest.exit_code, -1)
+
+    def test_interactive_stopped_race_preserves_stopped_status(self):
+        """If cmd_stop marks the run STOPPED while interactive is running,
+        cmd_interactive must not overwrite it with DONE/ERROR on exit."""
+        db = self._db()
+        self._actor_with_session(db)
+        pm = FakeProcessManager()
+        agent = FakeAgent()
+
+        def stop_race(argv, cwd, env):
+            # Simulate the stop race: during the run, status flips to STOPPED
+            latest = db.latest_run("test")
+            db.update_run_status(latest.id, Status.STOPPED, -1)
+            return 0
+
+        cmd_interactive(
+            db, agent, pm, name="test", runner=stop_race,
+        )
+        latest = db.latest_run("test")
+        self.assertEqual(latest.status, Status.STOPPED)
 
 
 # ──────────────────────────────────────────────────────────────────────

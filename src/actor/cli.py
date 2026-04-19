@@ -16,6 +16,7 @@ from .agents.codex import CodexAgent
 from .commands import (
     cmd_config,
     cmd_discard,
+    cmd_interactive,
     cmd_list,
     cmd_logs,
     cmd_new,
@@ -365,21 +366,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         elif args.command == "run":
             # Interactive mode
             if args.interactive:
-                actor = db.get_actor(args.name)
-                status = db.resolve_actor_status(args.name, proc_mgr)
-                if status == Status.RUNNING:
-                    raise ActorError(f"'{args.name}' is currently running — stop it first")
-                session_id = actor.agent_session
-                if session_id is None:
-                    raise ActorError(f"'{args.name}' has no session yet — run it non-interactively first")
-                os.chdir(actor.dir)
-                if actor.agent == AgentKind.CLAUDE:
-                    cmd = ["claude", "--resume", session_id]
-                elif actor.agent == AgentKind.CODEX:
-                    cmd = ["codex", "resume", session_id]
-                else:
-                    raise ActorError(f"interactive mode not supported for agent: {actor.agent}")
-                os.execvp(cmd[0], cmd)
+                agent = agent_for(args.name)
+                exit_code, msg = cmd_interactive(
+                    db, agent, proc_mgr, name=args.name,
+                )
+                print(msg, file=sys.stderr)
+                sys.exit(exit_code if exit_code >= 0 else 1)
 
             # Resolve prompt: argument, stdin, or error
             prompt = args.prompt

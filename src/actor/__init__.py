@@ -61,6 +61,8 @@ from .process import RealProcessManager
 from .commands import (
     cmd_new,
     cmd_run,
+    cmd_interactive,
+    INTERACTIVE_PROMPT,
     cmd_list,
     cmd_show,
     cmd_stop,

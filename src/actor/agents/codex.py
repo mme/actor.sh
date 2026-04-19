@@ -273,6 +273,9 @@ class CodexAgent(Agent):
 
         return entries
 
+    def interactive_argv(self, session_id: str, config: Config) -> List[str]:
+        return ["codex", "resume", session_id]
+
     def stop(self, pid: int) -> None:
         with self._lock:
             entry = self._children.pop(pid, None)

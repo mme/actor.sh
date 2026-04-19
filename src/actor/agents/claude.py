@@ -209,6 +209,15 @@ class ClaudeAgent(Agent):
 
         return entries
 
+    def interactive_argv(self, session_id: str, config: Config) -> List[str]:
+        return [
+            "claude",
+            *self._CHANNEL_ARGS,
+            *self._permission_args(config),
+            "--resume", session_id,
+            *self._config_args(config),
+        ]
+
     def stop(self, pid: int) -> None:
         with self._lock:
             proc = self._children.pop(pid, None)
