@@ -99,6 +99,46 @@ class DeployedVersionParseTests(unittest.TestCase):
         text = f"{_DEPLOY_BLOCK_BEGIN}\n{_DEPLOY_BLOCK_END}\n"
         self.assertIsNone(_parse_deployed_version(text))
 
+    def test_roundtrip_for_pep440_versions(self):
+        """Stamp → parse → same version for realistic PEP 440 strings."""
+        from actor.setup import _deploy_block
+        for version in (
+            "0.1.4",
+            "0.1.4.dev3+g1a2b3c4",
+            "0.1.dev190+gb95ac3fa7.d20260419",
+            "1.0.0",
+            "1.0.0rc1",
+            "1.0.0+local.with.dot",
+            "0.0.0-old",
+        ):
+            with self.subTest(version=version):
+                block = _deploy_block(version)
+                self.assertEqual(_parse_deployed_version(block), version)
+
+
+class StampIdempotencyTests(unittest.TestCase):
+    def test_double_stamp_same_version_is_identical(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _fake_skill_md(Path(tmp))
+            _stamp_deploy_block(path, "1.2.3")
+            first = path.read_text()
+            _stamp_deploy_block(path, "1.2.3")
+            self.assertEqual(path.read_text(), first)
+
+    def test_prefix_and_suffix_preserved(self):
+        """Content outside the block must survive byte-for-byte."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "SKILL.md"
+            path.write_text(
+                "PREFIX_BEFORE_BLOCK\n"
+                f"{_DEPLOY_BLOCK_BEGIN}\n{_DEPLOY_BLOCK_END}\n"
+                "SUFFIX_AFTER_BLOCK\n"
+            )
+            _stamp_deploy_block(path, "1.0.0")
+            out = path.read_text()
+            self.assertTrue(out.startswith("PREFIX_BEFORE_BLOCK\n"))
+            self.assertTrue(out.endswith("SUFFIX_AFTER_BLOCK\n"))
+
 
 class SetupEndToEndTests(unittest.TestCase):
     def _fake_home(self):

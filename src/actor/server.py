@@ -56,11 +56,13 @@ def _build_instructions(for_host: str | None = None) -> str:
     # `actor update` prompt every session.
     if __version__ == "unknown":
         return base
+    # The deployed skill's 'Version and updates' section (inside the
+    # <!-- BEGIN AUTO-UPDATED ... --> markers of SKILL.md) declares the
+    # version it was installed from. The skill itself tells the agent how
+    # to compare that against this server announcement.
     return (
         base
-        + f"\n\nactor-sh MCP version: {__version__}. If the actor skill document "
-        "declares a different version in its frontmatter, tell the user to run "
-        "`actor update` to refresh the deployed skill, then restart this session."
+        + f"\n\nactor-sh MCP version: {__version__}."
     )
 
 

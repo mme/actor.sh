@@ -125,9 +125,13 @@ def _stamp_deploy_block(skill_md: Path, version: str) -> None:
     generated block that includes the installed version and the drift-check
     instructions.
 
-    The markers must already exist in the file (they're checked in to the source
-    SKILL.md as empty placeholders). If they're missing, error — that means the
-    bundled skill is malformed.
+    The markers must already exist in the file (the source SKILL.md checks in
+    empty placeholders). If they're missing, error — either the bundled skill
+    is malformed or the deployed file was manually edited; either way the caller
+    should surface a clear message.
+
+    Write is atomic via os.replace so a partial write (disk full, interrupt)
+    can't leave SKILL.md truncated.
     """
     text = skill_md.read_text()
     begin_idx = text.find(_DEPLOY_BLOCK_BEGIN)
@@ -135,12 +139,18 @@ def _stamp_deploy_block(skill_md: Path, version: str) -> None:
     if begin_idx < 0 or end_idx < 0 or end_idx < begin_idx:
         raise ActorError(
             f"{skill_md} is missing the deploy-block markers "
-            f"({_DEPLOY_BLOCK_BEGIN} / {_DEPLOY_BLOCK_END}); "
-            "the bundled skill appears malformed."
+            f"({_DEPLOY_BLOCK_BEGIN} / {_DEPLOY_BLOCK_END}). "
+            "Re-run `actor setup` to restore a correct SKILL.md."
         )
     end_idx += len(_DEPLOY_BLOCK_END)
     new_text = text[:begin_idx] + _deploy_block(version) + text[end_idx:]
-    skill_md.write_text(new_text)
+    # Defensive self-check: any future refactor of _deploy_block that drops a
+    # marker would silently render every subsequent update un-parseable.
+    if _DEPLOY_BLOCK_BEGIN not in new_text or _DEPLOY_BLOCK_END not in new_text:
+        raise ActorError("generated deploy block lost its markers (actor-sh bug)")
+    tmp = skill_md.with_suffix(skill_md.suffix + ".tmp")
+    tmp.write_text(new_text)
+    os.replace(tmp, skill_md)
 
 
 def _run_claude(*args: str, timeout: int = _CLAUDE_MCP_TIMEOUT_SEC) -> subprocess.CompletedProcess[str]:
@@ -276,11 +286,33 @@ def cmd_update(
             f"Run 'actor setup --for {for_host} --scope {scope}' first."
         )
 
-    before = (target / "SKILL.md").read_text()
-    _copy_bundled_skill(target)
-    _stamp_deploy_block(target / "SKILL.md", new_version)
+    before_text = (target / "SKILL.md").read_text()
+    prev_version = _parse_deployed_version(before_text)
 
-    prev_version = _parse_deployed_version(before) or "unknown"
+    # Atomic swap: stage the refreshed skill in a sibling temp dir, stamp, then
+    # rename-swap. Protects the deployed skill from partial writes if the
+    # stamp step fails mid-flight.
+    staging = Path(tempfile.mkdtemp(dir=target.parent, prefix=f".{name}-staging-"))
+    backup = target.parent / f".{name}-old-{os.getpid()}"
+    try:
+        _copy_bundled_skill(staging)
+        _stamp_deploy_block(staging / "SKILL.md", new_version)
+        target.rename(backup)
+        staging.rename(target)
+    except Exception:
+        if backup.exists() and not target.exists():
+            backup.rename(target)
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    shutil.rmtree(backup, ignore_errors=True)
+
+    if prev_version is None:
+        return (
+            f"actor skill at {target} refreshed to {new_version}. "
+            "(Couldn't read the prior version — the deployed skill may have been "
+            "edited by hand or predates version stamping.) "
+            "Restart your Claude Code session to pick up the changes."
+        )
     if prev_version == new_version:
         return f"actor skill at {target} is already at version {new_version}."
     return (
@@ -289,7 +321,9 @@ def cmd_update(
     )
 
 
-_VERSION_IN_BLOCK_RE = re.compile(r"\*\*actor-sh ([^\*]+)\*\*")
+# Anchored on the "deployed from" phrase so future edits to the block
+# prose can't accidentally match a different bold span.
+_VERSION_IN_BLOCK_RE = re.compile(r"deployed from \*\*actor-sh ([^\*]+)\*\*")
 
 
 def _parse_deployed_version(text: str) -> str | None:

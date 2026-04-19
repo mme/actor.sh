@@ -42,6 +42,11 @@ Repository = "https://github.com/mme/actor.sh"
 [tool.hatch.version]
 source = "vcs"
 
+[tool.hatch.version.raw-options]
+# Explicit so a future hatch-vcs default change doesn't silently produce
+# surprising versions from our vX.Y.Z tags. setuptools-scm uses tag_regex.
+tag_regex = '^v(?P<version>\d+\.\d+\.\d+.*)$'
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/actor"]
 # Non-Python files inside the package tree (e.g. the bundled skill .md files
