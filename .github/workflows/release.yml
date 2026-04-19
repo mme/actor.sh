@@ -31,6 +31,20 @@ jobs:
           fetch-depth: 0
 
       - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: '3.13'
+
+      - name: Stub agent binaries
+        # Tests inject FakeAgent, but cmd_run still checks that the actor's
+        # declared agent binary is on PATH before dispatching. Neither claude
+        # nor codex is available in CI runners, so drop in no-op stubs.
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          for name in claude codex; do
+            printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/.local/bin/$name"
+            chmod +x "$HOME/.local/bin/$name"
+          done
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run tests
         run: uv run python -m unittest discover tests
