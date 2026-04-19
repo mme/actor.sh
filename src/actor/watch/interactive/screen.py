@@ -22,6 +22,13 @@ from .input import MouseMode
 # and whether it's set (h) or reset (l).
 _DECSET_RE = re.compile(rb"\x1b\[\?([\d;]+)([hl])")
 
+# xterm / DEC private CSI variants (leading <, =, or > after '[').
+# Pyte doesn't understand these and, worse, its SGR parser drops the '>'
+# and treats e.g. `\x1b[>4;2m` (modifyOtherKeys) as SGR `4;2` — which sets
+# underline on every subsequent cell. Strip them before feeding pyte.
+# Examples from claude-code's init: `[>4;2m`, `[>1u`, `[>c`.
+_PRIVATE_CSI_RE = re.compile(rb"\x1b\[[<=>][\d;]*[a-zA-Z~]")
+
 
 class TerminalScreen:
     """Wraps pyte.HistoryScreen + rich rendering.
@@ -54,6 +61,8 @@ class TerminalScreen:
             on = m.group(2) == b"h"
             for p in params:
                 self._apply_decset(p, on)
+        # Strip private CSI variants pyte mishandles (see _PRIVATE_CSI_RE).
+        data = _PRIVATE_CSI_RE.sub(b"", data)
         self._stream.feed(data)
 
     def _apply_decset(self, param: int, on: bool) -> None:

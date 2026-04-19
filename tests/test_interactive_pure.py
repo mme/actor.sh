@@ -100,6 +100,20 @@ class TerminalScreenTests(unittest.TestCase):
         # Garbage degrades to None, not crash.
         self.assertIsNone(_resolve_color("not-a-color"))
 
+    def test_private_csi_variants_are_stripped(self):
+        """Regression: claude-code emits \\x1b[>4;2m (modifyOtherKeys) at
+        startup. Pyte's parser drops the '>' and reads it as plain SGR
+        4 (underline), leaving every subsequent cell underlined."""
+        s = TerminalScreen(rows=2, cols=20)
+        s.feed(b"\x1b[>4;2m")  # would underline everything if not stripped
+        s.feed(b"hello")
+        # No cells should be underlined.
+        for x in range(5):
+            self.assertFalse(
+                s._screen.buffer[0][x].underscore,
+                f"cell {x} got wrongly underlined from private CSI",
+            )
+
     def test_rendering_tolerates_truecolor_fg(self):
         """Regression: claude uses truecolor — ensure render_lines doesn't crash."""
         s = TerminalScreen(rows=2, cols=10)
