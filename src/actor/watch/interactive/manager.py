@@ -164,6 +164,8 @@ class InteractiveSessionManager:
             return run_id
 
     def _finalize_run(self, actor_name: str, run_id: int, exit_code: int) -> None:
+        """Idempotent, never raises. Errors are routed to the diagnostic
+        recorder so the nested-finally in `close()` can rely on it."""
         try:
             with self._db_opener() as db:
                 current = db.get_run(run_id)
