@@ -51,7 +51,11 @@ class ActorWatchApp(App):
     }
     #actor-panel {
         width: 33;
-        border: blank;
+        /* Dim separator when unfocused so the two panels are visually
+           distinct even when focus is outside the app (modal open,
+           command palette, OS-level blur). Same round shape as the
+           focused state so there's no layout jitter on transition. */
+        border: round $foreground 30%;
         padding: 0 1;
         background: ansi_default;
     }
@@ -67,7 +71,7 @@ class ActorWatchApp(App):
     }
     #detail-panel {
         width: 1fr;
-        border: blank;
+        border: round $foreground 30%;
     }
     #detail-panel:focus-within {
         border: round $primary;
