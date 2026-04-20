@@ -13,6 +13,7 @@ authors = [
     { name = "Markus Ecker" },
 ]
 dependencies = [
+    "kdl-py>=1.2.0",
     "mcp>=1.0",
     "pyte>=0.8.1",
     "textual>=1.0",

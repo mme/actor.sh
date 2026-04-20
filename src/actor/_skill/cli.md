@@ -36,8 +36,26 @@ actor new fix-nav --dir /path/to/repo "..."                                 # wo
 actor new fix-nav --no-worktree "..."                                       # no worktree
 actor new fix-nav --config model=opus "..."                                 # saved defaults
 actor new fix-nav --no-strip-api-keys "..."                                 # pass API keys through
+actor new fix-nav --template qa                                             # apply a template from settings.kdl
 echo "fix it" | actor new fix-nav                                           # prompt from stdin
 ```
+
+Templates come from `~/.actor/settings.kdl` (user) or
+`<repo>/.actor/settings.kdl` (project-local; project wins on overlap).
+These files don't exist by default — create them by hand when the user
+wants a template. A template can set the agent, prompt, and any config
+keys:
+
+```kdl
+template "qa" {
+    agent "claude"
+    model "opus"
+    prompt "You're a QA engineer. Write tests for the changed code."
+}
+```
+
+Any explicit flag on the CLI (`--agent`, `--model`, `--config`, positional
+prompt / stdin) beats the template's value.
 
 ## Create without running
 

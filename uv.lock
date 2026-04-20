@@ -1,11 +1,12 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.10"
 
 [[package]]
 name = "actor-sh"
 source = { editable = "." }
 dependencies = [
+    { name = "kdl-py" },
     { name = "mcp" },
     { name = "pyte" },
     { name = "textual" },
@@ -14,6 +15,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "kdl-py", specifier = ">=1.2.0" },
     { name = "mcp", specifier = ">=1.0" },
     { name = "pyte", specifier = ">=0.8.1" },
     { name = "textual", specifier = ">=1.0" },
@@ -613,6 +615,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/19/74/a633ee74eb36c44aa6d1095e7cc5569bebf04342ee146178e2d36600708b/jsonschema_specifications-2025.9.1.tar.gz", hash = "sha256:b540987f239e745613c7a9176f3edb72b832a4ac465cf02712288397832b5e8d", size = 32855, upload-time = "2025-09-08T01:34:59.186Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl", hash = "sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe", size = 18437, upload-time = "2025-09-08T01:34:57.871Z" },
+]
+
+[[package]]
+name = "kdl-py"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a4/35/caa43d276dd46efe73926e25024429fab25effca24ba0af3875ea5cdc362/kdl-py-1.2.0.tar.gz", hash = "sha256:63f3f46c6277dedadce44dcfc94672bf6e6bf3330b90122e0134c22857e29973", size = 29224, upload-time = "2024-01-18T23:50:16.957Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b7/04/766286ba77621edf37225c66ce0ef2bceead987c69439b572e85ad27980c/kdl_py-1.2.0-py3-none-any.whl", hash = "sha256:d11e556dbb226cccf666bb4ffe17c73e9d5bb08d29976649fa9292bac973d3e2", size = 23665, upload-time = "2024-01-18T23:50:14.785Z" },
 ]
 
 [[package]]

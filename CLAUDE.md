@@ -8,6 +8,7 @@ Manages multiple Claude/Codex agents running in isolated git worktrees.
 src/actor/               # Python package
   cli.py                 # argparse CLI, command dispatch
   commands.py            # Command implementations (cmd_new, cmd_run, cmd_list, etc.)
+  config.py              # KDL loader for ~/.actor/settings.kdl + <repo>/.actor/settings.kdl — templates
   setup.py               # 'actor setup' / 'actor update' — deploy bundled skill + register MCP
   server.py              # MCP server entry point
   db.py                  # SQLite database layer (~/.actor/actor.db)
@@ -41,7 +42,10 @@ tests/
   test_*.py              # unittest suites
 spec/
   V2.md                  # V2 vision (MCP server, channels, dashboard, plugin)
+  PLAN.md                # Plan root index
   PLAN-STAGE1.md         # Stage 1 implementation plan (minimal MCP server)
+  PLAN-CONFIG-SYSTEM.md  # Config / templates implementation plan
+  DASHBOARD.md           # Watch dashboard spec
 ```
 
 ## Development setup
@@ -82,7 +86,8 @@ actor update                                      # refreshes deployed skill fil
 ## Running tests
 
 ```bash
-uv run python -m unittest tests.test_actor
+uv run python -m unittest discover tests      # full suite
+uv run python -m unittest tests.test_actor    # single module
 ```
 
 Tests use in-memory SQLite and fake implementations (FakeAgent, FakeGit, FakeProcessManager) — no real processes or git repos needed.
@@ -115,6 +120,39 @@ Local dev installs (`uv sync`) get a PEP 440 dev version like
 `actor --version`, the MCP server's announced version, and the deployed
 SKILL.md all agree and the drift check still works.
 
+## Config files & templates
+
+`actor new` reads `~/.actor/settings.kdl` (user-wide) and
+`<repo>/.actor/settings.kdl` (project-local, discovered by walking up from
+CWD). Project values win when the same key appears in both. Missing files
+are ignored silently; malformed KDL raises `ConfigError` with the path.
+
+There is no `actor init` — create the file by hand (the `.actor/`
+directory is also used for worktrees and the SQLite DB, so it typically
+already exists).
+
+Templates are named presets for `actor new`:
+
+```kdl
+template "qa" {
+    agent "claude"
+    model "opus"
+    prompt "You're a QA engineer. Write tests for the changed code."
+}
+```
+
+Usage: `actor new foo --template qa` applies the template's agent + config +
+prompt. Explicit CLI flags (`--agent`, `--model`, `--config`, positional
+prompt / stdin) override the template. `agent` and `prompt` are promoted to
+top-level fields; every other child is stored as a config key (values
+coerced to strings).
+
+Unknown top-level nodes (e.g. `hooks`, `agent`, `alias`) are silently
+ignored for forward-compat with follow-up tickets.
+
+Load programmatically via `actor.config.load_config(cwd=..., home=...)` —
+both args default to `Path.cwd()` / `$HOME` so tests can inject temp dirs.
+
 ## Interactive mode
 
 Both the CLI and the watch TUI can open a live Claude/Codex session for
@@ -137,6 +175,6 @@ dumps the DiagnosticRecorder ring buffer to stderr for post-mortems.
 ## Architecture notes
 
 - Commands are pure functions that take a `Database` + interfaces and return strings. Side effects go through the `Agent`, `GitOps`, and `ProcessManager` ABCs — this is what makes everything testable with fakes.
-- No dependencies beyond Python 3.9+ stdlib for the core package.
+- Requires Python 3.10+. Runtime deps: `kdl-py` (config parser), `mcp` (MCP server), `pyte` / `textual` / `textual-serve` (watch dashboard + embedded TTYs).
 - Actors spawned by other actors are tracked via the `parent` column. The `ACTOR_NAME` env var is set before launching an agent, so child actors automatically record their parent. `discard` cascades recursively — stops running children, then deletes.
 - DB migrations run on open (see `db.py` after schema creation). New columns are added via `ALTER TABLE` if missing.

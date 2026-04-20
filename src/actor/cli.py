@@ -70,6 +70,7 @@ Examples:
   actor new my-feature --dir /path/to/repo          Worktree from another repo
   actor new my-feature --base develop               Branch off develop
   actor new my-feature --config effort=max          Set agent config at creation
+  actor new my-feature --template qa                Apply the 'qa' template from settings.kdl
   echo "fix it" | actor new my-feature              Create and run with piped prompt""",
     )
     p_new.add_argument("name", help="Actor name")
@@ -77,10 +78,15 @@ Examples:
     p_new.add_argument("--dir", default=None, help="Base directory (defaults to CWD)")
     p_new.add_argument("--no-worktree", action="store_true", help="Skip worktree creation, run in the directory directly")
     p_new.add_argument("--base", default=None, help="Branch to create the worktree from (defaults to current branch)")
-    p_new.add_argument("--agent", default="claude", help="Coding agent to use")
+    p_new.add_argument("--agent", default=None, help="Coding agent to use (defaults to template's agent or 'claude')")
+    p_new.add_argument("--template", default=None, help="Apply a template from settings.kdl")
     p_new.add_argument("--model", default=None, help="Model for the agent to use")
-    p_new.add_argument("--strip-api-keys", action="store_true", default=True, dest="strip_api_keys", help="Strip API keys from environment (default)")
-    p_new.add_argument("--no-strip-api-keys", action="store_false", dest="strip_api_keys", help="Pass API keys through to the agent")
+    # Tri-state: default None = "no override" so a template's strip-api-keys
+    # value wins. Explicit --strip-api-keys / --no-strip-api-keys set True/
+    # False and beat the template. When neither CLI nor template sets the
+    # key, it's omitted from config and the agent's own default applies.
+    p_new.add_argument("--strip-api-keys", action="store_const", const=True, default=None, dest="strip_api_keys", help="Strip API keys from environment (default)")
+    p_new.add_argument("--no-strip-api-keys", action="store_const", const=False, dest="strip_api_keys", help="Pass API keys through to the agent")
     p_new.add_argument("--config", dest="config", action="append", default=[], metavar="KEY=VALUE", help="Config key=value pair (repeat for multiple)")
 
     # -- run --
@@ -332,11 +338,16 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     try:
         if args.command == "new":
+            from .config import load_config
+            app_config = load_config()
+
             config_pairs = list(args.config)
             if args.model is not None:
                 config_pairs.append(f"model={args.model}")
-            if not args.strip_api_keys:
-                config_pairs.append("strip-api-keys=false")
+            if args.strip_api_keys is not None:
+                config_pairs.append(
+                    f"strip-api-keys={'true' if args.strip_api_keys else 'false'}"
+                )
             actor = cmd_new(
                 db, git,
                 name=args.name,
@@ -345,6 +356,8 @@ def main(argv: Optional[List[str]] = None) -> None:
                 base=args.base,
                 agent_name=args.agent,
                 config_pairs=config_pairs,
+                template_name=args.template,
+                app_config=app_config,
             )
             print(f"{actor.name} created ({actor.dir})")
 
@@ -353,6 +366,13 @@ def main(argv: Optional[List[str]] = None) -> None:
             if prompt is None and not sys.stdin.isatty():
                 prompt = sys.stdin.read().strip()
                 stdin_consumed = True
+            # Template prompt fallback runs before the empty-stdin check so
+            # that `echo "" | actor new foo --template qa` uses the template's
+            # prompt instead of erroring.
+            if not prompt and args.template is not None:
+                tpl = app_config.templates.get(args.template)
+                if tpl is not None and tpl.prompt:
+                    prompt = tpl.prompt
             if stdin_consumed and not prompt:
                 print("error: stdin was empty — expected a prompt", file=sys.stderr)
                 sys.exit(1)
