@@ -496,7 +496,13 @@ class ActorWatchApp(App):
             view.mount(info.widget)
         switcher.current = "interactive-view"
         self._interactive_active = actor.name
-        info.widget.focus()
+        # Defer the focus call so it lands after Textual finishes
+        # processing the event that triggered the sync (e.g. the
+        # Enter key on the tree). Without this, competing focus
+        # changes during the same event loop iteration can leave the
+        # tree focused and keys stop reaching the terminal.
+        target_widget = info.widget
+        self.call_after_refresh(lambda: target_widget.focus())
 
     def action_enter_interactive(self) -> None:
         """Enter key on the tree: start an interactive session for the
@@ -562,9 +568,9 @@ class ActorWatchApp(App):
         if target is None:
             return
         self._interactive.close(target)
-        code = message.exit_code
-        severity = "information" if code == 0 else "warning"
-        self.notify(f"{target} interactive session ended (exit {code})", severity=severity)
+        # Status-change notification ("✓ actor done" / "✗ actor error") is
+        # produced by the next _update_ui poll; no need to double up with a
+        # per-session toast here.
         # _sync_detail_view handles the ContentSwitcher swap AND unmounts
         # the dead terminal widget from #interactive-view — the session
         # is no longer in the registry so the "no session" branch fires.

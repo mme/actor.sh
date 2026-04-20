@@ -114,14 +114,33 @@ class TerminalScreen:
 
     def render_lines(self) -> List[Text]:
         """Render the visible frame as rich.Text (no scrollback)."""
+        return self._render_rows(self._screen.buffer, cursor=True)
+
+    def history_size(self) -> int:
+        """Lines of scrollback above the visible frame."""
+        return len(self._screen.history.top)
+
+    def render_all_lines(self) -> List[Text]:
+        """Full virtual content: scrollback-top rows followed by the
+        visible frame. Used by the Textual-native scroll path so
+        virtual_size can be set correctly and render_line indexes
+        across the combined range."""
+        lines: List[Text] = list(self._render_history(self._screen.history.top))
+        lines.extend(self._render_rows(self._screen.buffer, cursor=True))
+        return lines
+
+    def _render_rows(self, rows, cursor: bool) -> List[Text]:
         lines: List[Text] = []
         screen = self._screen
-        cursor_x, cursor_y = self._screen.cursor.x, self._screen.cursor.y
+        cursor_x, cursor_y = screen.cursor.x, screen.cursor.y
         cursor_hidden = screen.cursor.hidden
-
         for y in range(self._rows):
             line = Text()
-            buffer_line = screen.buffer[y]
+            try:
+                buffer_line = rows[y]
+            except (KeyError, IndexError):
+                lines.append(line)
+                continue
             x = 0
             while x < self._cols:
                 char: Char = buffer_line[x]
@@ -133,8 +152,36 @@ class TerminalScreen:
                     x += 1
                 text = "".join(buffer_line[i].data for i in range(run_start, x))
                 line.append(text, style=run_style)
-            if not cursor_hidden and y == cursor_y and 0 <= cursor_x < self._cols:
+            if cursor and not cursor_hidden and y == cursor_y and 0 <= cursor_x < self._cols:
                 line.stylize("reverse", cursor_x, cursor_x + 1)
+            lines.append(line)
+        return lines
+
+    def _render_history(self, history) -> List[Text]:
+        """Render pyte history rows (list of dicts) as rich.Text. These
+        rows never show a cursor since they're already scrolled off."""
+        lines: List[Text] = []
+        for buffer_line in history:
+            line = Text()
+            x = 0
+            while x < self._cols:
+                char = buffer_line.get(x)
+                if char is None:
+                    line.append(" ")
+                    x += 1
+                    continue
+                run_start = x
+                run_style = _char_style(char)
+                while x < self._cols:
+                    nxt = buffer_line.get(x)
+                    if nxt is None or _char_style(nxt) != run_style:
+                        break
+                    x += 1
+                text = "".join(
+                    (buffer_line.get(i).data if buffer_line.get(i) is not None else " ")
+                    for i in range(run_start, x)
+                )
+                line.append(text, style=run_style)
             lines.append(line)
         return lines
 

@@ -26,10 +26,15 @@ from .screen import TerminalScreen
 class TerminalWidget(Widget, can_focus=True):
     """An embedded terminal view bound to a PtySession."""
 
+    # overflow-y: auto gives us Textual's native scrolling: wheel +
+    # PageUp/PageDown drive self.scroll_y and render_line is called
+    # with virtual-y coords.
     DEFAULT_CSS = """
     TerminalWidget {
         background: $background;
         color: $foreground;
+        overflow-y: auto;
+        scrollbar-size-vertical: 1;
     }
     """
 
@@ -109,7 +114,28 @@ class TerminalWidget(Widget, can_focus=True):
         self._batcher.mark_refreshed(now)
         if self._recorder is not None:
             self._recorder.record(EventKind.REFRESH)
+        # Auto-follow live output if the user is at (or very near) the
+        # bottom of the scrollback; if they've scrolled up to look at
+        # history, respect their position.
+        was_following = self._is_following_bottom()
         self._frame_counter += 1
+        self._update_virtual_size()
+        if was_following:
+            self.scroll_end(animate=False)
+
+    def _update_virtual_size(self) -> None:
+        from textual.geometry import Size
+        rows = self._screen.rows + self._screen.history_size()
+        cols = max(self.size.width, self._screen.cols)
+        if self.virtual_size != Size(cols, rows):
+            self.virtual_size = Size(cols, rows)
+
+    def _is_following_bottom(self) -> bool:
+        # Near-bottom if within a couple rows of the max scroll. Newly
+        # mounted widgets have max_scroll_y == 0, which also counts as
+        # following so first output lands visible.
+        max_y = self.max_scroll_y
+        return max_y == 0 or self.scroll_y >= max_y - 1
 
     def _on_pty_exit(self, exit_code: int) -> None:
         if self._recorder is not None:
@@ -132,6 +158,7 @@ class TerminalWidget(Widget, can_focus=True):
         if not self._first_output_received:
             return self._placeholder_line(y)
         strips = self._get_strips()
+        # y here is a *virtual* row index (covers scrollback + visible).
         if 0 <= y < len(strips):
             return strips[y]
         return Strip.blank(self.size.width)
@@ -157,9 +184,11 @@ class TerminalWidget(Widget, can_focus=True):
         if self._cached_at_frame == self._frame_counter and self._cached_strips is not None:
             return self._cached_strips
         console = self.app.console
+        # render_all_lines covers scrollback + the visible buffer; virtual
+        # row y maps 1:1 into this list.
         self._cached_strips = [
             Strip(list(line.render(console)))
-            for line in self._screen.render_lines()
+            for line in self._screen.render_all_lines()
         ]
         self._cached_at_frame = self._frame_counter
         return self._cached_strips
@@ -196,22 +225,12 @@ class TerminalWidget(Widget, can_focus=True):
             self.post_message(self.ExitRequested(self))
             return
 
-        # PageUp/PageDown scroll local scrollback when the child isn't in
-        # alt-screen (no scrollback ownership) and doesn't want to handle
-        # mouse/cursor events itself. Always consume the event in this
-        # mode: forwarding PageUp to a shell when nothing moved would
-        # silently "do something else" in tools like less or the python
-        # REPL, which is worse than a visible no-op.
+        # PageUp/PageDown scroll the widget natively (Textual handles it
+        # via overflow-y: auto) unless the child is in alt-screen or has
+        # mouse tracking on — in which case it owns the viewport and we
+        # forward the escape sequence. Non-forwarded case: fall through
+        # without consuming the event so Textual's default binding scrolls.
         if event.key in ("pageup", "pagedown") and self._should_scroll_locally():
-            event.stop()
-            event.prevent_default()
-            moved = (
-                self._screen.history_up(self._screen.rows)
-                if event.key == "pageup"
-                else self._screen.history_down(self._screen.rows)
-            )
-            if moved:
-                self._frame_counter += 1
             return
 
         data = key_to_bytes(
@@ -248,18 +267,14 @@ class TerminalWidget(Widget, can_focus=True):
         self._session.write(data)
 
     async def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        # Let Textual's native wheel-scroll handle local scroll; when
+        # the child has mouse tracking enabled, forward instead.
         if self._should_scroll_locally():
-            if self._screen.history_up(3):
-                event.stop()
-                self._frame_counter += 1
             return
         self._emit_mouse(MouseButton.WHEEL_UP, event.x, event.y, event)
 
     async def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         if self._should_scroll_locally():
-            if self._screen.history_down(3):
-                event.stop()
-                self._frame_counter += 1
             return
         self._emit_mouse(MouseButton.WHEEL_DOWN, event.x, event.y, event)
 

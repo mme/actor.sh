@@ -212,7 +212,10 @@ class LocalScrollTests(unittest.IsolatedAsyncioTestCase):
             )
             app._session.close()
 
-    async def test_scroll_wheel_scrolls_history_not_child(self):
+    async def test_scroll_wheel_does_not_forward_bytes_in_local_mode(self):
+        """In local-scroll mode the widget defers to Textual's native
+        scrolling (driven by `overflow-y: auto` CSS). What we must
+        guarantee: no mouse bytes are written to the child."""
         cat = _find_binary("cat")
         app = _HostApp([cat], pathlib.Path("/tmp"))
         async with app.run_test(size=(40, 10)) as pilot:
@@ -223,16 +226,19 @@ class LocalScrollTests(unittest.IsolatedAsyncioTestCase):
             app.widget._session.write = lambda data, _orig=orig, w=written: (
                 w.append(data), _orig(data),
             )[1]
-            # Build + dispatch a real MouseScrollUp through the handler.
+            self.assertTrue(app.widget._should_scroll_locally())
             from unittest.mock import MagicMock
             fake = MagicMock(spec_set=["x", "y", "stop"])
             fake.x, fake.y = 1, 1
             await app.widget.on_mouse_scroll_up(fake)
-            fake.stop.assert_called_once()
             self.assertEqual(
                 written, [],
                 "scroll-wheel-up in local mode must not forward bytes to child",
             )
+            # event.stop() is NOT called — Textual's default scroll handler
+            # needs to see the event. (That's the whole point of deferring
+            # to native scrolling.)
+            fake.stop.assert_not_called()
             app._session.close()
 
 
@@ -245,13 +251,13 @@ class RenderCacheTests(unittest.IsolatedAsyncioTestCase):
         app = _HostApp([cat], pathlib.Path("/tmp"))
         async with app.run_test(size=(40, 10)) as pilot:
             calls = {"n": 0}
-            real = app.widget._screen.render_lines
+            real = app.widget._screen.render_all_lines
 
             def counting_render_lines():
                 calls["n"] += 1
                 return real()
 
-            app.widget._screen.render_lines = counting_render_lines  # type: ignore
+            app.widget._screen.render_all_lines = counting_render_lines  # type: ignore
             # Invalidate any cache Textual populated during pilot setup.
             app.widget._cached_strips = None
             app.widget._cached_at_frame = -1
@@ -273,13 +279,13 @@ class RenderCacheTests(unittest.IsolatedAsyncioTestCase):
         app = _HostApp([cat], pathlib.Path("/tmp"))
         async with app.run_test(size=(40, 10)) as pilot:
             calls = {"n": 0}
-            real = app.widget._screen.render_lines
+            real = app.widget._screen.render_all_lines
 
             def counting_render_lines():
                 calls["n"] += 1
                 return real()
 
-            app.widget._screen.render_lines = counting_render_lines  # type: ignore
+            app.widget._screen.render_all_lines = counting_render_lines  # type: ignore
             app.widget._cached_strips = None
             app.widget._cached_at_frame = -1
             app.widget._first_output_received = True
