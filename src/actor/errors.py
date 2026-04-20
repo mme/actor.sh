@@ -48,3 +48,13 @@ class GitError(ActorError):
 class ConfigError(ActorError):
     def __init__(self, msg: str) -> None:
         super().__init__(f"config error: {msg}")
+
+
+class HookFailedError(ActorError):
+    def __init__(self, event: str, command: str, exit_code: int) -> None:
+        self.event = event
+        self.command = command
+        self.exit_code = exit_code
+        super().__init__(
+            f"{event} hook failed (exit {exit_code}): {command}"
+        )

@@ -18,6 +18,7 @@ from .errors import (
     AgentNotFoundError,
     GitError,
     ConfigError,
+    HookFailedError,
 )
 
 # Types
@@ -35,7 +36,7 @@ from .types import (
 )
 
 # Config
-from .config import AppConfig, Template, load_config
+from .config import AppConfig, Hooks, Template, load_config
 
 # Interfaces
 from .interfaces import (
@@ -96,6 +97,7 @@ __all__ = [
     "AgentNotFoundError",
     "GitError",
     "ConfigError",
+    "HookFailedError",
     # Types
     "AgentKind",
     "Status",
@@ -106,6 +108,7 @@ __all__ = [
     "parse_config",
     # Config
     "AppConfig",
+    "Hooks",
     "Template",
     "load_config",
     # Interfaces
