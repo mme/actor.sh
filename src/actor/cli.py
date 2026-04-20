@@ -80,8 +80,12 @@ Examples:
     p_new.add_argument("--agent", default=None, help="Coding agent to use (defaults to template's agent or 'claude')")
     p_new.add_argument("--template", default=None, help="Apply a template from settings.kdl")
     p_new.add_argument("--model", default=None, help="Model for the agent to use")
-    p_new.add_argument("--strip-api-keys", action="store_true", default=True, dest="strip_api_keys", help="Strip API keys from environment (default)")
-    p_new.add_argument("--no-strip-api-keys", action="store_false", dest="strip_api_keys", help="Pass API keys through to the agent")
+    # Tri-state: default None means "no override" so a template's
+    # strip-api-keys value wins. Explicit --strip-api-keys / --no-strip-api-keys
+    # set True/False and beat the template (agents default to strip=true if
+    # neither CLI nor template sets it).
+    p_new.add_argument("--strip-api-keys", action="store_const", const=True, default=None, dest="strip_api_keys", help="Strip API keys from environment (default)")
+    p_new.add_argument("--no-strip-api-keys", action="store_const", const=False, dest="strip_api_keys", help="Pass API keys through to the agent")
     p_new.add_argument("--config", dest="config", action="append", default=[], metavar="KEY=VALUE", help="Config key=value pair (repeat for multiple)")
 
     # -- run --
@@ -339,8 +343,10 @@ def main(argv: Optional[List[str]] = None) -> None:
             config_pairs = list(args.config)
             if args.model is not None:
                 config_pairs.append(f"model={args.model}")
-            if not args.strip_api_keys:
-                config_pairs.append("strip-api-keys=false")
+            if args.strip_api_keys is not None:
+                config_pairs.append(
+                    f"strip-api-keys={'true' if args.strip_api_keys else 'false'}"
+                )
             actor = cmd_new(
                 db, git,
                 name=args.name,
@@ -359,13 +365,16 @@ def main(argv: Optional[List[str]] = None) -> None:
             if prompt is None and not sys.stdin.isatty():
                 prompt = sys.stdin.read().strip()
                 stdin_consumed = True
-            if stdin_consumed and not prompt:
-                print("error: stdin was empty — expected a prompt", file=sys.stderr)
-                sys.exit(1)
-            if prompt is None and args.template is not None:
+            # Template prompt fallback runs before the empty-stdin check so
+            # that `echo "" | actor new foo --template qa` uses the template's
+            # prompt instead of erroring.
+            if not prompt and args.template is not None:
                 tpl = app_config.templates.get(args.template)
                 if tpl is not None and tpl.prompt:
                     prompt = tpl.prompt
+            if stdin_consumed and not prompt:
+                print("error: stdin was empty — expected a prompt", file=sys.stderr)
+                sys.exit(1)
             if prompt:
                 try:
                     agent = agent_for(args.name)

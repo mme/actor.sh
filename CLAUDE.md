@@ -42,7 +42,10 @@ tests/
   test_*.py              # unittest suites
 spec/
   V2.md                  # V2 vision (MCP server, channels, dashboard, plugin)
+  PLAN.md                # Plan root index
   PLAN-STAGE1.md         # Stage 1 implementation plan (minimal MCP server)
+  PLAN-CONFIG-SYSTEM.md  # Config / templates implementation plan
+  DASHBOARD.md           # Watch dashboard spec
 ```
 
 ## Development setup
@@ -83,7 +86,8 @@ actor update                                      # refreshes deployed skill fil
 ## Running tests
 
 ```bash
-uv run python -m unittest tests.test_actor
+uv run python -m unittest discover tests      # full suite
+uv run python -m unittest tests.test_actor    # single module
 ```
 
 Tests use in-memory SQLite and fake implementations (FakeAgent, FakeGit, FakeProcessManager) — no real processes or git repos needed.
@@ -167,6 +171,6 @@ dumps the DiagnosticRecorder ring buffer to stderr for post-mortems.
 ## Architecture notes
 
 - Commands are pure functions that take a `Database` + interfaces and return strings. Side effects go through the `Agent`, `GitOps`, and `ProcessManager` ABCs — this is what makes everything testable with fakes.
-- No dependencies beyond Python 3.9+ stdlib for the core package.
+- Requires Python 3.10+. Runtime deps: `kdl-py` (config parser), `mcp` (MCP server), `pyte` / `textual` / `textual-serve` (watch dashboard + embedded TTYs).
 - Actors spawned by other actors are tracked via the `parent` column. The `ACTOR_NAME` env var is set before launching an agent, so child actors automatically record their parent. `discard` cascades recursively — stops running children, then deletes.
 - DB migrations run on open (see `db.py` after schema creation). New columns are added via `ALTER TABLE` if missing.

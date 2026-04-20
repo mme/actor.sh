@@ -183,6 +183,7 @@ class NewCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
 
     def test_new_with_prompt_run_failure_surfaces_partial_success(self):
+        from actor import AppConfig
         fake_db = MagicMock()
         fake_actor = MagicMock()
         fake_actor.name = "foo"
@@ -193,6 +194,7 @@ class NewCommandTests(unittest.TestCase):
 
         with patch("actor.cli.cmd_new", cmd_new), \
              patch("actor.cli.cmd_run", cmd_run), \
+             patch("actor.config.load_config", return_value=AppConfig()), \
              patch("actor.cli.Database") as db_cls, \
              patch("actor.cli._create_agent", return_value=MagicMock()):
             db_cls.open.return_value = fake_db

@@ -160,5 +160,100 @@ class TestLoadConfigParseShapes(unittest.TestCase):
             self.assertEqual(len(cfg.templates), 1)
 
 
+class TestLoadConfigParseStrict(unittest.TestCase):
+    """Parser should reject silently-dropped input (ambiguous user intent)."""
+
+    def _expect_error(self, kdl_text: str, needle: str) -> None:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(kdl_text)
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn(needle, str(ctx.exception))
+
+    def test_extra_args_on_template_node_raises(self):
+        self._expect_error(
+            'template "qa" "extra" {\n    agent "claude"\n}\n',
+            "extra",
+        )
+
+    def test_extra_args_on_child_node_raises(self):
+        self._expect_error(
+            'template "qa" {\n    model "opus" "sonnet"\n}\n',
+            "model",
+        )
+
+    def test_props_on_child_node_raises(self):
+        self._expect_error(
+            'template "qa" {\n    model name="opus"\n}\n',
+            "model",
+        )
+
+    def test_duplicate_key_in_template_raises(self):
+        self._expect_error(
+            'template "qa" {\n    model "opus"\n    model "sonnet"\n}\n',
+            "model",
+        )
+
+    def test_duplicate_template_name_in_file_raises(self):
+        self._expect_error(
+            'template "qa" {\n    agent "claude"\n}\n'
+            'template "qa" {\n    agent "codex"\n}\n',
+            "qa",
+        )
+
+    def test_non_string_agent_value_raises(self):
+        self._expect_error(
+            'template "qa" {\n    agent 42\n}\n',
+            "agent",
+        )
+
+    def test_non_string_prompt_value_raises(self):
+        self._expect_error(
+            'template "qa" {\n    prompt 42\n}\n',
+            "prompt",
+        )
+
+
+class TestLoadConfigCwdUnderHome(unittest.TestCase):
+    """Walk-up must stop before re-parsing the user config as a 'project'."""
+
+    def test_cwd_inside_home_does_not_double_load_user_config(self):
+        # cwd sits inside home, and only the user config exists.
+        # Without the fix, walk-up finds the user config as the "project"
+        # path too, and duplicate template names would merge over
+        # themselves — and worse, a strict duplicate-template check would
+        # wrongly fire on the second parse.
+        with tempfile.TemporaryDirectory() as home:
+            home_p = Path(home)
+            (home_p / ".actor").mkdir()
+            (home_p / ".actor" / "settings.kdl").write_text(
+                'template "qa" {\n    agent "claude"\n}\n'
+            )
+            sub = home_p / "work" / "repo"
+            sub.mkdir(parents=True)
+            cfg = load_config(cwd=sub, home=home_p)
+            self.assertIn("qa", cfg.templates)
+            self.assertEqual(cfg.templates["qa"].agent, "claude")
+
+    def test_project_config_found_even_when_cwd_is_inside_home(self):
+        # Project config at <home>/work/repo/.actor/settings.kdl is still
+        # picked up when cwd is there (and wins on override).
+        with tempfile.TemporaryDirectory() as home:
+            home_p = Path(home)
+            (home_p / ".actor").mkdir()
+            (home_p / ".actor" / "settings.kdl").write_text(
+                'template "qa" {\n    agent "claude"\n}\n'
+            )
+            proj = home_p / "work" / "repo"
+            (proj / ".actor").mkdir(parents=True)
+            (proj / ".actor" / "settings.kdl").write_text(
+                'template "qa" {\n    agent "codex"\n}\n'
+            )
+            cfg = load_config(cwd=proj, home=home_p)
+            self.assertEqual(cfg.templates["qa"].agent, "codex")
+
+
 if __name__ == "__main__":
     unittest.main()

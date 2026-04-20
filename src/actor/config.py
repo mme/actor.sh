@@ -33,29 +33,57 @@ class AppConfig:
     templates: Dict[str, Template] = field(default_factory=dict)
 
 
-def _find_project_config(start: Path) -> Optional[Path]:
-    """Walk up from start looking for .actor/settings.kdl."""
+def _find_project_config(
+    start: Path, user_path: Optional[Path] = None
+) -> Optional[Path]:
+    """Walk up from start looking for .actor/settings.kdl.
+
+    If user_path is given and the walk-up lands on that exact file, skip it
+    — otherwise `cwd` inside `$HOME` (with no closer project config) would
+    wrongly treat the user's settings as a 'project' config and parse it
+    twice.
+    """
     try:
         start = start.resolve(strict=False)
     except OSError:
         return None
+    resolved_user = None
+    if user_path is not None:
+        try:
+            resolved_user = user_path.resolve(strict=False)
+        except OSError:
+            resolved_user = None
     for d in [start, *start.parents]:
         p = d / ".actor" / "settings.kdl"
-        if p.is_file():
-            return p
+        if not p.is_file():
+            continue
+        if resolved_user is not None:
+            try:
+                if p.resolve(strict=False) == resolved_user:
+                    continue
+            except OSError:
+                pass
+        return p
     return None
 
 
 def _coerce_value(value: object) -> str:
-    """Coerce a KDL-parsed arg (bool/float/str) into a string for the
-    stringly-typed actor config pipeline."""
+    """Coerce a KDL-parsed arg (str/bool/float) into a string for the
+    stringly-typed actor config pipeline. Unknown types raise ConfigError
+    so a future kdl-py change can't silently stringify something
+    nonsensical (e.g. a null → "None")."""
+    # bool must be checked before int/float (bool is a subclass of int).
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, str):
+        return value
     if isinstance(value, float):
         # kdl-py parses all numbers as float; drop the trailing .0 for
         # integer-valued literals so `effort 5` stays "5" not "5.0".
         return str(int(value)) if value.is_integer() else str(value)
-    return str(value)
+    if isinstance(value, int):
+        return str(value)
+    raise ConfigError(f"unsupported KDL value type: {type(value).__name__}")
 
 
 def _parse_template(node, source: Path) -> Template:
@@ -64,15 +92,43 @@ def _parse_template(node, source: Path) -> Template:
             f"template block in {source} must have a name "
             f"(e.g. `template \"qa\" {{ ... }}`)"
         )
+    if len(node.args) > 1:
+        raise ConfigError(
+            f"template '{node.args[0]}' in {source} has extra positional args"
+        )
+    if getattr(node, "props", None):
+        raise ConfigError(
+            f"template '{node.args[0]}' in {source} does not accept properties"
+        )
     name = node.args[0]
     tpl = Template(name=name)
+    seen_keys: set[str] = set()
     for child in node.nodes:
         key = child.name
+        if key in seen_keys:
+            raise ConfigError(
+                f"template '{name}' in {source}: duplicate key '{key}'"
+            )
+        seen_keys.add(key)
         if not child.args:
             raise ConfigError(
                 f"template '{name}' in {source}: '{key}' needs a value"
             )
-        value_str = _coerce_value(child.args[0])
+        if len(child.args) > 1:
+            raise ConfigError(
+                f"template '{name}' in {source}: '{key}' has extra args "
+                f"(only a single value is supported)"
+            )
+        if getattr(child, "props", None):
+            raise ConfigError(
+                f"template '{name}' in {source}: '{key}' does not accept properties"
+            )
+        raw = child.args[0]
+        if key in ("agent", "prompt") and not isinstance(raw, str):
+            raise ConfigError(
+                f"template '{name}' in {source}: '{key}' must be a string"
+            )
+        value_str = _coerce_value(raw)
         if key == "agent":
             tpl.agent = value_str
         elif key == "prompt":
@@ -89,12 +145,16 @@ def _parse_kdl_file(path: Path) -> AppConfig:
         raise ConfigError(f"could not read {path}: {e}")
     try:
         doc = kdl.parse(text)
-    except Exception as e:
+    except kdl.ParseError as e:
         raise ConfigError(f"parse error in {path}: {e}")
     cfg = AppConfig()
     for node in doc.nodes:
         if node.name == "template":
             tpl = _parse_template(node, path)
+            if tpl.name in cfg.templates:
+                raise ConfigError(
+                    f"duplicate template '{tpl.name}' in {path}"
+                )
             cfg.templates[tpl.name] = tpl
         # Silently ignore hooks / agent / alias — those belong to follow-up
         # tickets #30 / #31 / #33 and are not implemented here.
@@ -127,12 +187,13 @@ def load_config(
 
     merged = AppConfig()
 
+    user_path: Optional[Path] = None
     if home is not None:
         user_path = home / ".actor" / "settings.kdl"
         if user_path.is_file():
             merged = _merge(merged, _parse_kdl_file(user_path))
 
-    project_path = _find_project_config(cwd)
+    project_path = _find_project_config(cwd, user_path=user_path)
     if project_path is not None:
         merged = _merge(merged, _parse_kdl_file(project_path))
 
