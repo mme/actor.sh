@@ -196,9 +196,11 @@ Examples:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
-  actor discard my-feature                          Remove actor from DB""",
+  actor discard my-feature                          Remove actor from DB
+  actor discard my-feature --force                  Ignore a failing on-discard hook""",
     )
     p_discard.add_argument("name", help="Actor name")
+    p_discard.add_argument("-f", "--force", action="store_true", help="Bypass on-discard hook failures")
 
     # -- setup --
     p_setup = sub.add_parser(
@@ -337,10 +339,14 @@ def main(argv: Optional[List[str]] = None) -> None:
         return _create_agent(actor.agent)
 
     try:
-        if args.command == "new":
-            from .config import load_config
-            app_config = load_config()
+        # Load config once up front — cmd_new needs it for templates, and
+        # every hook-aware command (new / run / discard) needs app_config.hooks.
+        # The import is kept function-local so tests can patch
+        # `actor.config.load_config` without a module-level binding race.
+        from .config import load_config
+        app_config = load_config()
 
+        if args.command == "new":
             config_pairs = list(args.config)
             if args.model is not None:
                 config_pairs.append(f"model={args.model}")
@@ -358,6 +364,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 config_pairs=config_pairs,
                 template_name=args.template,
                 app_config=app_config,
+                hooks=app_config.hooks,
             )
             print(f"{actor.name} created ({actor.dir})")
 
@@ -384,6 +391,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                         name=args.name,
                         prompt=prompt,
                         config_pairs=[],  # creation flags already saved as defaults
+                        hooks=app_config.hooks,
                     )
                 except Exception as e:
                     print(f"error: actor created but run failed: {e}", file=sys.stderr)
@@ -417,6 +425,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 name=args.name,
                 prompt=prompt,
                 config_pairs=list(args.config),
+                hooks=app_config.hooks,
             )
 
         elif args.command == "list":
@@ -449,7 +458,12 @@ def main(argv: Optional[List[str]] = None) -> None:
                 print(output, end="")
 
         elif args.command == "discard":
-            msg = cmd_discard(db, proc_mgr, name=args.name)
+            msg = cmd_discard(
+                db, proc_mgr,
+                name=args.name,
+                hooks=app_config.hooks,
+                force=args.force,
+            )
             print(msg)
 
     except ActorError as e:

@@ -338,6 +338,125 @@ class RunCommandTests(unittest.TestCase):
                 self.assertEqual(ctx.exception.code, 1)
 
 
+class TestDiscardForceFlag(unittest.TestCase):
+    """`actor discard --force` / `-f` must set `force=True` on cmd_discard."""
+
+    def _run(self, argv):
+        from actor import AppConfig
+        fake_db = MagicMock()
+        cmd_discard = MagicMock(return_value="foo discarded")
+        with patch("actor.cli.cmd_discard", cmd_discard), \
+             patch("actor.config.load_config", return_value=AppConfig()), \
+             patch("actor.cli.Database") as db_cls:
+            db_cls.open.return_value = fake_db
+            try:
+                main(argv)
+                code = 0
+            except SystemExit as e:
+                code = e.code if isinstance(e.code, int) else 1
+        return cmd_discard, code
+
+    def test_discard_without_force(self):
+        cmd_discard, _ = self._run(["discard", "foo"])
+        cmd_discard.assert_called_once()
+        self.assertFalse(cmd_discard.call_args.kwargs["force"])
+
+    def test_discard_with_long_force(self):
+        cmd_discard, _ = self._run(["discard", "--force", "foo"])
+        cmd_discard.assert_called_once()
+        self.assertTrue(cmd_discard.call_args.kwargs["force"])
+
+    def test_discard_with_short_force(self):
+        cmd_discard, _ = self._run(["discard", "-f", "foo"])
+        cmd_discard.assert_called_once()
+        self.assertTrue(cmd_discard.call_args.kwargs["force"])
+
+
+class TestHookWiring(unittest.TestCase):
+    """CLI must load config and forward hooks to cmd_new / cmd_run /
+    cmd_discard so lifecycle hooks actually fire."""
+
+    def _run_new(self, argv, app_config):
+        fake_db = MagicMock()
+        fake_actor = MagicMock()
+        fake_actor.name = "foo"
+        fake_actor.dir = "/tmp/foo"
+        cmd_new = MagicMock(return_value=fake_actor)
+        cmd_run = MagicMock(return_value="done")
+
+        stdin = io.StringIO("")
+        stdin.isatty = lambda: True  # type: ignore[assignment]
+
+        with patch("actor.cli.cmd_new", cmd_new), \
+             patch("actor.cli.cmd_run", cmd_run), \
+             patch("actor.config.load_config", return_value=app_config), \
+             patch("actor.cli.Database") as db_cls, \
+             patch("actor.cli._create_agent", return_value=MagicMock()), \
+             patch("sys.stdin", stdin):
+            db_cls.open.return_value = fake_db
+            try:
+                main(argv)
+            except SystemExit:
+                pass
+        return cmd_new, cmd_run
+
+    def _run_run(self, argv, app_config):
+        fake_db = MagicMock()
+        cmd_run = MagicMock(return_value="done")
+        with patch("actor.cli.cmd_run", cmd_run), \
+             patch("actor.config.load_config", return_value=app_config), \
+             patch("actor.cli.Database") as db_cls, \
+             patch("actor.cli._create_agent", return_value=MagicMock()):
+            db_cls.open.return_value = fake_db
+            try:
+                main(argv)
+            except SystemExit:
+                pass
+        return cmd_run
+
+    def _run_discard(self, argv, app_config):
+        fake_db = MagicMock()
+        cmd_discard = MagicMock(return_value="foo discarded")
+        with patch("actor.cli.cmd_discard", cmd_discard), \
+             patch("actor.config.load_config", return_value=app_config), \
+             patch("actor.cli.Database") as db_cls:
+            db_cls.open.return_value = fake_db
+            try:
+                main(argv)
+            except SystemExit:
+                pass
+        return cmd_discard
+
+    def test_new_receives_hooks(self):
+        from actor import AppConfig, Hooks
+        cfg = AppConfig(hooks=Hooks(on_start="echo start"))
+        cmd_new, _ = self._run_new(["new", "foo"], cfg)
+        cmd_new.assert_called_once()
+        self.assertIs(cmd_new.call_args.kwargs["hooks"], cfg.hooks)
+
+    def test_new_auto_run_receives_hooks(self):
+        """When `actor new foo "prompt"` auto-runs, cmd_run also gets hooks."""
+        from actor import AppConfig, Hooks
+        cfg = AppConfig(hooks=Hooks(on_start="s", on_run="r"))
+        _, cmd_run = self._run_new(["new", "foo", "do x"], cfg)
+        cmd_run.assert_called_once()
+        self.assertIs(cmd_run.call_args.kwargs["hooks"], cfg.hooks)
+
+    def test_run_receives_hooks(self):
+        from actor import AppConfig, Hooks
+        cfg = AppConfig(hooks=Hooks(on_run="echo run"))
+        cmd_run = self._run_run(["run", "foo", "do x"], cfg)
+        cmd_run.assert_called_once()
+        self.assertIs(cmd_run.call_args.kwargs["hooks"], cfg.hooks)
+
+    def test_discard_receives_hooks(self):
+        from actor import AppConfig, Hooks
+        cfg = AppConfig(hooks=Hooks(on_discard="echo bye"))
+        cmd_discard = self._run_discard(["discard", "foo"], cfg)
+        cmd_discard.assert_called_once()
+        self.assertIs(cmd_discard.call_args.kwargs["hooks"], cfg.hooks)
+
+
 class ClaudeWrapperTests(unittest.TestCase):
     def test_execs_claude_with_channel_flag(self):
         with patch("os.execvp") as execvp:
