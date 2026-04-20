@@ -223,6 +223,13 @@ class ActorWatchApp(App):
         self.call_from_thread(self._update_ui, actors, statuses)
 
     def _update_ui(self, actors: list[Actor], statuses: dict[str, Status]) -> None:
+        # Overlay INTERACTIVE status for actors with a live terminal
+        # session. This is display-only — the DB Run row is still
+        # RUNNING/STOPPED/etc.
+        for name in self._interactive.live_names():
+            if name in statuses:
+                statuses[name] = Status.INTERACTIVE
+
         for a in actors:
             new_status = statuses.get(a.name)
             old_status = self._prev_statuses.get(a.name)

@@ -15,6 +15,7 @@ STATUS_ICON = {
     Status.ERROR: "󰗖",
     Status.IDLE: "",
     Status.STOPPED: "",
+    Status.INTERACTIVE: "⌨",  # U+2328 KEYBOARD — plain, non-emoji variant
 }
 
 

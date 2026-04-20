@@ -155,6 +155,31 @@ class TerminalScreenTests(unittest.TestCase):
         # No scrollback yet — nothing to page up to.
         self.assertFalse(s.history_up(10))
 
+    def test_cursor_overlay_suppressed_when_child_reverses_the_cell(self):
+        """If the child paints its own cursor via reverse SGR, our
+        overlay must not re-reverse — stacking cancels and the cursor
+        becomes invisible."""
+        s = TerminalScreen(rows=2, cols=10)
+        # Write "XY" where X is at (0,0) with reverse=ON, then move
+        # the cursor back onto that cell.
+        s.feed(b"\x1b[7mX\x1b[0m")     # reverse X, attributes reset
+        s.feed(b"\x1b[1;1H")            # move cursor to (1,1) which is (0,0) 0-indexed
+        # Cursor is now over the reversed X. Our overlay should NOT
+        # fire, so the rendered cell retains the child's reverse.
+        lines = s.render_lines()
+        # The first span (x=0) should be reverse-styled from the child.
+        spans = list(lines[0].spans)
+        # Find the span at x=0 — if we double-reversed, reverse==False.
+        cell_reverse = None
+        for sp in spans:
+            if sp.start <= 0 < sp.end:
+                cell_reverse = "reverse" in str(sp.style)
+                break
+        self.assertTrue(
+            cell_reverse,
+            f"child's reverse must win; got spans {spans!r}",
+        )
+
     def test_cursor_overlay_inverts_single_cell(self):
         s = TerminalScreen(rows=2, cols=5)
         s.feed(b"abc")  # cursor now at (3, 0)

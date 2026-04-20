@@ -134,6 +134,16 @@ class TerminalScreen:
         screen = self._screen
         cursor_x, cursor_y = screen.cursor.x, screen.cursor.y
         cursor_hidden = screen.cursor.hidden
+        # Cmdlane-style: respect DECTCEM (\x1b[?25l). Additionally,
+        # don't overlay our own reverse on a cell that already has
+        # reverse set — the child is painting its own cursor and
+        # stacking reverses would cancel it out (invisible cursor).
+        cursor_cell_reverse = False
+        if not cursor_hidden and 0 <= cursor_y < self._rows and 0 <= cursor_x < self._cols:
+            try:
+                cursor_cell_reverse = bool(rows[cursor_y][cursor_x].reverse)
+            except (KeyError, IndexError, AttributeError):
+                cursor_cell_reverse = False
         for y in range(self._rows):
             line = Text()
             try:
@@ -152,7 +162,13 @@ class TerminalScreen:
                     x += 1
                 text = "".join(buffer_line[i].data for i in range(run_start, x))
                 line.append(text, style=run_style)
-            if cursor and not cursor_hidden and y == cursor_y and 0 <= cursor_x < self._cols:
+            if (
+                cursor
+                and not cursor_hidden
+                and not cursor_cell_reverse
+                and y == cursor_y
+                and 0 <= cursor_x < self._cols
+            ):
                 line.stylize("reverse", cursor_x, cursor_x + 1)
             lines.append(line)
         return lines
@@ -228,14 +244,13 @@ def _resolve_color(color: str) -> str | None:
 def _char_style(char: Char) -> Style:
     fg = _resolve_color(char.fg)
     bg = _resolve_color(char.bg)
-    if char.reverse:
-        fg, bg = bg, fg
     try:
         return Style(
             color=fg, bgcolor=bg,
             bold=char.bold, italic=char.italics,
             underline=char.underscore,
             strike=char.strikethrough, blink=char.blink,
+            reverse=char.reverse,
         )
     except (ValueError, TypeError):
         # Unknown color encoding from rich: drop color rather than crash.
@@ -245,4 +260,5 @@ def _char_style(char: Char) -> Style:
             bold=char.bold, italic=char.italics,
             underline=char.underscore,
             strike=char.strikethrough, blink=char.blink,
+            reverse=char.reverse,
         )
