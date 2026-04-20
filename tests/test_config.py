@@ -343,6 +343,207 @@ class TestConfigureDefaultParsing(unittest.TestCase):
             self.assertEqual(cfg.configure_default, "off")
 
 
+class TestAgentConfigureParsing(unittest.TestCase):
+
+    def _load(self, body: str) -> AppConfig:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(body)
+            return load_config(cwd=Path(cwd), home=Path(home))
+
+    def test_agent_level_configure_with_options_question(self):
+        body = (
+            'agent "claude" {\n'
+            "    configure {\n"
+            '        question "effort" {\n'
+            '            prompt "How hard?"\n'
+            '            options "max" "medium" "low"\n'
+            "        }\n"
+            "    }\n"
+            "}\n"
+        )
+        cfg = self._load(body)
+        self.assertIn("claude", cfg.agents)
+        block = cfg.agents["claude"].configure_blocks[None]
+        self.assertEqual(len(block.questions), 1)
+        q = block.questions[0]
+        self.assertEqual(q.key, "effort")
+        self.assertEqual(q.prompt, "How hard?")
+        self.assertEqual([o.label for o in q.options], ["max", "medium", "low"])
+        self.assertEqual(q.kind, "options")
+
+    def test_model_scoped_configure(self):
+        body = (
+            'agent "claude" {\n'
+            '    configure "opus" {\n'
+            '        question "effort" {\n'
+            '            prompt "How hard?"\n'
+            '            options "max" "low"\n'
+            "        }\n"
+            "    }\n"
+            "}\n"
+        )
+        cfg = self._load(body)
+        self.assertIn("opus", cfg.agents["claude"].configure_blocks)
+        self.assertNotIn(None, cfg.agents["claude"].configure_blocks)
+
+    def test_text_kind_question(self):
+        body = (
+            'agent "claude" {\n'
+            "    configure {\n"
+            '        question "focus" {\n'
+            '            prompt "Focus dir?"\n'
+            '            kind "text"\n'
+            "            optional true\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+        )
+        cfg = self._load(body)
+        q = cfg.agents["claude"].configure_blocks[None].questions[0]
+        self.assertEqual(q.kind, "text")
+        self.assertTrue(q.optional)
+        self.assertEqual(q.options, [])
+
+    def test_question_header_override(self):
+        body = (
+            'agent "claude" {\n'
+            "    configure {\n"
+            '        question "effort" {\n'
+            '            prompt "How hard?"\n'
+            '            header "Effort"\n'
+            '            options "max" "low"\n'
+            "        }\n"
+            "    }\n"
+            "}\n"
+        )
+        cfg = self._load(body)
+        q = cfg.agents["claude"].configure_blocks[None].questions[0]
+        self.assertEqual(q.header, "Effort")
+
+    def test_unknown_agent_child_silently_ignored(self):
+        # 'default-config' belongs to #31; ignore it here for forward-compat.
+        body = (
+            'agent "claude" {\n'
+            "    default-config {\n"
+            '        model "opus"\n'
+            "    }\n"
+            "    configure {\n"
+            '        question "effort" {\n'
+            '            prompt "How hard?"\n'
+            '            options "max" "low"\n'
+            "        }\n"
+            "    }\n"
+            "}\n"
+        )
+        cfg = self._load(body)
+        self.assertIn("claude", cfg.agents)
+        self.assertEqual(
+            len(cfg.agents["claude"].configure_blocks[None].questions), 1
+        )
+
+    def test_question_without_prompt_raises(self):
+        body = (
+            'agent "claude" {\n'
+            "    configure {\n"
+            '        question "effort" {\n'
+            '            options "max" "low"\n'
+            "        }\n"
+            "    }\n"
+            "}\n"
+        )
+        with self.assertRaises(ConfigError) as ctx:
+            self._load(body)
+        self.assertIn("prompt", str(ctx.exception))
+
+    def test_options_question_with_zero_options_raises(self):
+        body = (
+            'agent "claude" {\n'
+            "    configure {\n"
+            '        question "effort" {\n'
+            '            prompt "How hard?"\n'
+            "        }\n"
+            "    }\n"
+            "}\n"
+        )
+        with self.assertRaises(ConfigError):
+            self._load(body)
+
+    def test_text_question_with_options_raises(self):
+        body = (
+            'agent "claude" {\n'
+            "    configure {\n"
+            '        question "focus" {\n'
+            '            prompt "Focus dir?"\n'
+            '            kind "text"\n'
+            '            options "a" "b"\n'
+            "        }\n"
+            "    }\n"
+            "}\n"
+        )
+        with self.assertRaises(ConfigError) as ctx:
+            self._load(body)
+        self.assertIn("text", str(ctx.exception))
+
+    def test_duplicate_question_key_in_block_raises(self):
+        body = (
+            'agent "claude" {\n'
+            "    configure {\n"
+            '        question "effort" { prompt "a"; options "x" "y" }\n'
+            '        question "effort" { prompt "b"; options "x" "y" }\n'
+            "    }\n"
+            "}\n"
+        )
+        with self.assertRaises(ConfigError):
+            self._load(body)
+
+    def test_project_configure_replaces_user_configure_for_same_agent_and_model(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            (Path(home) / ".actor").mkdir()
+            (Path(home) / ".actor" / "settings.kdl").write_text(
+                'agent "claude" {\n'
+                "    configure {\n"
+                '        question "effort" {\n'
+                '            prompt "user prompt"\n'
+                '            options "low" "high"\n'
+                "        }\n"
+                "    }\n"
+                "}\n"
+            )
+            (Path(cwd) / ".actor").mkdir()
+            (Path(cwd) / ".actor" / "settings.kdl").write_text(
+                'agent "claude" {\n'
+                "    configure {\n"
+                '        question "effort" {\n'
+                '            prompt "project prompt"\n'
+                '            options "med" "top"\n'
+                "        }\n"
+                "    }\n"
+                "}\n"
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            q = cfg.agents["claude"].configure_blocks[None].questions[0]
+            self.assertEqual(q.prompt, "project prompt")
+            self.assertEqual([o.label for o in q.options], ["med", "top"])
+
+    def test_duplicate_agent_block_in_single_file_raises(self):
+        body = (
+            'agent "claude" {\n'
+            "    configure {\n"
+            '        question "a" { prompt "?"; options "x" "y" }\n'
+            "    }\n"
+            "}\n"
+            'agent "claude" {\n'
+            "    configure {\n"
+            '        question "b" { prompt "?"; options "x" "y" }\n'
+            "    }\n"
+            "}\n"
+        )
+        with self.assertRaises(ConfigError):
+            self._load(body)
+
+
 class TestAppConfigDefaults(unittest.TestCase):
 
     def test_empty_app_config_has_no_agents_and_on_default(self):

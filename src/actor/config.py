@@ -176,6 +176,184 @@ def _parse_template(node, source: Path) -> Template:
     return tpl
 
 
+def _parse_question(node, block_desc: str, source: Path) -> Question:
+    if not node.args or not isinstance(node.args[0], str) or not node.args[0]:
+        raise ConfigError(
+            f"question in {block_desc} of {source} must have a string key "
+            f'(e.g. `question "model" {{ ... }}`)'
+        )
+    if len(node.args) > 1:
+        raise ConfigError(
+            f"question '{node.args[0]}' in {block_desc} of {source} has extra args"
+        )
+    if getattr(node, "props", None):
+        raise ConfigError(
+            f"question '{node.args[0]}' in {block_desc} of {source} "
+            f"does not accept properties"
+        )
+    key = node.args[0]
+    prompt: Optional[str] = None
+    header: Optional[str] = None
+    kind = "options"
+    optional = False
+    multi_select = False
+    options: List[QuestionOption] = []
+    seen_keys: set[str] = set()
+    for child in node.nodes:
+        cname = child.name
+        if cname in seen_keys:
+            raise ConfigError(
+                f"question '{key}' in {block_desc} of {source}: "
+                f"duplicate child '{cname}'"
+            )
+        seen_keys.add(cname)
+        if cname == "prompt":
+            if not child.args or not isinstance(child.args[0], str):
+                raise ConfigError(
+                    f"question '{key}' in {block_desc} of {source}: "
+                    f"prompt must be a string"
+                )
+            prompt = child.args[0]
+        elif cname == "header":
+            if not child.args or not isinstance(child.args[0], str):
+                raise ConfigError(
+                    f"question '{key}' in {block_desc} of {source}: "
+                    f"header must be a string"
+                )
+            header = child.args[0]
+        elif cname == "kind":
+            if not child.args or child.args[0] not in ("options", "text"):
+                raise ConfigError(
+                    f"question '{key}' in {block_desc} of {source}: "
+                    f'kind must be "options" or "text"'
+                )
+            kind = child.args[0]
+        elif cname == "optional":
+            if not child.args or not isinstance(child.args[0], bool):
+                raise ConfigError(
+                    f"question '{key}' in {block_desc} of {source}: "
+                    f"optional must be a boolean"
+                )
+            optional = child.args[0]
+        elif cname == "multi-select":
+            if not child.args or not isinstance(child.args[0], bool):
+                raise ConfigError(
+                    f"question '{key}' in {block_desc} of {source}: "
+                    f"multi-select must be a boolean"
+                )
+            multi_select = child.args[0]
+        elif cname == "options":
+            if not child.args:
+                raise ConfigError(
+                    f"question '{key}' in {block_desc} of {source}: "
+                    f"options needs at least one value"
+                )
+            for arg in child.args:
+                if not isinstance(arg, str):
+                    raise ConfigError(
+                        f"question '{key}' in {block_desc} of {source}: "
+                        f"option values must be strings"
+                    )
+                options.append(QuestionOption(label=arg))
+        else:
+            raise ConfigError(
+                f"question '{key}' in {block_desc} of {source}: "
+                f"unknown child '{cname}'"
+            )
+
+    if prompt is None:
+        raise ConfigError(
+            f"question '{key}' in {block_desc} of {source}: prompt is required"
+        )
+    if kind == "text" and options:
+        raise ConfigError(
+            f"question '{key}' in {block_desc} of {source}: "
+            f"text-kind questions cannot declare options"
+        )
+    if kind == "options" and not options:
+        raise ConfigError(
+            f"question '{key}' in {block_desc} of {source}: "
+            f"options-kind questions need an options list"
+        )
+
+    if header is None:
+        # Default: key, hyphens → spaces, title-cased, trimmed to 12 chars for
+        # AskUserQuestion compatibility.
+        header = key.replace("-", " ").title()[:12]
+
+    return Question(
+        key=key,
+        prompt=prompt,
+        header=header,
+        options=options,
+        kind=kind,
+        optional=optional,
+        multi_select=multi_select,
+    )
+
+
+def _parse_configure_block(node, agent_name: str, source: Path) -> ConfigureBlock:
+    model: Optional[str] = None
+    if node.args:
+        if len(node.args) > 1:
+            raise ConfigError(
+                f"configure block in agent '{agent_name}' in {source} "
+                f"takes at most one model arg"
+            )
+        if not isinstance(node.args[0], str) or not node.args[0]:
+            raise ConfigError(
+                f"configure block in agent '{agent_name}' in {source}: "
+                f"model must be a non-empty string"
+            )
+        model = node.args[0]
+    block_desc = (
+        f'agent "{agent_name}" configure "{model}"'
+        if model is not None
+        else f'agent "{agent_name}" configure'
+    )
+    questions: List[Question] = []
+    seen_keys: set[str] = set()
+    for child in node.nodes:
+        if child.name != "question":
+            raise ConfigError(
+                f"{block_desc} in {source}: unknown child '{child.name}'"
+            )
+        q = _parse_question(child, block_desc, source)
+        if q.key in seen_keys:
+            raise ConfigError(
+                f"{block_desc} in {source}: duplicate question '{q.key}'"
+            )
+        seen_keys.add(q.key)
+        questions.append(q)
+    return ConfigureBlock(model=model, questions=questions)
+
+
+def _parse_agent(node, source: Path) -> AgentSettings:
+    if not node.args or not isinstance(node.args[0], str) or not node.args[0]:
+        raise ConfigError(
+            f"agent block in {source} needs a non-empty name "
+            f'(e.g. `agent "claude" {{ ... }}`)'
+        )
+    if len(node.args) > 1:
+        raise ConfigError(
+            f"agent '{node.args[0]}' in {source} has extra positional args"
+        )
+    name = node.args[0]
+    s = AgentSettings(name=name)
+    for child in node.nodes:
+        if child.name == "configure":
+            block = _parse_configure_block(child, name, source)
+            if block.model in s.configure_blocks:
+                label = f'"{block.model}"' if block.model else "(default)"
+                raise ConfigError(
+                    f"agent '{name}' in {source}: duplicate configure block {label}"
+                )
+            s.configure_blocks[block.model] = block
+        # Other children (default-config, hooks, alias) — silently ignored
+        # for forward-compat with tickets #30 / #31 / #33.
+    return s
+
+
 def _parse_kdl_file(path: Path) -> AppConfig:
     try:
         text = path.read_text()
@@ -215,8 +393,15 @@ def _parse_kdl_file(path: Path) -> AppConfig:
                     f"got {value!r}"
                 )
             cfg.configure_default = value
-        # Silently ignore hooks / agent / alias — those belong to follow-up
-        # tickets #30 / #31 / #33 and are not implemented here.
+        elif node.name == "agent":
+            agent = _parse_agent(node, path)
+            if agent.name in cfg.agents:
+                raise ConfigError(
+                    f"duplicate agent block for '{agent.name}' in {path}"
+                )
+            cfg.agents[agent.name] = agent
+        # Silently ignore hooks / alias — those belong to follow-up tickets
+        # #30 / #33 and are not implemented here.
     return cfg
 
 
