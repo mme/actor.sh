@@ -476,6 +476,105 @@ class McpToolTests(unittest.TestCase):
         self.assertEqual(kwargs["config_pairs"], ["model=opus"])
 
 
+class ConfigureFlagTests(unittest.TestCase):
+    """`actor new --configure` triggers the stdin interactive fallback."""
+
+    def _run(self, argv, prompt_fn=None, app_config=None):
+        from contextlib import ExitStack
+        from actor import AppConfig
+        if app_config is None:
+            app_config = AppConfig()
+        fake_db = MagicMock()
+        fake_actor = MagicMock()
+        fake_actor.name = argv[1] if len(argv) > 1 else "a"
+        fake_actor.dir = "/tmp/actor"
+        cmd_new = MagicMock(return_value=fake_actor)
+        cmd_run = MagicMock(return_value="done")
+
+        stdin = io.StringIO("")
+        stdin.isatty = lambda: True  # type: ignore[assignment]
+
+        err = io.StringIO()
+        with ExitStack() as stack:
+            stack.enter_context(patch("actor.cli.cmd_new", cmd_new))
+            stack.enter_context(patch("actor.cli.cmd_run", cmd_run))
+            stack.enter_context(
+                patch("actor.config.load_config", return_value=app_config)
+            )
+            db_cls = stack.enter_context(patch("actor.cli.Database"))
+            db_cls.open.return_value = fake_db
+            stack.enter_context(
+                patch("actor.cli._create_agent", return_value=MagicMock())
+            )
+            stack.enter_context(patch("sys.stdin", stdin))
+            stack.enter_context(patch("sys.stderr", err))
+            if prompt_fn is not None:
+                stack.enter_context(
+                    patch("actor.cli.prompt_interactively", prompt_fn)
+                )
+            try:
+                main(argv)
+                code = 0
+            except SystemExit as e:
+                code = e.code if isinstance(e.code, int) else 1
+        return cmd_new, cmd_run, code, err.getvalue()
+
+    def test_configure_flag_calls_prompt_interactively_and_maps_to_config(self):
+        prompt_fn = MagicMock(return_value={"model": "opus", "effort": "max"})
+        cmd_new, cmd_run, code, _ = self._run(["new", "foo", "--configure"], prompt_fn=prompt_fn)
+        prompt_fn.assert_called_once()
+        pairs = cmd_new.call_args.kwargs["config_pairs"]
+        self.assertIn("model=opus", pairs)
+        self.assertIn("effort=max", pairs)
+
+    def test_configure_flag_uses_prompt_answer_as_prompt_param(self):
+        prompt_fn = MagicMock(return_value={"prompt": "fix nav"})
+        cmd_new, cmd_run, code, _ = self._run(["new", "foo", "--configure"], prompt_fn=prompt_fn)
+        cmd_run.assert_called_once()
+        self.assertEqual(cmd_run.call_args.kwargs["prompt"], "fix nav")
+
+    def test_configure_flag_errors_when_disabled(self):
+        from actor import AppConfig
+        app_config = AppConfig(configure_default="off")
+        _, _, code, err = self._run(["new", "foo", "--configure"], app_config=app_config)
+        self.assertEqual(code, 1)
+        self.assertIn("disabled", err)
+
+    def test_no_configure_does_not_prompt(self):
+        prompt_fn = MagicMock()
+        self._run(["new", "foo", "--no-configure"], prompt_fn=prompt_fn)
+        prompt_fn.assert_not_called()
+
+    def test_bare_new_does_not_prompt(self):
+        # Without --configure, the flow should not run (the plan treats
+        # configure as opt-in on the CLI).
+        prompt_fn = MagicMock()
+        self._run(["new", "foo"], prompt_fn=prompt_fn)
+        prompt_fn.assert_not_called()
+
+    def test_configure_flag_resolves_with_agent_from_flag(self):
+        captured = {}
+
+        def fake_prompt(questions, **_):
+            captured["keys"] = [q.key for q in questions]
+            return {}
+
+        prompt_fn = MagicMock(side_effect=fake_prompt)
+        self._run(["new", "foo", "--configure", "--agent", "codex"], prompt_fn=prompt_fn)
+        self.assertIn("sandbox", captured["keys"])
+        self.assertNotIn("model", captured["keys"])
+
+    def test_configure_flag_explicit_prompt_beats_answer(self):
+        """If the user already passed a prompt on the CLI, the 'prompt'
+        answer from the configure flow should not override it."""
+        prompt_fn = MagicMock(return_value={"prompt": "from flow"})
+        cmd_new, cmd_run, _, _ = self._run(
+            ["new", "foo", "cli prompt", "--configure"], prompt_fn=prompt_fn
+        )
+        cmd_run.assert_called_once()
+        self.assertEqual(cmd_run.call_args.kwargs["prompt"], "cli prompt")
+
+
 class GetConfigureQuestionsTests(unittest.TestCase):
     """MCP `get_configure_questions(agent, model)` tool."""
 

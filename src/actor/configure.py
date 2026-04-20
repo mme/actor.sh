@@ -18,7 +18,7 @@ enables, "off" disables. When "off", `resolve_questions` raises
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from .config import AppConfig, Question, QuestionOption
 from .errors import ActorError
@@ -178,3 +178,60 @@ def questions_to_payload(questions: List[Question]) -> Dict:
             }
         )
     return {"questions": out_questions}
+
+
+def prompt_interactively(
+    questions: List[Question],
+    input_fn: Callable[..., str] = input,
+    output_fn: Callable[[str], None] = print,
+) -> Dict[str, str]:
+    """Walk the user through questions on stdin. Returns {key: value}.
+
+    Options-kind: user types the option number (1-based) or a label; invalid
+    input reprompts. Text-kind: raw input; empty string skips if `optional`,
+    else reprompts.
+
+    The input/output callables are injectable so tests can drive the flow
+    without touching a real terminal. Tests typically pass a zero-arg
+    `iter([...]).__next__`; we wrap the call so both zero-arg and
+    one-arg (real `input`) signatures work.
+    """
+    answers: Dict[str, str] = {}
+
+    def _ask(prompt_text: str) -> str:
+        try:
+            return input_fn(prompt_text)
+        except TypeError:
+            return input_fn()
+
+    for q in questions:
+        output_fn(f"\n{q.prompt}")
+        if q.kind == "text":
+            suffix = " (optional, enter to skip)" if q.optional else ""
+            while True:
+                raw = _ask(f"{q.header}{suffix}: ").strip()
+                if raw:
+                    answers[q.key] = raw
+                    break
+                if q.optional:
+                    break
+                output_fn("  (answer required)")
+        else:
+            for i, opt in enumerate(q.options, 1):
+                tail = f" — {opt.description}" if opt.description else ""
+                output_fn(f"  {i}. {opt.label}{tail}")
+            while True:
+                raw = _ask(f"{q.header}: ").strip()
+                if raw.isdigit():
+                    idx = int(raw)
+                    if 1 <= idx <= len(q.options):
+                        answers[q.key] = q.options[idx - 1].label
+                        break
+                    output_fn(f"  (enter 1-{len(q.options)} or a label)")
+                    continue
+                labels = [o.label for o in q.options]
+                if raw in labels:
+                    answers[q.key] = raw
+                    break
+                output_fn(f"  (unknown — enter 1-{len(q.options)} or a label)")
+    return answers

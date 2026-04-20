@@ -6,6 +6,11 @@ import sys
 from typing import List, Optional
 
 from . import __version__
+from .configure import (
+    ConfigureDisabledError,
+    prompt_interactively,
+    resolve_questions,
+)
 from .errors import ActorError
 from .interfaces import Agent
 from .types import AgentKind, Status
@@ -88,6 +93,9 @@ Examples:
     p_new.add_argument("--strip-api-keys", action="store_const", const=True, default=None, dest="strip_api_keys", help="Strip API keys from environment (default)")
     p_new.add_argument("--no-strip-api-keys", action="store_const", const=False, dest="strip_api_keys", help="Pass API keys through to the agent")
     p_new.add_argument("--config", dest="config", action="append", default=[], metavar="KEY=VALUE", help="Config key=value pair (repeat for multiple)")
+    # Tri-state: None = no override (don't run the configure flow).
+    p_new.add_argument("--configure", action="store_const", const=True, default=None, dest="configure", help="Ask a configurable set of questions before creating (stdin fallback)")
+    p_new.add_argument("--no-configure", action="store_const", const=False, dest="configure", help="Skip the configure flow")
 
     # -- run --
     p_run = sub.add_parser(
@@ -341,6 +349,36 @@ def main(argv: Optional[List[str]] = None) -> None:
             from .config import load_config
             app_config = load_config()
 
+            configure_prompt: Optional[str] = None
+            if args.configure is True:
+                # Resolve the agent hint the same way cmd_new does: explicit
+                # --agent wins; otherwise fall back to the template's agent if
+                # a template was named; otherwise default to claude.
+                resolved_agent = args.agent or "claude"
+                if args.agent is None and args.template is not None:
+                    tpl = app_config.templates.get(args.template)
+                    if tpl is not None and tpl.agent:
+                        resolved_agent = tpl.agent
+                try:
+                    questions = resolve_questions(
+                        app_config,
+                        agent=resolved_agent,
+                        model=args.model,
+                    )
+                except ConfigureDisabledError as e:
+                    print(f"error: {e}", file=sys.stderr)
+                    sys.exit(1)
+
+                answers = prompt_interactively(questions)
+                for key, value in answers.items():
+                    if key == "prompt":
+                        # Only use the answered prompt if the user didn't
+                        # already pass one on the CLI.
+                        if args.prompt is None:
+                            configure_prompt = value
+                    else:
+                        args.config.append(f"{key}={value}")
+
             config_pairs = list(args.config)
             if args.model is not None:
                 config_pairs.append(f"model={args.model}")
@@ -366,6 +404,10 @@ def main(argv: Optional[List[str]] = None) -> None:
             if prompt is None and not sys.stdin.isatty():
                 prompt = sys.stdin.read().strip()
                 stdin_consumed = True
+            # Configure-flow prompt answer fills in only when neither the CLI
+            # arg nor piped stdin supplied a prompt.
+            if not prompt and configure_prompt is not None:
+                prompt = configure_prompt
             # Template prompt fallback runs before the empty-stdin check so
             # that `echo "" | actor new foo --template qa` uses the template's
             # prompt instead of erroring.

@@ -213,5 +213,126 @@ class TestPayloadShape(unittest.TestCase):
         self.assertTrue(payload["questions"][0]["optional"])
 
 
+class TestPromptInteractively(unittest.TestCase):
+
+    def test_options_question_picks_option_by_number(self):
+        from actor.configure import prompt_interactively
+        q = Question(
+            key="model",
+            prompt="Model?",
+            header="Model",
+            options=[QuestionOption("opus"), QuestionOption("sonnet")],
+        )
+        answers = prompt_interactively(
+            [q],
+            input_fn=iter(["1"]).__next__,
+            output_fn=lambda _: None,
+        )
+        self.assertEqual(answers, {"model": "opus"})
+
+    def test_options_question_accepts_label_directly(self):
+        from actor.configure import prompt_interactively
+        q = Question(
+            key="model",
+            prompt="Model?",
+            header="Model",
+            options=[QuestionOption("opus"), QuestionOption("sonnet")],
+        )
+        answers = prompt_interactively(
+            [q],
+            input_fn=iter(["sonnet"]).__next__,
+            output_fn=lambda _: None,
+        )
+        self.assertEqual(answers, {"model": "sonnet"})
+
+    def test_text_question_uses_raw_input(self):
+        from actor.configure import prompt_interactively
+        q = Question(
+            key="prompt",
+            prompt="Goal?",
+            header="Goal",
+            options=[],
+            kind="text",
+        )
+        answers = prompt_interactively(
+            [q],
+            input_fn=iter(["fix the nav"]).__next__,
+            output_fn=lambda _: None,
+        )
+        self.assertEqual(answers, {"prompt": "fix the nav"})
+
+    def test_text_question_optional_skipped_on_empty(self):
+        from actor.configure import prompt_interactively
+        q = Question(
+            key="prompt",
+            prompt="Goal?",
+            header="Goal",
+            options=[],
+            kind="text",
+            optional=True,
+        )
+        answers = prompt_interactively(
+            [q],
+            input_fn=iter([""]).__next__,
+            output_fn=lambda _: None,
+        )
+        self.assertNotIn("prompt", answers)
+
+    def test_invalid_options_input_retries(self):
+        from actor.configure import prompt_interactively
+        q = Question(
+            key="model",
+            prompt="Model?",
+            header="Model",
+            options=[QuestionOption("opus"), QuestionOption("sonnet")],
+        )
+        answers = prompt_interactively(
+            [q],
+            input_fn=iter(["xyz", "5", "1"]).__next__,  # bad, bad, valid
+            output_fn=lambda _: None,
+        )
+        self.assertEqual(answers, {"model": "opus"})
+
+    def test_multiple_questions_each_answered(self):
+        from actor.configure import prompt_interactively
+        qs = [
+            Question(
+                key="a",
+                prompt="A?",
+                header="A",
+                options=[QuestionOption("x"), QuestionOption("y")],
+            ),
+            Question(
+                key="b",
+                prompt="B?",
+                header="B",
+                options=[QuestionOption("1"), QuestionOption("2")],
+            ),
+        ]
+        answers = prompt_interactively(
+            qs,
+            input_fn=iter(["1", "2"]).__next__,
+            output_fn=lambda _: None,
+        )
+        self.assertEqual(answers, {"a": "x", "b": "2"})
+
+    def test_required_text_reprompts_on_empty(self):
+        from actor.configure import prompt_interactively
+        q = Question(
+            key="goal",
+            prompt="Goal?",
+            header="Goal",
+            options=[],
+            kind="text",
+            optional=False,
+        )
+        answers = prompt_interactively(
+            [q],
+            input_fn=iter(["", "", "finish it"]).__next__,
+            output_fn=lambda _: None,
+        )
+        self.assertEqual(answers, {"goal": "finish it"})
+
+
 if __name__ == "__main__":
     unittest.main()
