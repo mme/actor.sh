@@ -323,7 +323,7 @@ class ActorWatchApp(App):
         log = self.query_one("#logs-content", RichLog)
         if log.size.width != self._last_log_width and self._last_log_entries:
             self._last_log_count = 0
-            self._set_logs(self._last_log_entries)
+            self._set_logs(self._last_log_actor, self._last_log_entries)
 
     def _set_logs(self, actor_name: str, entries: list) -> None:
         log = self.query_one("#logs-content", RichLog)
@@ -541,8 +541,14 @@ class ActorWatchApp(App):
             self.query_one("#detail-switcher", ContentSwitcher).current = "tabs-view"
         except NoMatches:
             pass
-        self.query_one(ActorTree).focus()
         self._interactive_active = None
+        # Dropping focus before re-focusing the tree is necessary because
+        # the terminal widget still holds focus at the moment of the key
+        # event; calling .focus() on the tree alone competes with the
+        # widget's re-focus pass. Defer via call_after_refresh so the
+        # switcher's layout change settles first.
+        self.set_focus(None)
+        self.call_after_refresh(lambda: self.query_one(ActorTree).focus())
 
     def on_terminal_widget_session_exited(self, message: TerminalWidget.SessionExited) -> None:
         from textual.css.query import NoMatches
@@ -578,9 +584,10 @@ class ActorWatchApp(App):
 
     def on_unmount(self) -> None:
         """Textual app teardown: kill all live interactive subprocesses so
-        no PTY child outlives the watch process. close_all() already
-        catches per-session failures and routes them to diagnostics."""
-        self._interactive.close_all()
+        no PTY child outlives the watch process. Uses the non-blocking
+        shutdown path — a blocking waitpid here stalls Textual's own
+        shutdown coroutine and leads to a hang that only Ctrl+C escapes."""
+        self._interactive.shutdown()
 
     def _focus_detail_content(self, tab_id: str | None = None) -> None:
         if tab_id is None:

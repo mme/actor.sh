@@ -175,7 +175,7 @@ class PtySession:
             deadline = time.monotonic() + _TERM_DEADLINE_S
             while time.monotonic() < deadline:
                 try:
-                    os.kill(self._pid, 0)  # probe only
+                    os.kill(self._pid, 0)
                 except ProcessLookupError:
                     break
                 time.sleep(_TERM_POLL_S)
@@ -188,6 +188,56 @@ class PtySession:
 
     def kill(self) -> None:
         self.close(signal.SIGKILL)
+
+    def shutdown_kill(self) -> None:
+        """Non-blocking shutdown variant for use inside Textual's on_unmount.
+
+        Sends SIGKILL immediately, does a single WNOHANG waitpid, and
+        returns — never spin-waits and never calls blocking waitpid. Leaves
+        any straggler as a zombie (the OS will reap it when actor-sh exits).
+
+        `close()` blocks the asyncio loop long enough to guarantee a clean
+        reap; that's wrong during app teardown because the event loop is
+        itself being torn down and Ctrl+C lands inside our wait.
+        """
+        if self._exit_fired:
+            return
+        if self._pid is not None:
+            try:
+                os.kill(self._pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self._exit_fired = True
+        if self._fd is not None and self._loop is not None:
+            try:
+                self._loop.remove_reader(self._fd)
+            except (ValueError, KeyError) as e:
+                self._record_error(f"shutdown remove_reader: {e!r}")
+            self._unregister_writer()
+        if self._pid is not None:
+            try:
+                pid, status = os.waitpid(self._pid, os.WNOHANG)
+            except ChildProcessError:
+                pid, status = -1, 0
+            if pid == 0:
+                # Still alive; don't block. Accept a transient zombie.
+                self._exit_code = -int(signal.SIGKILL)
+                self._record_error(
+                    f"shutdown_kill: pid {self._pid} not reaped — left as zombie",
+                )
+            elif os.WIFEXITED(status):
+                self._exit_code = os.WEXITSTATUS(status)
+            elif os.WIFSIGNALED(status):
+                self._exit_code = -os.WTERMSIG(status)
+            else:
+                self._exit_code = -1
+            self._pid = None
+        self._close_fd()
+        if self._on_exit is not None and self._exit_code is not None:
+            try:
+                self._on_exit(self._exit_code)
+            except Exception as e:
+                self._record_error(f"shutdown on_exit raised: {e!r}")
 
     # -- properties --------------------------------------------------------
 

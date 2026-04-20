@@ -36,6 +36,10 @@ class TerminalScreen:
         self._stream = pyte.ByteStream(self._screen)
         self.mouse_mode = MouseMode()
         self.app_cursor = False
+        # DECSET 1049 (or 47 / 1047) swaps to an alternate screen buffer.
+        # When active, scrollback is meaningless — the child owns the view
+        # and page-up/down shouldn't scroll local history.
+        self.alt_screen = False
 
     def feed(self, data: bytes) -> None:
         for m in _DECSET_RE.finditer(data):
@@ -50,6 +54,9 @@ class TerminalScreen:
         if param == 1:          # DECCKM — application cursor keys
             self.app_cursor = on
             return
+        if param in (47, 1047, 1049):  # alt-screen variants
+            self.alt_screen = on
+            return
         # MouseMode is frozen; replace wholesale rather than mutate.
         mode = self.mouse_mode
         if param == 1000:       # X10 / VT200 button-event tracking
@@ -60,6 +67,29 @@ class TerminalScreen:
             self.mouse_mode = replace(mode, any_motion=on)
         elif param == 1006:     # SGR extended mouse coordinates
             self.mouse_mode = replace(mode, sgr=on)
+
+    def history_up(self, lines: int = 1) -> bool:
+        """Scroll the visible frame up by `lines` history rows. Returns
+        True if anything actually moved. Pyte's HistoryScreen uses pages;
+        we call prev_page() once per full page worth of lines."""
+        moved = False
+        pages = max(1, lines // max(1, self._rows))
+        for _ in range(pages):
+            before = len(self._screen.history.top)
+            self._screen.prev_page()
+            if len(self._screen.history.top) != before:
+                moved = True
+        return moved
+
+    def history_down(self, lines: int = 1) -> bool:
+        moved = False
+        pages = max(1, lines // max(1, self._rows))
+        for _ in range(pages):
+            before = len(self._screen.history.bottom)
+            self._screen.next_page()
+            if len(self._screen.history.bottom) != before:
+                moved = True
+        return moved
 
     # -- Geometry ----------------------------------------------------------
 

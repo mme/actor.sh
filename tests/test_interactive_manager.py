@@ -185,6 +185,45 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         if self.manager.has("alice"):
             self.manager.close("alice")
 
+    async def test_create_updates_run_pid(self):
+        """The Run row must record the PTY's pid so resolve_actor_status
+        sees the child as alive (otherwise it flips to ERROR)."""
+        cat = _find_binary("cat")
+        info = self.manager.create(
+            actor_name="alice", agent=_FakeAgent([cat]),
+            session_id="s", cwd=Path("/tmp"), config={},
+        )
+        try:
+            run = self.db.get_run(info.run_id)
+            self.assertEqual(
+                run.pid, info.session.pid,
+                "Run.pid should match the spawned PTY pid",
+            )
+            # And resolve_actor_status agrees the actor is RUNNING.
+            from actor.process import RealProcessManager
+            status = self.db.resolve_actor_status("alice", RealProcessManager())
+            self.assertEqual(status, Status.RUNNING)
+        finally:
+            self.manager.close("alice")
+
+    async def test_shutdown_marks_runs_stopped_without_blocking(self):
+        import time, signal
+        sleep_bin = _find_binary("sleep")
+        info = self.manager.create(
+            actor_name="alice", agent=_FakeAgent([sleep_bin, "100"]),
+            session_id="s", cwd=Path("/tmp"), config={},
+        )
+        start = time.monotonic()
+        self.manager.shutdown()
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 0.3, f"shutdown must not block; took {elapsed:.3f}s")
+        self.assertEqual(self.manager.live_names(), [])
+        run = self.db.get_run(info.run_id)
+        self.assertEqual(
+            run.status, Status.STOPPED,
+            "shutdown should mark every live Run as STOPPED",
+        )
+
     async def test_close_all_kills_every_session(self):
         cat = _find_binary("cat")
         alice = self.manager.create(

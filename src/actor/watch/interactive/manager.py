@@ -115,6 +115,11 @@ class InteractiveSessionManager:
         pty_session.set_callbacks(on_exit=_chained_on_exit)
 
         pty_session.spawn()
+        # Record the pid so resolve_actor_status can see the child is alive;
+        # without this the Run is classified ERROR by the liveness probe.
+        if pty_session.pid is not None:
+            with self._db_opener() as db:
+                db.update_run_pid(run_id, pty_session.pid)
         return info
 
     def close(self, actor_name: str) -> None:
@@ -143,6 +148,30 @@ class InteractiveSessionManager:
                 self.close(name)
             except Exception as e:
                 self._record_error(f"close_all({name!r}): {e!r}")
+
+    def shutdown(self) -> None:
+        """Non-blocking variant for Textual app teardown. SIGKILLs every
+        live session, finalizes each Run as STOPPED, returns fast. Any
+        child that doesn't reap inside the WNOHANG window is left as a
+        transient zombie and the OS cleans up when actor-sh exits."""
+        for name in list(self._sessions.keys()):
+            info = self._sessions.pop(name, None)
+            if info is None:
+                continue
+            self._stopping.add(name)
+            try:
+                try:
+                    info.session.shutdown_kill()
+                except Exception as e:
+                    self._record_error(f"shutdown({name!r}): {e!r}")
+                try:
+                    self._finalize_run(
+                        name, info.run_id, info.session.exit_code or -1,
+                    )
+                except Exception as e:
+                    self._record_error(f"shutdown finalize({name!r}): {e!r}")
+            finally:
+                self._stopping.discard(name)
 
     # -- DB integration ----------------------------------------------------
 

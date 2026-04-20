@@ -151,6 +151,21 @@ class TerminalWidget(Widget, can_focus=True):
             self.post_message(self.ExitRequested(self))
             return
 
+        # PageUp/PageDown scroll local scrollback when the child isn't in
+        # alt-screen (no scrollback ownership) and doesn't want to handle
+        # mouse/cursor events itself.
+        if event.key in ("pageup", "pagedown") and self._should_scroll_locally():
+            moved = (
+                self._screen.history_up(self._screen.rows)
+                if event.key == "pageup"
+                else self._screen.history_down(self._screen.rows)
+            )
+            if moved:
+                event.stop()
+                event.prevent_default()
+                self._frame_counter += 1
+                return
+
         data = key_to_bytes(
             event.key,
             event.character,
@@ -163,6 +178,9 @@ class TerminalWidget(Widget, can_focus=True):
         if self._recorder is not None:
             self._recorder.record(EventKind.WRITE, data)
         self._session.write(data)
+
+    def _should_scroll_locally(self) -> bool:
+        return not self._screen.alt_screen and not self._screen.mouse_mode.should_report_click()
 
     # -- mouse input -------------------------------------------------------
     # Textual fires MouseDown -> MouseUp -> Click. on_click is intentionally
@@ -182,9 +200,19 @@ class TerminalWidget(Widget, can_focus=True):
         self._session.write(data)
 
     async def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        if self._should_scroll_locally():
+            if self._screen.history_up(3):
+                event.stop()
+                self._frame_counter += 1
+            return
         self._emit_mouse(MouseButton.WHEEL_UP, event.x, event.y, event)
 
     async def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        if self._should_scroll_locally():
+            if self._screen.history_down(3):
+                event.stop()
+                self._frame_counter += 1
+            return
         self._emit_mouse(MouseButton.WHEEL_DOWN, event.x, event.y, event)
 
     def _handle_mouse_press(self, x: int, y: int, button: int) -> None:

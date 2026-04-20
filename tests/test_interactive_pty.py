@@ -200,6 +200,39 @@ class PtySessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"hello-pty-env", b"".join(received))
 
 
+class PtySessionShutdownKillTests(unittest.IsolatedAsyncioTestCase):
+    """shutdown_kill is the non-blocking variant for Textual's on_unmount."""
+
+    async def test_shutdown_kill_returns_fast_for_running_child(self):
+        import time, signal
+        sleep_bin = _find_binary("sleep")
+        session = PtySession(
+            argv=[sleep_bin, "100"],
+            cwd=pathlib.Path("/tmp"),
+        )
+        session.spawn()
+        start = time.monotonic()
+        session.shutdown_kill()
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 0.2,
+                        f"shutdown_kill must not block; took {elapsed:.3f}s")
+        # exit_code may be None (zombie) or -SIGKILL (reaped in time).
+        # Either way, _exit_fired is set so the session is done.
+        self.assertTrue(session._exit_fired)
+
+    async def test_shutdown_kill_idempotent(self):
+        sleep_bin = _find_binary("sleep")
+        session = PtySession(
+            argv=[sleep_bin, "100"],
+            cwd=pathlib.Path("/tmp"),
+        )
+        session.spawn()
+        session.shutdown_kill()
+        # Second call is a no-op.
+        session.shutdown_kill()
+        self.assertTrue(session._exit_fired)
+
+
 class PtySessionFailurePathsTests(unittest.IsolatedAsyncioTestCase):
     async def test_exec_failure_yields_exit_127(self):
         """A bogus binary should surface via on_exit with code 127 rather

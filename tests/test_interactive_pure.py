@@ -122,6 +122,39 @@ class TerminalScreenTests(unittest.TestCase):
         lines = s.render_lines()
         self.assertEqual(lines[0].plain[0], "X")
 
+    def test_alt_screen_tracked(self):
+        s = TerminalScreen()
+        self.assertFalse(s.alt_screen)
+        s.feed(b"\x1b[?1049h")
+        self.assertTrue(s.alt_screen)
+        s.feed(b"\x1b[?1049l")
+        self.assertFalse(s.alt_screen)
+        # Legacy variants (47 / 1047) also count.
+        s.feed(b"\x1b[?47h")
+        self.assertTrue(s.alt_screen)
+        s.feed(b"\x1b[?47l")
+        self.assertFalse(s.alt_screen)
+
+    def test_history_scroll_up_then_down(self):
+        s = TerminalScreen(rows=3, cols=10)
+        # Fill more lines than the visible rows so history has content.
+        for i in range(10):
+            s.feed(f"line{i}\r\n".encode())
+        lines_bottom = [l.plain.rstrip() for l in s.render_lines()]
+        moved_up = s.history_up(s.rows)
+        self.assertTrue(moved_up, "history_up should move when we have scrollback")
+        lines_scrolled = [l.plain.rstrip() for l in s.render_lines()]
+        self.assertNotEqual(
+            lines_bottom, lines_scrolled,
+            "history_up must change the rendered frame",
+        )
+
+    def test_history_up_without_scrollback_returns_false(self):
+        s = TerminalScreen(rows=10, cols=20)
+        s.feed(b"hello")
+        # No scrollback yet — nothing to page up to.
+        self.assertFalse(s.history_up(10))
+
     def test_cursor_overlay_inverts_single_cell(self):
         s = TerminalScreen(rows=2, cols=5)
         s.feed(b"abc")  # cursor now at (3, 0)
