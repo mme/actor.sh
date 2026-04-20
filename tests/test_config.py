@@ -479,6 +479,22 @@ class TestLoadConfigAgentDefaultsStrict(unittest.TestCase):
             "model",
         )
 
+    def test_block_shaped_child_under_default_config_raises(self):
+        # `model { nested "x" }` has no positional args but does have
+        # children. The bare "needs a value" error would be misleading
+        # because the user *did* supply a value — just in the wrong
+        # shape.
+        self._expect_error(
+            'agent "claude" {\n'
+            '    default-config {\n'
+            '        model {\n'
+            '            nested "x"\n'
+            '        }\n'
+            '    }\n'
+            '}\n',
+            "nested blocks are not supported inside `default-config`",
+        )
+
     def test_props_on_default_config_child_raises(self):
         self._expect_error(
             'agent "claude" {\n'
@@ -622,6 +638,19 @@ class TestLoadConfigAgentDefaultsStrict(unittest.TestCase):
         self._expect_error(
             'agent "claude" {\n'
             '    agent "codex"\n'
+            '}\n',
+            "put it on a `template` block",
+        )
+
+    def test_reserved_name_as_block_under_agent_points_to_template(self):
+        # Without an argless check, `prompt { something }` would fall
+        # into the forward-compat no-op branch and silently vanish.
+        # Reserved names must raise regardless of shape.
+        self._expect_error(
+            'agent "claude" {\n'
+            '    prompt {\n'
+            '        something "x"\n'
+            '    }\n'
             '}\n',
             "put it on a `template` block",
         )
@@ -803,6 +832,15 @@ class TestMergeInvariant(unittest.TestCase):
         over = AppConfig()
         merged = _merge(base, over)
         self.assertNotIn("claude", merged.agent_defaults)
+
+    def test_appconfig_post_init_strips_empty_agent_dicts(self):
+        # First line of defence: programmatic construction with an
+        # empty dict must not leave the parser invariant ("presence
+        # implies at least one key") violated, even if a caller never
+        # routes the value through `_merge`.
+        cfg = AppConfig(agent_defaults={"claude": {}, "codex": {"model": "gpt"}})
+        self.assertNotIn("claude", cfg.agent_defaults)
+        self.assertEqual(cfg.agent_defaults["codex"], {"model": "gpt"})
 
 
 if __name__ == "__main__":

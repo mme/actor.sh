@@ -163,10 +163,24 @@ uniform across the codebase.)
 Replace the `AppConfig` dataclass (currently around lines 31-33):
 
 ```python
+# Template-level field names — rejected inside `default-config` and
+# when dropped bare under an `agent` block. Centralised so the two
+# parser checks can't drift apart.
+_RESERVED_TEMPLATE_KEYS = ("prompt", "agent")
+
+
 @dataclass
 class AppConfig:
     templates: Dict[str, Template] = field(default_factory=dict)
+    # Parser invariant: every key present in `agent_defaults` maps to
+    # a non-empty dict. `__post_init__` enforces it on programmatic
+    # construction; `_merge` maintains it across merges.
     agent_defaults: Dict[str, Dict[str, str]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.agent_defaults = {
+            agent: keys for agent, keys in self.agent_defaults.items() if keys
+        }
 ```
 
 Add a new helper above `_parse_kdl_file` (after `_parse_template`):
@@ -181,6 +195,8 @@ def _parse_default_config(node, agent_name: str, source: Path) -> Dict[str, str]
     through — no fixed schema, they're consumed by the agent at spawn
     time. Using `prompt` or `agent` here raises; they belong on the
     template, not inside a block whose scope is already one agent.
+    Nested `default-config { default-config { … } }` raises with a
+    dedicated message instead of the misleading "needs a value".
     """
     if node.args:
         raise ConfigError(
@@ -200,11 +216,17 @@ def _parse_default_config(node, agent_name: str, source: Path) -> Dict[str, str]
         # `prompt "a" / prompt "b"` reports the reserved-key error
         # (which tells the user to move `prompt` up to the template)
         # instead of a misleading "duplicate prompt".
-        if key in ("prompt", "agent"):
+        if key in _RESERVED_TEMPLATE_KEYS:
             raise ConfigError(
                 f"agent '{agent_name}' in {source}: '{key}' is not a "
                 f"valid default-config key (it's a template-level field, "
                 f"not an agent config key)"
+            )
+        if key == "default-config":
+            raise ConfigError(
+                f"agent '{agent_name}' in {source}: `default-config` "
+                f"cannot be nested inside another `default-config` — "
+                f"list config keys directly"
             )
         if key in seen_keys:
             raise ConfigError(
@@ -221,6 +243,15 @@ def _parse_default_config(node, agent_name: str, source: Path) -> Dict[str, str]
                 f"properties"
             )
         if not child.args:
+            # `model { nested "x" }` trips this branch with args == []
+            # but nodes != []; distinguish that case so the user isn't
+            # told their key "needs a value" when they did supply one.
+            if getattr(child, "nodes", None):
+                raise ConfigError(
+                    f"agent '{agent_name}' in {source}: '{key}' must be a "
+                    f"scalar `{key} \"value\"` entry — nested blocks are "
+                    f"not supported inside `default-config`"
+                )
             raise ConfigError(
                 f"agent '{agent_name}' in {source}: '{key}' needs a value"
             )
@@ -237,11 +268,13 @@ def _parse_agent_block(node, source: Path) -> Tuple[str, Dict[str, str]]:
     """Parse an `agent "name" { … }` block. Returns (agent_name, defaults).
 
     Validates the agent name against AgentKind so typos (`agent "cluade"`)
-    fail fast. Block-style children other than `default-config` (no args)
-    are silently accepted as forward-compat no-ops for follow-up tickets
-    (hooks #30 etc.). Key-with-value children directly under `agent` —
-    e.g. `model "opus"` instead of `default-config { model "opus" }` —
-    raise so the user's keys aren't silently dropped.
+    fail fast. Children with no positional args (`hooks { … }`, bare
+    `alias`) are silently accepted as forward-compat no-ops for
+    follow-up tickets (#30 / #33). Key-with-value children directly
+    under `agent` — e.g. `model "opus"` instead of
+    `default-config { model "opus" }` — raise so the user's keys
+    aren't silently dropped. Reserved template names (`prompt`, `agent`)
+    raise regardless of shape and point the user at `template` blocks.
     """
     if not node.args:
         raise ConfigError(
@@ -287,6 +320,15 @@ def _parse_agent_block(node, source: Path) -> Tuple[str, Dict[str, str]]:
             seen_default_config = True
             defaults = _parse_default_config(child, name, source)
             continue
+        # Catch reserved template names regardless of shape — pointing
+        # the user at `default-config` is actively wrong because those
+        # names are rejected there too.
+        if child.name in _RESERVED_TEMPLATE_KEYS:
+            raise ConfigError(
+                f"agent '{name}' in {source}: `{child.name}` is a "
+                f"template-level field, not an agent config key — "
+                f"put it on a `template` block instead"
+            )
         if child.args:
             raise ConfigError(
                 f"agent '{name}' in {source}: `{child.name}` cannot sit "
@@ -347,6 +389,8 @@ def _parse_kdl_file(path: Path) -> AppConfig:
         # tickets #30 / #33 and are not implemented here.
     return cfg
 ```
+
+Also add a targeted `default-config` rejection inside `_parse_template` (existing function) so `template "qa" { default-config { … } }` raises a helpful "belongs under an `agent` block" error instead of the misleading "'default-config' needs a value" from the generic args check.
 
 - [ ] **Step 4: Run the new tests — expect pass**
 
@@ -628,10 +672,19 @@ def _merge(base: AppConfig, over: AppConfig) -> AppConfig:
     merged_templates = dict(base.templates)
     merged_templates.update(over.templates)
 
+    # Filter empty dicts on both sides to preserve the
+    # `AppConfig.agent_defaults` invariant ("presence implies at least
+    # one key") even when callers pass in programmatically constructed
+    # configs. `__post_init__` does the same at construction time, but
+    # filtering here keeps `_merge` correct in isolation.
     merged_agent_defaults: Dict[str, Dict[str, str]] = {
-        agent: dict(keys) for agent, keys in base.agent_defaults.items()
+        agent: dict(keys)
+        for agent, keys in base.agent_defaults.items()
+        if keys
     }
     for agent, keys in over.agent_defaults.items():
+        if not keys:
+            continue
         existing = merged_agent_defaults.setdefault(agent, {})
         existing.update(keys)
 

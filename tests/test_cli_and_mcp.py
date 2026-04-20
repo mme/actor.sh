@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import sys
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from actor import __version__
@@ -474,6 +475,29 @@ class McpToolTests(unittest.TestCase):
             server.run_actor(name="foo", prompt="do x", config=["model=opus"])
         args, kwargs = spawn.call_args
         self.assertEqual(kwargs["config_pairs"], ["model=opus"])
+
+    def test_new_actor_forwards_app_config_from_dir(self):
+        # Regression guard: `new_actor` must route `dir` through
+        # `load_config(cwd=...)` and forward the result to `cmd_new` so
+        # per-agent `default-config` keys from the project settings.kdl
+        # actually apply. Dropping the `app_config=` kwarg at the call
+        # site would silently disable per-agent defaults for MCP
+        # callers.
+        from actor import server
+        from actor.config import AppConfig
+        fake_cfg = AppConfig()
+        with patch("actor.server.load_config") as load_config, \
+             patch("actor.server.cmd_new") as cmd_new, \
+             patch("actor.server._spawn_background_run"):
+            load_config.return_value = fake_cfg
+            fake_actor = MagicMock()
+            fake_actor.dir = "/tmp/foo"
+            cmd_new.return_value = fake_actor
+            server.new_actor(name="foo", dir="/tmp/project")
+        load_kwargs = load_config.call_args.kwargs
+        self.assertEqual(load_kwargs.get("cwd"), Path("/tmp/project"))
+        cmd_kwargs = cmd_new.call_args.kwargs
+        self.assertIs(cmd_kwargs.get("app_config"), fake_cfg)
 
 
 if __name__ == "__main__":

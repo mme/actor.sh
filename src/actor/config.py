@@ -42,10 +42,15 @@ class AppConfig:
     templates: Dict[str, Template] = field(default_factory=dict)
     # Parser invariant: every key present in `agent_defaults` maps to a
     # non-empty dict — an `agent "claude" { default-config {} }` block
-    # contributes nothing, so the key is omitted entirely. `_merge`
-    # filters empty dicts on both sides so this invariant survives
-    # programmatic construction too.
+    # contributes nothing, so the key is omitted entirely. `__post_init__`
+    # enforces this on programmatic construction; `_merge` maintains it
+    # across merges.
     agent_defaults: Dict[str, Dict[str, str]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.agent_defaults = {
+            agent: keys for agent, keys in self.agent_defaults.items() if keys
+        }
 
 
 def _find_project_config(
@@ -241,6 +246,16 @@ def _parse_default_config(node, agent_name: str, source: Path) -> Dict[str, str]
                 f"properties"
             )
         if not child.args:
+            # Block-shaped children (`model { nested "x" }`) trip this
+            # branch with `args == []`. Distinguish that case so the
+            # user isn't told their key "needs a value" when they did
+            # supply one — just in an unsupported shape.
+            if getattr(child, "nodes", None):
+                raise ConfigError(
+                    f"agent '{agent_name}' in {source}: '{key}' must be a "
+                    f"scalar `{key} \"value\"` entry — nested blocks are "
+                    f"not supported inside `default-config`"
+                )
             raise ConfigError(
                 f"agent '{agent_name}' in {source}: '{key}' needs a value"
             )
@@ -258,12 +273,13 @@ def _parse_agent_block(node, source: Path) -> Tuple[str, Dict[str, str]]:
 
     Validates the agent name via `AgentKind.from_str` so typos
     (`agent "cluade"`) fail fast with the same canonical allowlist the
-    rest of the codebase uses. Block-style children other than
-    `default-config` (those with no args, e.g. `hooks { … }`) are
-    silently accepted as forward-compat no-ops for follow-up tickets.
-    Key-with-value children directly under `agent` (e.g. `model "opus"`
-    instead of `default-config { model "opus" }`) raise so the user's
-    keys aren't silently dropped.
+    rest of the codebase uses. Children with no positional args
+    (`hooks { … }`, bare `alias`) are silently accepted as forward-compat
+    no-ops for follow-up tickets. Key-with-value children directly under
+    `agent` (e.g. `model "opus"` instead of
+    `default-config { model "opus" }`) raise so the user's keys aren't
+    silently dropped. Reserved template names (`prompt`, `agent`) raise
+    regardless of shape and point the user at `template` blocks.
     """
     if not node.args:
         raise ConfigError(
@@ -309,22 +325,23 @@ def _parse_agent_block(node, source: Path) -> Tuple[str, Dict[str, str]]:
             seen_default_config = True
             defaults = _parse_default_config(child, name, source)
             continue
+        # `prompt` / `agent` are template-level fields, not config keys.
+        # Catch them regardless of shape (`prompt "x"`, `prompt { ... }`,
+        # or bare `prompt`) — pointing the user at `default-config` is
+        # actively wrong because those names are rejected there too.
+        if child.name in _RESERVED_TEMPLATE_KEYS:
+            raise ConfigError(
+                f"agent '{name}' in {source}: `{child.name}` is a "
+                f"template-level field, not an agent config key — "
+                f"put it on a `template` block instead"
+            )
         # Mirror of the template-side guard: a user who writes
         # `model "opus"` directly under `agent "claude" { … }` (forgetting
         # the `default-config { … }` wrapper) would otherwise see their
-        # key silently dropped. Block-style children with no args stay
-        # silently accepted as forward-compat no-ops for follow-up
-        # tickets (e.g. `hooks {}` from #30).
+        # key silently dropped. Children with no args (bare `hooks` or
+        # `hooks { … }` blocks) stay silently accepted as forward-compat
+        # no-ops for follow-up tickets (e.g. #30).
         if child.args:
-            # `prompt` / `agent` are template-level fields, not config
-            # keys — pointing the user at `default-config` would be
-            # actively wrong because those names are rejected there too.
-            if child.name in _RESERVED_TEMPLATE_KEYS:
-                raise ConfigError(
-                    f"agent '{name}' in {source}: `{child.name}` is a "
-                    f"template-level field, not an agent config key — "
-                    f"put it on a `template` block instead"
-                )
             raise ConfigError(
                 f"agent '{name}' in {source}: `{child.name}` cannot sit "
                 f"directly under an `agent` block — nest config keys "
@@ -424,6 +441,11 @@ def load_config(
       the user config step is skipped.
 
     Missing files are skipped silently. Malformed files raise ConfigError.
+
+    Merge semantics (see `_merge`): templates merge by name, with
+    project overriding user on collision. Per-agent `default-config`
+    merges per-key — user + project contribute distinct keys for the
+    same agent, and project wins on same-key conflict.
     """
     if cwd is None:
         cwd = Path.cwd()
