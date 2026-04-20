@@ -36,6 +36,10 @@ class Status(Enum):
     DONE = "done"
     ERROR = "error"
     STOPPED = "stopped"
+    # Display-only: an interactive terminal session is open for the
+    # actor. Not persisted to the Run row — overlaid by the watch app
+    # when InteractiveSessionManager.has(name) is True.
+    INTERACTIVE = "interactive"
 
     def as_str(self) -> str:
         return self.value

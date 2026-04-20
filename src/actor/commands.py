@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from .errors import (
     ActorError,
@@ -274,6 +275,97 @@ def cmd_run(
     status = Status.DONE if exit_code == 0 else Status.ERROR
     db.update_run_status(run_id, status, exit_code)
     return output
+
+
+# -- cmd_interactive --
+
+INTERACTIVE_PROMPT = "*interactive*"
+
+
+def cmd_interactive(
+    db: Database,
+    agent: Agent,
+    proc_mgr: ProcessManager,
+    name: str,
+    runner: Optional[Callable[[List[str], Path, dict], int]] = None,
+) -> Tuple[int, str]:
+    """`runner` is injectable so tests can drive without spawning a real
+    subprocess. Returns (exit_code, status_message)."""
+    actor = db.get_actor(name)
+
+    status = db.resolve_actor_status(name, proc_mgr)
+    if status == Status.RUNNING:
+        raise IsRunningError(name)
+
+    session_id = actor.agent_session
+    if session_id is None:
+        raise ActorError(
+            f"'{name}' has no session yet \u2014 run it non-interactively first"
+        )
+
+    if not binary_exists(actor.agent.binary_name):
+        raise AgentNotFoundError(actor.agent.binary_name)
+
+    dir_path = Path(actor.dir)
+    if not dir_path.is_dir():
+        raise ActorError(
+            f"actor directory '{actor.dir}' does not exist \u2014 use 'actor discard {name}' to clean up"
+        )
+
+    argv = agent.interactive_argv(session_id, actor.config)
+
+    run = Run(
+        id=0,
+        actor_name=name,
+        prompt=INTERACTIVE_PROMPT,
+        status=Status.RUNNING,
+        exit_code=None,
+        pid=None,
+        config=actor.config,
+        started_at=_now_iso(),
+        finished_at=None,
+    )
+    run_id = db.insert_run(run)
+    db.touch_actor(name)
+
+    env = dict(os.environ)
+    env["ACTOR_NAME"] = name
+
+    try:
+        exit_code = (runner or _default_interactive_runner)(argv, dir_path, env)
+    except BaseException:
+        db.update_run_status(run_id, Status.ERROR, -1)
+        raise
+
+    current = db.latest_run(name)
+    if current is not None and current.id == run_id and current.status == Status.STOPPED:
+        return exit_code, f"Interactive session for '{name}' stopped."
+
+    final = Status.DONE if exit_code == 0 else Status.ERROR
+    db.update_run_status(run_id, final, exit_code)
+    return exit_code, f"Interactive session for '{name}' ended (exit {exit_code})."
+
+
+def _default_interactive_runner(argv: List[str], cwd: Path, env: dict) -> int:
+    proc = subprocess.Popen(argv, cwd=str(cwd), env=env)
+    try:
+        return proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        try:
+            return proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                return proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # Give up rather than block the shell forever. Surface a
+                # warning so the user can chase a zombie/stuck process.
+                print(
+                    f"warning: child pid {proc.pid} did not exit after SIGKILL",
+                    file=sys.stderr,
+                )
+                return -1
 
 
 # -- cmd_list --

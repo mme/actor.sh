@@ -19,6 +19,16 @@ src/actor/               # Python package
   agents/
     claude.py            # ClaudeAgent — spawns claude CLI sessions
     codex.py             # CodexAgent — spawns codex CLI sessions
+  watch/
+    app.py               # Textual dashboard
+    interactive/         # Embedded terminal for live Claude/Codex sessions
+      screen.py          # pyte wrapper + rich.Text rendering
+      input.py           # key + mouse → ANSI byte translator
+      batcher.py         # refresh coalescer (flicker prevention)
+      diagnostics.py     # ring buffer of I/O events for post-mortem
+      pty_session.py     # pty.fork + async read/write/resize/reap
+      widget.py          # Textual widget (glue)
+      manager.py         # per-actor session registry + DB integration
   _skill/                # Bundled Claude Code skill (agent-facing docs)
     SKILL.md             # Main skill definition
     cli.md               # CLI fallback reference
@@ -104,6 +114,25 @@ Local dev installs (`uv sync`) get a PEP 440 dev version like
 `0.1.4.dev3+g1a2b3c4` derived from git state at install time, so
 `actor --version`, the MCP server's announced version, and the deployed
 SKILL.md all agree and the drift check still works.
+
+## Interactive mode
+
+Both the CLI and the watch TUI can open a live Claude/Codex session for
+an existing actor.
+
+- CLI: `actor run <name> -i` inherits the caller's TTY via subprocess.Popen
+  (stdin/stdout/stderr passthrough). Tracked as a Run with prompt
+  `*interactive*` so it shows up in `actor show`.
+- Watch: select an actor in the tree and press Enter. The detail pane
+  swaps to a TerminalWidget backed by a forked PTY (see
+  `src/actor/watch/interactive/`). Ctrl+Z leaves the widget but keeps
+  the subprocess alive; quitting watch SIGTERMs everything.
+
+The watch integration is structured so the pure parts (screen, input,
+batcher, diagnostics) are unit-testable with synthetic inputs, and the
+impure parts (PtySession, widget) are integration-tested with real
+`/bin/cat` and `/bin/sh` subprocesses. Ctrl+Shift+D inside `actor watch`
+dumps the DiagnosticRecorder ring buffer to stderr for post-mortems.
 
 ## Architecture notes
 

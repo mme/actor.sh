@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from rich.text import Text
 from rich.theme import Theme as RichTheme
 
@@ -19,9 +21,13 @@ from textual.widgets import (
 )
 
 from ..db import Database
+from ..interfaces import binary_exists
 from ..process import RealProcessManager
-from ..types import Actor, Status
-from ..cli import _db_path
+from ..types import Actor, AgentKind, Status
+from ..cli import _db_path, _create_agent
+from .interactive.diagnostics import DiagnosticRecorder
+from .interactive.manager import InteractiveSessionManager
+from .interactive.widget import TerminalWidget
 from .patches import apply_patches
 from .splash import Splash
 from .themes import CLAUDE_DARK, CLAUDE_LIGHT
@@ -104,9 +110,14 @@ class ActorWatchApp(App):
         Binding("down,ctrl+n", "navigate_down", show=False),
         Binding("a", "focus_actors", "Actors"),
         Binding("p", "command_palette", "Palette"),
+        Binding("i", "enter_interactive", "Interactive"),
         Binding("l", "show_tab('logs')", "Logs"),
         Binding("d", "show_tab('diff')", "Diff"),
-        Binding("i", "show_tab('info')", "Info"),
+        Binding("question_mark", "show_tab('info')", "Info"),
+        # Enter is handled by the Tree's NodeSelected message, not an app
+        # binding — a priority binding here would steal Enter from the
+        # embedded terminal widget.
+        Binding("ctrl+shift+d", "dump_diagnostics", show=False),
     ]
 
     _prev_statuses: dict[str, Status] = {}
@@ -117,6 +128,13 @@ class ActorWatchApp(App):
     def __init__(self, animate: bool = True) -> None:
         super().__init__()
         self._animate = animate
+        self._diagnostics = DiagnosticRecorder(capacity=2048)
+        self._interactive = InteractiveSessionManager(
+            db_opener=lambda: Database.open(_db_path()),
+            recorder=self._diagnostics,
+        )
+        # Actor whose terminal widget is currently mounted, if any.
+        self._interactive_active: str | None = None
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if self._splash_active and action != "quit":
@@ -130,6 +148,9 @@ class ActorWatchApp(App):
                 yield ActorTree()
             with Vertical(id="detail-panel"):
                 with TabbedContent(id="tabs"):
+                    # Interactive tab is added dynamically via
+                    # _sync_detail_view when the selected actor has a
+                    # live session; removed again when the session ends.
                     with TabPane("Logs", id="logs"):
                         yield RichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False)
                     with TabPane("Diff", id="diff"):
@@ -202,6 +223,13 @@ class ActorWatchApp(App):
         self.call_from_thread(self._update_ui, actors, statuses)
 
     def _update_ui(self, actors: list[Actor], statuses: dict[str, Status]) -> None:
+        # Overlay INTERACTIVE status for actors with a live terminal
+        # session. This is display-only — the DB Run row is still
+        # RUNNING/STOPPED/etc.
+        for name in self._interactive.live_names():
+            if name in statuses:
+                statuses[name] = Status.INTERACTIVE
+
         for a in actors:
             new_status = statuses.get(a.name)
             old_status = self._prev_statuses.get(a.name)
@@ -302,7 +330,7 @@ class ActorWatchApp(App):
         log = self.query_one("#logs-content", RichLog)
         if log.size.width != self._last_log_width and self._last_log_entries:
             self._last_log_count = 0
-            self._set_logs(self._last_log_entries)
+            self._set_logs(self._last_log_actor, self._last_log_entries)
 
     def _set_logs(self, actor_name: str, entries: list) -> None:
         log = self.query_one("#logs-content", RichLog)
@@ -424,6 +452,154 @@ class ActorWatchApp(App):
     def on_tree_node_highlighted(self, event) -> None:
         self._refresh_detail()
         self._maybe_refresh_diff()
+        self._sync_detail_view()
+
+    # -- Interactive mode ----------------------------------------------------
+
+    def _sync_detail_view(self) -> None:
+        """Add/remove the Interactive tab based on whether the selected
+        actor has a live session. Does NOT activate the tab; use
+        action_enter_interactive for that."""
+        from textual.css.query import NoMatches
+
+        try:
+            tabs = self.query_one("#tabs", TabbedContent)
+        except NoMatches:
+            return
+        actor = self.query_one(ActorTree).selected_actor
+        info = (
+            self._interactive.get(actor.name) if actor is not None else None
+        )
+
+        existing: TabPane | None = None
+        try:
+            existing = tabs.get_pane("interactive")
+        except Exception:
+            existing = None
+
+        if info is None:
+            if existing is not None:
+                tabs.remove_pane("interactive")
+            self._interactive_active = None
+            return
+
+        # Actor has a live session. Rebuild the Interactive pane so its
+        # child widget matches the currently-selected actor's terminal
+        # (each actor owns a distinct TerminalWidget).
+        if existing is not None:
+            # If the existing pane already holds this actor's widget, leave it.
+            if info.widget in list(existing.children):
+                self._interactive_active = actor.name
+                return
+            tabs.remove_pane("interactive")
+
+        # add_pane is async — it schedules the mount but we can proceed.
+        new_pane = TabPane("Interactive", info.widget, id="interactive")
+        tabs.add_pane(new_pane, before="logs")
+        self._interactive_active = actor.name
+
+    def action_enter_interactive(self) -> None:
+        """Bound to `i` (app-wide) and Tree.NodeSelected (Enter on tree):
+        take the user to the Interactive tab for the selected actor,
+        creating the session if needed. Always scrolls to the bottom
+        and focuses the terminal so the user is ready to type."""
+        actor = self.query_one(ActorTree).selected_actor
+        if actor is None:
+            self.notify("no actor selected", severity="warning")
+            return
+
+        if not self._interactive.has(actor.name):
+            status = self._prev_statuses.get(actor.name, Status.IDLE)
+            if status == Status.RUNNING:
+                self.notify(f"{actor.name} is currently running — stop it first",
+                            severity="error")
+                return
+            if actor.agent_session is None:
+                self.notify(f"{actor.name} has no session yet — run it first",
+                            severity="error")
+                return
+            if not binary_exists(actor.agent.binary_name):
+                self.notify(f"agent binary '{actor.agent.binary_name}' not on PATH",
+                            severity="error")
+                return
+            try:
+                self._interactive.create(
+                    actor_name=actor.name,
+                    agent=_create_agent(actor.agent),
+                    session_id=actor.agent_session,
+                    cwd=Path(actor.dir),
+                    config=dict(actor.config),
+                )
+            except Exception as e:
+                self.notify(f"failed to start interactive session: {e}", severity="error")
+                return
+
+        self._sync_detail_view()
+
+        # Activate the Interactive tab, focus the terminal, and scroll
+        # to the bottom — intentionally different from tab-nav, which
+        # preserves scroll position.
+        info = self._interactive.get(actor.name)
+        if info is None:
+            return
+        try:
+            tabs = self.query_one("#tabs", TabbedContent)
+        except Exception:
+            return
+        tabs.active = "interactive"
+
+        target_widget = info.widget
+
+        def _activate() -> None:
+            target_widget.focus()
+            try:
+                target_widget.scroll_end(animate=False, force=True)
+            except Exception:
+                pass
+
+        self.call_after_refresh(_activate)
+
+    def on_terminal_widget_exit_requested(self, message: TerminalWidget.ExitRequested) -> None:
+        """Ctrl+Z from the embedded terminal: move focus to the actor tree.
+        The Logs tab keeps the live terminal mounted; Diff / Info tabs
+        are still reachable via the tab bar."""
+        self.set_focus(None)
+        self.call_after_refresh(lambda: self.query_one(ActorTree).focus())
+
+    def on_terminal_widget_session_exited(self, message: TerminalWidget.SessionExited) -> None:
+        target: str | None = None
+        for name in self._interactive.live_names():
+            info = self._interactive.get(name)
+            if info is not None and info.widget is message.widget:
+                target = name
+                break
+        if target is None:
+            return
+        self._interactive.close(target)
+        # _sync_detail_view swaps the Logs-tab content back to RichLog
+        # now that the session is gone from the registry.
+        self._refresh_detail()
+        self._sync_detail_view()
+        # The terminal widget just unmounted — drop focus onto the tree
+        # so the user can immediately navigate to another actor.
+        self.set_focus(None)
+        self.call_after_refresh(lambda: self.query_one(ActorTree).focus())
+
+    def action_dump_diagnostics(self) -> None:
+        import sys
+        dump = self._diagnostics.format(limit=200)
+        print(f"--- terminal diagnostics ({len(self._diagnostics)} events) ---",
+              file=sys.stderr)
+        print(dump, file=sys.stderr)
+        print("--- end ---", file=sys.stderr)
+        self.notify(f"dumped {len(self._diagnostics)} diagnostic events to stderr")
+
+    def on_unmount(self) -> None:
+        """Textual app teardown: kill all live interactive subprocesses so
+        no PTY child outlives the watch process. Uses the non-blocking
+        shutdown path — a blocking waitpid here stalls Textual's own
+        shutdown coroutine and leads to a hang that only Ctrl+C escapes."""
+        self._interactive.shutdown()
 
     def _focus_detail_content(self, tab_id: str | None = None) -> None:
         if tab_id is None:

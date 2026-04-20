@@ -61,6 +61,8 @@ from .process import RealProcessManager
 from .commands import (
     cmd_new,
     cmd_run,
+    cmd_interactive,
+    INTERACTIVE_PROMPT,
     cmd_list,
     cmd_show,
     cmd_stop,
@@ -118,12 +120,14 @@ __all__ = [
     # Commands
     "cmd_new",
     "cmd_run",
+    "cmd_interactive",
+    "INTERACTIVE_PROMPT",
     "cmd_list",
     "cmd_show",
     "cmd_stop",
     "cmd_config",
     "cmd_logs",
-    "cmd_done",
+    "cmd_discard",
     # Helpers
     "truncate",
     "format_duration",
