@@ -14,6 +14,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
     DataTable,
     Footer,
+    Header,
     RichLog,
     Static,
     TabbedContent,
@@ -51,23 +52,36 @@ class ActorWatchApp(App):
     }
     #actor-panel {
         width: 33;
-        border: blank;
+        /* Dim separator when unfocused so the two panels are visually
+           distinct even when focus is outside the app (modal open,
+           command palette, OS-level blur). Same round shape as the
+           focused state so there's no layout jitter on transition. */
+        border: round $foreground 30%;
         padding: 0 1;
         background: ansi_default;
     }
     #actor-panel:focus-within {
         border: round $primary;
     }
-    #actor-title {
-        text-style: bold;
-        color: $secondary;
-        height: 1;
-        margin-bottom: 1;
+    #app-header {
+        display: none;
         background: ansi_default;
+    }
+    #app-header.-active {
+        display: block;
+    }
+    /* HeaderIcon doubles as the command-palette trigger — we don't
+       want either. HeaderClockSpace reserves 10 cols on the right
+       even when show_clock is False; hiding both keeps the title
+       genuinely centered. */
+    #app-header HeaderIcon,
+    #app-header HeaderClockSpace,
+    #app-header HeaderClock {
+        display: none;
     }
     #detail-panel {
         width: 1fr;
-        border: blank;
+        border: round $foreground 30%;
     }
     #detail-panel:focus-within {
         border: round $primary;
@@ -120,6 +134,8 @@ class ActorWatchApp(App):
         Binding("ctrl+shift+d", "dump_diagnostics", show=False),
     ]
 
+    TITLE = "★ actor.sh"
+
     _prev_statuses: dict[str, Status] = {}
     _current_actors: list[Actor] = []
     _diff_loaded_for: str | None = None
@@ -142,9 +158,9 @@ class ActorWatchApp(App):
         return True
 
     def compose(self) -> ComposeResult:
+        yield Header(id="app-header")
         with Horizontal(id="main-layout"):
             with Vertical(id="actor-panel"):
-                yield Static(" ★ ACTOR.SH", id="actor-title")
                 yield ActorTree()
             with Vertical(id="detail-panel"):
                 with TabbedContent(id="tabs"):
@@ -247,14 +263,17 @@ class ActorWatchApp(App):
 
         main = self.query_one("#main-layout")
         splash = self.query_one("#splash")
+        header = self.query_one("#app-header")
         was_splash = self._splash_active
         self._splash_active = not actors
         if self._splash_active:
             main.set_class(False, "-active")
             splash.set_class(True, "-active")
+            header.set_class(False, "-active")
         else:
             main.set_class(True, "-active")
             splash.set_class(False, "-active")
+            header.set_class(True, "-active")
         if was_splash != self._splash_active:
             self.refresh_bindings()
 
