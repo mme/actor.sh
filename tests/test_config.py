@@ -486,7 +486,7 @@ class TestLoadConfigAgentDefaultsStrict(unittest.TestCase):
             '        model name="opus"\n'
             '    }\n'
             '}\n',
-            "model",
+            "does not accept properties",
         )
 
     def test_positional_args_on_default_config_block_raises(self):
@@ -757,6 +757,17 @@ class TestMergeInvariant(unittest.TestCase):
         over = AppConfig(agent_defaults={"claude": {}})
         merged = _merge(base, over)
         self.assertEqual(merged.agent_defaults["claude"], {"model": "opus"})
+
+    def test_merge_skips_empty_dict_from_base(self):
+        # Symmetric with `test_merge_skips_empty_dict_from_over`: an
+        # empty dict sitting in `base.agent_defaults` (e.g. a
+        # programmatically constructed AppConfig) should not leak into
+        # the merged result as a bare agent key with no configuration.
+        from actor.config import _merge
+        base = AppConfig(agent_defaults={"claude": {}})
+        over = AppConfig()
+        merged = _merge(base, over)
+        self.assertNotIn("claude", merged.agent_defaults)
 
 
 if __name__ == "__main__":

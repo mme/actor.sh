@@ -173,12 +173,14 @@ Add a new helper above `_parse_kdl_file` (after `_parse_template`):
 
 ```python
 def _parse_default_config(node, agent_name: str, source: Path) -> Dict[str, str]:
-    """Parse a `default-config { … }` block inside an agent block.
+    """Parse a `default-config { … }` block inside an `agent` block.
 
     Same shape rules as template children: each child is `key "value"`
-    with exactly one scalar arg, no props, no duplicates. Unknown keys
-    pass through (no fixed schema — they're consumed by the agent at
-    spawn time).
+    with exactly one scalar arg, no props, no duplicates. Keys other
+    than the template-level reserved names (`prompt`, `agent`) pass
+    through — no fixed schema, they're consumed by the agent at spawn
+    time. Using `prompt` or `agent` here raises; they belong on the
+    template, not inside a block whose scope is already one agent.
     """
     if node.args:
         raise ConfigError(
@@ -191,12 +193,32 @@ def _parse_default_config(node, agent_name: str, source: Path) -> Dict[str, str]
             f"accept properties"
         )
     out: Dict[str, str] = {}
+    seen_keys: set[str] = set()
     for child in node.nodes:
         key = child.name
-        if key in out:
+        # Reject reserved keys BEFORE the duplicate check so a malformed
+        # `prompt "a" / prompt "b"` reports the reserved-key error
+        # (which tells the user to move `prompt` up to the template)
+        # instead of a misleading "duplicate prompt".
+        if key in ("prompt", "agent"):
+            raise ConfigError(
+                f"agent '{agent_name}' in {source}: '{key}' is not a "
+                f"valid default-config key (it's a template-level field, "
+                f"not an agent config key)"
+            )
+        if key in seen_keys:
             raise ConfigError(
                 f"agent '{agent_name}' in {source}: duplicate key '{key}' "
                 f"in default-config"
+            )
+        seen_keys.add(key)
+        # Props check runs before the args check so `model name="opus"`
+        # reports "does not accept properties" rather than a misleading
+        # "needs a value".
+        if getattr(child, "props", None):
+            raise ConfigError(
+                f"agent '{agent_name}' in {source}: '{key}' does not accept "
+                f"properties"
             )
         if not child.args:
             raise ConfigError(
@@ -206,11 +228,6 @@ def _parse_default_config(node, agent_name: str, source: Path) -> Dict[str, str]
             raise ConfigError(
                 f"agent '{agent_name}' in {source}: '{key}' has extra args "
                 f"(only a single value is supported)"
-            )
-        if getattr(child, "props", None):
-            raise ConfigError(
-                f"agent '{agent_name}' in {source}: '{key}' does not accept "
-                f"properties"
             )
         out[key] = _coerce_value(child.args[0])
     return out

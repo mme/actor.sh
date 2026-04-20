@@ -162,7 +162,10 @@ the base and per-run `--config` arguments layer on top for that run
 only.
 
 Unknown top-level nodes (e.g. `hooks`, `alias`) are silently ignored
-for forward-compat with follow-up tickets #30 / #33.
+for forward-compat with follow-up tickets #30 / #33. A top-level
+`default-config` block is rejected with a helpful error instead of
+being silently ignored, because the keys inside would otherwise vanish
+— nest it under `agent "claude" { … }` / `agent "codex" { … }`.
 
 Load programmatically via `actor.config.load_config(cwd=..., home=...)` —
 both args default to `Path.cwd()` / `$HOME` so tests can inject temp dirs.

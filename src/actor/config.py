@@ -174,9 +174,11 @@ def _parse_default_config(node, agent_name: str, source: Path) -> Dict[str, str]
     """Parse a `default-config { … }` block inside an `agent` block.
 
     Same shape rules as template children: each child is `key "value"`
-    with exactly one scalar arg, no props, no duplicates. Unknown keys
-    pass through (no fixed schema — they're consumed by the agent at
-    spawn time).
+    with exactly one scalar arg, no props, no duplicates. Keys other
+    than the template-level reserved names (`prompt`, `agent`) pass
+    through — no fixed schema, they're consumed by the agent at spawn
+    time. Using `prompt` or `agent` here raises; they belong on the
+    template, not inside a block whose scope is already one agent.
     """
     if node.args:
         raise ConfigError(
@@ -192,22 +194,30 @@ def _parse_default_config(node, agent_name: str, source: Path) -> Dict[str, str]
     seen_keys: set[str] = set()
     for child in node.nodes:
         key = child.name
+        # Reject reserved keys BEFORE the duplicate check so `prompt "a"
+        # / prompt "b"` reports the reserved-key error (which tells the
+        # user the real fix — move `prompt` to the template) rather than
+        # a misleading "duplicate prompt".
+        if key in ("prompt", "agent"):
+            raise ConfigError(
+                f"agent '{agent_name}' in {source}: '{key}' is not a "
+                f"valid default-config key (it's a template-level field, "
+                f"not an agent config key)"
+            )
         if key in seen_keys:
             raise ConfigError(
                 f"agent '{agent_name}' in {source}: duplicate key '{key}' "
                 f"in default-config"
             )
         seen_keys.add(key)
-        # `prompt` and `agent` are the template-level reserved names;
-        # inside default-config they have no well-defined semantics.
-        # Without this check, `prompt "be brief"` would silently become
-        # a `--prompt` CLI flag via ClaudeAgent._config_args — almost
-        # never what the user intended.
-        if key in ("prompt", "agent"):
+        # Props check runs BEFORE the args check so `model name="opus"`
+        # (which has no positional args, just a property) reports the
+        # real issue — properties are rejected — instead of a
+        # misleading "needs a value".
+        if getattr(child, "props", None):
             raise ConfigError(
-                f"agent '{agent_name}' in {source}: '{key}' is not a "
-                f"valid default-config key (it's a template-level field, "
-                f"not an agent config key)"
+                f"agent '{agent_name}' in {source}: '{key}' does not accept "
+                f"properties"
             )
         if not child.args:
             raise ConfigError(
@@ -217,11 +227,6 @@ def _parse_default_config(node, agent_name: str, source: Path) -> Dict[str, str]
             raise ConfigError(
                 f"agent '{agent_name}' in {source}: '{key}' has extra args "
                 f"(only a single value is supported)"
-            )
-        if getattr(child, "props", None):
-            raise ConfigError(
-                f"agent '{agent_name}' in {source}: '{key}' does not accept "
-                f"properties"
             )
         out[key] = _coerce_value(child.args[0])
     return out
@@ -344,8 +349,10 @@ def _parse_kdl_file(path: Path) -> AppConfig:
                 f"supported — nest it inside `agent \"claude\" {{ … }}` "
                 f"or `agent \"codex\" {{ … }}`"
             )
-        # Silently ignore hooks / alias — those belong to follow-up
-        # tickets #30 / #33 and are not implemented here.
+        # Any other top-level node (e.g. `hooks`, `alias` for follow-up
+        # tickets #30 / #33, or anything else not listed above) parses
+        # as a no-op. Template and agent blocks are the only two shapes
+        # this ticket knows about.
     return cfg
 
 
@@ -355,12 +362,14 @@ def _merge(base: AppConfig, over: AppConfig) -> AppConfig:
 
     # Agent defaults merge per key, not per agent block: a user-wide
     # `model` plus a project-scoped `effort` both survive. Same-key
-    # conflicts resolve project-wins (over beats base). Skip empty
-    # incoming dicts so the parser invariant "presence in agent_defaults
-    # implies at least one declared key" survives programmatic
-    # AppConfig construction too.
+    # conflicts resolve project-wins (over beats base). Empty incoming
+    # dicts are skipped on BOTH sides so the parser invariant "presence
+    # in agent_defaults implies at least one declared key" survives
+    # programmatic AppConfig construction too.
     merged_agent_defaults: Dict[str, Dict[str, str]] = {
-        agent: dict(keys) for agent, keys in base.agent_defaults.items()
+        agent: dict(keys)
+        for agent, keys in base.agent_defaults.items()
+        if keys
     }
     for agent, keys in over.agent_defaults.items():
         if not keys:

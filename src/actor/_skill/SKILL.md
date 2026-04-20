@@ -121,7 +121,10 @@ template "reviewer" {
 
 Unknown top-level nodes (`hooks`, `alias`) parse as no-ops today —
 they're reserved for follow-up tickets. Malformed KDL raises an error
-with the file path.
+with the file path. A top-level `default-config` block is explicitly
+rejected (not silently ignored) because it is almost always a
+misread of the schema — nest it under `agent "claude" { … }` or
+`agent "codex" { … }` instead.
 
 **Per-agent defaults:**
 
