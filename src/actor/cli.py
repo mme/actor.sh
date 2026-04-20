@@ -84,8 +84,7 @@ Examples:
     # Tri-state: default None = "no override" so a template's strip-api-keys
     # value wins. Explicit --strip-api-keys / --no-strip-api-keys set True/
     # False and beat the template. When neither CLI nor template sets the
-    # key, it's omitted from config and the agent's own default applies
-    # (ClaudeAgent / CodexAgent both treat a missing key as "strip").
+    # key, it's omitted from config and the agent's own default applies.
     p_new.add_argument("--strip-api-keys", action="store_const", const=True, default=None, dest="strip_api_keys", help="Strip API keys from environment (default)")
     p_new.add_argument("--no-strip-api-keys", action="store_const", const=False, dest="strip_api_keys", help="Pass API keys through to the agent")
     p_new.add_argument("--config", dest="config", action="append", default=[], metavar="KEY=VALUE", help="Config key=value pair (repeat for multiple)")

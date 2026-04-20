@@ -127,6 +127,10 @@ SKILL.md all agree and the drift check still works.
 CWD). Project values win when the same key appears in both. Missing files
 are ignored silently; malformed KDL raises `ConfigError` with the path.
 
+There is no `actor init` — create the file by hand (the `.actor/`
+directory is also used for worktrees and the SQLite DB, so it typically
+already exists).
+
 Templates are named presets for `actor new`:
 
 ```kdl

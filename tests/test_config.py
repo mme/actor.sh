@@ -215,6 +215,42 @@ class TestLoadConfigParseStrict(unittest.TestCase):
             "prompt",
         )
 
+    def test_props_on_template_node_raises(self):
+        self._expect_error(
+            'template "qa" flag="x" {\n    agent "claude"\n}\n',
+            "qa",
+        )
+
+    def test_empty_template_name_raises(self):
+        self._expect_error(
+            'template "" {\n    agent "claude"\n}\n',
+            "non-empty",
+        )
+
+
+class TestLoadConfigCoercion(unittest.TestCase):
+
+    def test_non_integer_float_keeps_decimal(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text('template "x" {\n    temperature 0.5\n}\n')
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(cfg.templates["x"].config["temperature"], "0.5")
+
+
+class TestLoadConfigHomeUnset(unittest.TestCase):
+
+    def test_home_none_skips_user_config_and_loads_project(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            proj = Path(cwd) / ".actor"
+            proj.mkdir()
+            (proj / "settings.kdl").write_text(
+                'template "qa" {\n    agent "claude"\n}\n'
+            )
+            cfg = load_config(cwd=Path(cwd), home=None)
+            self.assertIn("qa", cfg.templates)
+
 
 class TestLoadConfigCwdUnderHome(unittest.TestCase):
     """Walk-up must stop before re-parsing the user config as a 'project'."""

@@ -41,8 +41,10 @@ echo "fix it" | actor new fix-nav                                           # pr
 ```
 
 Templates come from `~/.actor/settings.kdl` (user) or
-`<repo>/.actor/settings.kdl` (project-local; project wins on overlap). A
-template can set the agent, prompt, and any config keys:
+`<repo>/.actor/settings.kdl` (project-local; project wins on overlap).
+These files don't exist by default — create them by hand when the user
+wants a template. A template can set the agent, prompt, and any config
+keys:
 
 ```kdl
 template "qa" {

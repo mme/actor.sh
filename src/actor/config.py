@@ -95,6 +95,10 @@ def _parse_template(node, source: Path) -> Template:
             f"template block in {source} must have a name "
             f"(e.g. `template \"qa\" {{ ... }}`)"
         )
+    if not node.args[0]:
+        raise ConfigError(
+            f"template block in {source} must have a non-empty name"
+        )
     if len(node.args) > 1:
         raise ConfigError(
             f"template '{node.args[0]}' in {source} has extra positional args"
@@ -145,11 +149,11 @@ def _parse_kdl_file(path: Path) -> AppConfig:
     try:
         text = path.read_text()
     except OSError as e:
-        raise ConfigError(f"could not read {path}: {e}")
+        raise ConfigError(f"could not read {path}: {e}") from e
     try:
         doc = kdl.parse(text)
     except kdl.ParseError as e:
-        raise ConfigError(f"parse error in {path}: {e}")
+        raise ConfigError(f"parse error in {path}: {e}") from e
     cfg = AppConfig()
     for node in doc.nodes:
         if node.name == "template":
