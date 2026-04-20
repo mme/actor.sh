@@ -23,6 +23,12 @@ from .errors import ActorError, ConfigError
 from .types import AgentKind
 
 
+# Template-level field names — rejected inside `default-config` and
+# when dropped bare under an `agent` block. Centralised so the two
+# parser checks can't drift apart.
+_RESERVED_TEMPLATE_KEYS = ("prompt", "agent")
+
+
 @dataclass
 class Template:
     name: str
@@ -34,6 +40,11 @@ class Template:
 @dataclass
 class AppConfig:
     templates: Dict[str, Template] = field(default_factory=dict)
+    # Parser invariant: every key present in `agent_defaults` maps to a
+    # non-empty dict — an `agent "claude" { default-config {} }` block
+    # contributes nothing, so the key is omitted entirely. `_merge`
+    # filters empty dicts on both sides so this invariant survives
+    # programmatic construction too.
     agent_defaults: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
 
@@ -198,11 +209,21 @@ def _parse_default_config(node, agent_name: str, source: Path) -> Dict[str, str]
         # / prompt "b"` reports the reserved-key error (which tells the
         # user the real fix — move `prompt` to the template) rather than
         # a misleading "duplicate prompt".
-        if key in ("prompt", "agent"):
+        if key in _RESERVED_TEMPLATE_KEYS:
             raise ConfigError(
                 f"agent '{agent_name}' in {source}: '{key}' is not a "
                 f"valid default-config key (it's a template-level field, "
                 f"not an agent config key)"
+            )
+        # Nested `default-config { default-config { … } }` is almost
+        # always a misread of the schema — without this branch the
+        # user gets a misleading "'default-config' needs a value"
+        # message from the args check below.
+        if key == "default-config":
+            raise ConfigError(
+                f"agent '{agent_name}' in {source}: `default-config` "
+                f"cannot be nested inside another `default-config` — "
+                f"list config keys directly"
             )
         if key in seen_keys:
             raise ConfigError(
@@ -295,6 +316,15 @@ def _parse_agent_block(node, source: Path) -> Tuple[str, Dict[str, str]]:
         # silently accepted as forward-compat no-ops for follow-up
         # tickets (e.g. `hooks {}` from #30).
         if child.args:
+            # `prompt` / `agent` are template-level fields, not config
+            # keys — pointing the user at `default-config` would be
+            # actively wrong because those names are rejected there too.
+            if child.name in _RESERVED_TEMPLATE_KEYS:
+                raise ConfigError(
+                    f"agent '{name}' in {source}: `{child.name}` is a "
+                    f"template-level field, not an agent config key — "
+                    f"put it on a `template` block instead"
+                )
             raise ConfigError(
                 f"agent '{name}' in {source}: `{child.name}` cannot sit "
                 f"directly under an `agent` block — nest config keys "

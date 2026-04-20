@@ -591,6 +591,41 @@ class TestLoadConfigAgentDefaultsStrict(unittest.TestCase):
             "'agent' is not a valid default-config key",
         )
 
+    def test_nested_default_config_raises_helpful_error(self):
+        # Without the dedicated branch, nesting `default-config` inside
+        # itself would fall through to the args check and emit
+        # "'default-config' needs a value", which tells the user nothing
+        # useful.
+        self._expect_error(
+            'agent "claude" {\n'
+            '    default-config {\n'
+            '        default-config {\n'
+            '            model "opus"\n'
+            '        }\n'
+            '    }\n'
+            '}\n',
+            "cannot be nested inside another `default-config`",
+        )
+
+    def test_prompt_directly_under_agent_points_to_template(self):
+        # The generic "nest config keys inside default-config" hint is
+        # actively wrong for `prompt` / `agent` — those names are
+        # rejected there too. Users need to be pointed at `template`.
+        self._expect_error(
+            'agent "claude" {\n'
+            '    prompt "be brief"\n'
+            '}\n',
+            "put it on a `template` block",
+        )
+
+    def test_agent_directly_under_agent_points_to_template(self):
+        self._expect_error(
+            'agent "claude" {\n'
+            '    agent "codex"\n'
+            '}\n',
+            "put it on a `template` block",
+        )
+
     def test_forward_compat_block_children_of_agent_still_silently_parse(self):
         # The key-with-value guard must not break forward-compat: a
         # block-style child (e.g. `hooks { … }` from #30) has no args
