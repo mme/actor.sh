@@ -380,6 +380,22 @@ class TestLoadConfigHooks(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 load_config(cwd=Path(cwd), home=Path(home))
 
+    def test_duplicate_hooks_block_raises(self):
+        # Two `hooks { ... }` blocks in the same file is ambiguous — with
+        # last-write-wins, a user editing the top block and not noticing
+        # the shadowing bottom block would silently have no effect. Reject
+        # so the mistake surfaces at parse time.
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(
+                'hooks {\n    on-start "echo a"\n}\n'
+                'hooks {\n    on-run "echo b"\n}\n'
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn("duplicate", str(ctx.exception).lower())
+
 
 class TestLoadConfigHooksPrecedence(unittest.TestCase):
 

@@ -11,6 +11,7 @@ from .errors import (
     ActorError,
     AgentNotFoundError,
     ConfigError,
+    HookFailedError,
     IsRunningError,
     NotRunningError,
 )
@@ -212,11 +213,17 @@ def cmd_new(
         )
         try:
             run_hook("on-start", on_start, env, Path(actor_dir), runner=hook_runner)
-        except Exception:
+        except HookFailedError:
             try:
                 db.delete_actor(name)
-            except Exception:
-                pass
+            except Exception as rollback_err:
+                # Rollback best-effort: surface the failure so the operator
+                # knows the DB row may still be present after the hook aborted.
+                print(
+                    f"warning: failed to roll back actor row for '{name}' "
+                    f"after on-start hook failure: {rollback_err}",
+                    file=sys.stderr,
+                )
             if worktree:
                 wt_path = _worktree_path(name)
                 try:
@@ -349,6 +356,8 @@ def cmd_interactive(
     proc_mgr: ProcessManager,
     name: str,
     runner: Optional[Callable[[List[str], Path, dict], int]] = None,
+    hooks: Optional["Hooks"] = None,
+    hook_runner: Optional[HookRunner] = None,
 ) -> Tuple[int, str]:
     """`runner` is injectable so tests can drive without spawning a real
     subprocess. Returns (exit_code, status_message)."""
@@ -372,6 +381,18 @@ def cmd_interactive(
         raise ActorError(
             f"actor directory '{actor.dir}' does not exist \u2014 use 'actor discard {name}' to clean up"
         )
+
+    # on-run hook fires before the Run row is inserted, mirroring cmd_run.
+    on_run = hooks.on_run if hooks is not None else None
+    if on_run is not None:
+        hook_env_vars = hook_env(
+            os.environ,
+            actor_name=name,
+            actor_dir=dir_path,
+            actor_agent=actor.agent.as_str(),
+            actor_session_id=actor.agent_session,
+        )
+        run_hook("on-run", on_run, hook_env_vars, dir_path, runner=hook_runner)
 
     argv = agent.interactive_argv(session_id, actor.config)
 
@@ -690,16 +711,22 @@ def cmd_discard(
     # on-discard hook — fires after resource cleanup, before DB deletion.
     on_discard = hooks.on_discard if hooks is not None else None
     if on_discard is not None:
+        actor_dir = Path(actor.dir)
+        # If the worktree was deleted out of band, using it as subprocess
+        # cwd raises FileNotFoundError. Fall back to the user's home so
+        # the hook still runs; ACTOR_DIR still reports the original path
+        # so the hook script can detect the missing-worktree case.
+        hook_cwd = actor_dir if actor_dir.is_dir() else Path.home()
         env = hook_env(
             os.environ,
             actor_name=name,
-            actor_dir=Path(actor.dir),
+            actor_dir=actor_dir,
             actor_agent=actor.agent.as_str(),
             actor_session_id=actor.agent_session,
         )
         try:
-            run_hook("on-discard", on_discard, env, Path(actor.dir), runner=hook_runner)
-        except Exception:
+            run_hook("on-discard", on_discard, env, hook_cwd, runner=hook_runner)
+        except HookFailedError:
             if not force:
                 raise
             # --force: swallow the failure and continue with deletion.

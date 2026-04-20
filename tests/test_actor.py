@@ -928,6 +928,59 @@ class TestCmdInteractive(unittest.TestCase):
         latest = db.latest_run("test")
         self.assertEqual(latest.status, Status.STOPPED)
 
+    def test_interactive_fires_on_run_hook_before_run_insert(self):
+        # Hook parity: `actor run -i` is still a run, so on-run fires
+        # with the same env and ordering as `actor run`.
+        from actor import Hooks
+        db = self._db()
+        self._actor_with_session(db)
+        pm = FakeProcessManager()
+        agent = FakeAgent()
+        captured: dict = {}
+
+        def hook_runner(cmd, env, cwd):
+            captured["cmd"] = cmd
+            captured["env"] = dict(env)
+            # Run row must not exist yet — on-run fires BEFORE insert.
+            self.assertIsNone(db.latest_run("test"))
+            return 0
+
+        cmd_interactive(
+            db, agent, pm, name="test",
+            runner=lambda argv, cwd, env: 0,
+            hooks=Hooks(on_run="echo run"),
+            hook_runner=hook_runner,
+        )
+        self.assertEqual(captured["cmd"], "echo run")
+        self.assertEqual(captured["env"]["ACTOR_NAME"], "test")
+        self.assertEqual(captured["env"]["ACTOR_SESSION_ID"], "S1")
+
+    def test_interactive_on_run_failure_aborts_without_run(self):
+        from actor import Hooks, HookFailedError
+        db = self._db()
+        self._actor_with_session(db)
+        pm = FakeProcessManager()
+        agent = FakeAgent()
+
+        def hook_runner(cmd, env, cwd):
+            return 3
+
+        agent_called = {"count": 0}
+
+        def interactive_runner(argv, cwd, env):
+            agent_called["count"] += 1
+            return 0
+
+        with self.assertRaises(HookFailedError):
+            cmd_interactive(
+                db, agent, pm, name="test",
+                runner=interactive_runner,
+                hooks=Hooks(on_run="false"),
+                hook_runner=hook_runner,
+            )
+        self.assertEqual(agent_called["count"], 0)
+        self.assertIsNone(db.latest_run("test"))
+
 
 # ──────────────────────────────────────────────────────────────────────
 #  Test: cmd_list  (17 tests from list.rs)
@@ -2024,6 +2077,30 @@ class TestCmdDiscard(unittest.TestCase):
         with self.assertRaises(NotFound):
             db.get_actor("parent")
 
+    def test_discard_cycle_terminates_via_visited(self):
+        # A parent/child chain that loops back on itself (shouldn't happen
+        # with the insert-time parent check but DB corruption / manual edit
+        # could produce it) must not recurse forever — the `_visited` set
+        # guard terminates the traversal.
+        db = self._db()
+        # Create two actors; then rewrite the DB directly so each claims
+        # the other as its parent, creating a 2-cycle.
+        create_actor(db, "a", config=[])
+        b = make_actor("b", parent="a", dir="/tmp")
+        db.insert_actor(b)
+        # Point 'a' at 'b' to complete the cycle. Bypass insert_actor; use
+        # raw SQL since list_children reads from the parent column.
+        db._conn.execute(  # type: ignore[attr-defined]
+            "UPDATE actors SET parent = ? WHERE name = ?", ("b", "a"),
+        )
+        db._conn.commit()  # type: ignore[attr-defined]
+        pm = FakeProcessManager()
+        # Must return (not hang) and must delete both.
+        cmd_discard(db, pm, name="a")
+        for n in ("a", "b"):
+            with self.assertRaises(NotFound):
+                db.get_actor(n)
+
 
 # ──────────────────────────────────────────────────────────────────────
 #  Test: ClaudeAgent  (16 tests from agents/claude.rs)
@@ -2291,7 +2368,7 @@ class TestCmdNewOnStartHook(unittest.TestCase):
         self.assertEqual(seen[0]["cmd"], "echo start")
         self.assertEqual(seen[0]["env"]["ACTOR_NAME"], "foo")
         self.assertEqual(seen[0]["env"]["ACTOR_AGENT"], "claude")
-        self.assertEqual(str(seen[0]["cwd"]), actor.dir)
+        self.assertEqual(seen[0]["cwd"], Path(actor.dir))
 
     def test_on_start_failure_rolls_back_actor(self):
         from actor import Hooks, HookFailedError
@@ -2362,6 +2439,48 @@ class TestCmdNewOnStartHook(unittest.TestCase):
             hook_runner=runner,
         )
         self.assertEqual(seen, [])
+
+    def test_on_start_rollback_failure_warns_and_propagates(self):
+        # The rollback after an on-start failure is best effort — if
+        # db.delete_actor raises, we should still surface the original
+        # HookFailedError and warn the operator that the DB row may still
+        # be present.
+        from io import StringIO
+        from unittest.mock import patch
+        from actor import Hooks, HookFailedError
+
+        db = self._db()
+        git = FakeGit()
+
+        def runner(cmd, env, cwd):
+            return 1
+
+        original_delete = db.delete_actor
+
+        def boom(name):
+            raise RuntimeError("db busy")
+
+        db.delete_actor = boom  # type: ignore[method-assign]
+
+        stderr = StringIO()
+        with patch("sys.stderr", stderr):
+            with self.assertRaises(HookFailedError):
+                cmd_new(
+                    db, git,
+                    name="foo",
+                    dir="/tmp",
+                    no_worktree=True,
+                    base=None,
+                    agent_name="claude",
+                    config_pairs=[],
+                    hooks=Hooks(on_start="false"),
+                    hook_runner=runner,
+                )
+        self.assertIn("failed to roll back", stderr.getvalue())
+        self.assertIn("foo", stderr.getvalue())
+
+        # Restore for any further use (paranoia; db is per-test anyway).
+        db.delete_actor = original_delete  # type: ignore[method-assign]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -2599,6 +2718,55 @@ class TestCmdDiscardOnDiscardHook(unittest.TestCase):
         )
         self.assertEqual(seen, [])
 
+    def test_on_discard_missing_dir_reroutes_cwd_to_home(self):
+        # If the worktree was deleted out of band the stored actor.dir no
+        # longer exists. Passing that path to subprocess as cwd would raise
+        # FileNotFoundError. Fall back to Path.home() so the hook still runs
+        # (a hook that cares about the worktree will notice dir is gone on
+        # its own).
+        from actor import Hooks
+        seen = {}
+        db = self._db()
+        actor = make_actor("test", dir="/tmp/does-not-exist-xyz-123")
+        db.insert_actor(actor)
+        pm = FakeProcessManager()
+
+        def runner(cmd, env, cwd):
+            seen["cwd"] = cwd
+            seen["actor_dir"] = env.get("ACTOR_DIR")
+            return 0
+
+        cmd_discard(
+            db, pm, name="test",
+            hooks=Hooks(on_discard="echo"),
+            hook_runner=runner,
+        )
+        self.assertEqual(seen["cwd"], Path.home())
+        # ACTOR_DIR still reflects the original (now-missing) path, so the
+        # hook script can detect and react to the missing-worktree case.
+        self.assertEqual(seen["actor_dir"], "/tmp/does-not-exist-xyz-123")
+
+    def test_on_discard_existing_dir_uses_actor_dir_as_cwd(self):
+        # Sanity: when actor.dir exists, cwd is the actor's worktree.
+        from actor import Hooks
+        seen = {}
+        db = self._db()
+        with tempfile.TemporaryDirectory() as tmp:
+            actor = make_actor("test", dir=tmp)
+            db.insert_actor(actor)
+            pm = FakeProcessManager()
+
+            def runner(cmd, env, cwd):
+                seen["cwd"] = cwd
+                return 0
+
+            cmd_discard(
+                db, pm, name="test",
+                hooks=Hooks(on_discard="echo"),
+                hook_runner=runner,
+            )
+            self.assertEqual(seen["cwd"], Path(tmp))
+
 
 # ──────────────────────────────────────────────────────────────────────
 #  Test: hooks.py (runner + env builder) — issue #30
@@ -2646,6 +2814,21 @@ class TestHookEnv(unittest.TestCase):
             actor_session_id=None,
         )
         self.assertNotIn("ACTOR_NAME", base)
+
+    def test_hook_env_clears_stale_session_id(self):
+        # When the parent env already carries ACTOR_SESSION_ID (e.g. because a
+        # parent actor's hook is firing a nested one), we must not leak it
+        # into a child actor that has no session yet.
+        from pathlib import Path
+        from actor.hooks import hook_env
+        env = hook_env(
+            {"ACTOR_SESSION_ID": "parent-session"},
+            actor_name="child",
+            actor_dir=Path("/tmp/child"),
+            actor_agent="claude",
+            actor_session_id=None,
+        )
+        self.assertNotIn("ACTOR_SESSION_ID", env)
 
 
 class TestRunHook(unittest.TestCase):
@@ -2713,15 +2896,15 @@ class TestDefaultHookRunner(unittest.TestCase):
         from pathlib import Path
         from actor.hooks import _default_hook_runner
         with tempfile.TemporaryDirectory() as d:
-            rc = _default_hook_runner("true", dict(os.environ), Path(d))
-            self.assertEqual(rc, 0)
+            result = _default_hook_runner("true", dict(os.environ), Path(d))
+            self.assertEqual(result.exit_code, 0)
 
     def test_default_runner_nonzero_exit(self):
         from pathlib import Path
         from actor.hooks import _default_hook_runner
         with tempfile.TemporaryDirectory() as d:
-            rc = _default_hook_runner("false", dict(os.environ), Path(d))
-            self.assertNotEqual(rc, 0)
+            result = _default_hook_runner("false", dict(os.environ), Path(d))
+            self.assertNotEqual(result.exit_code, 0)
 
     def test_default_runner_sees_env(self):
         from pathlib import Path
@@ -2729,20 +2912,87 @@ class TestDefaultHookRunner(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             env = dict(os.environ)
             env["HOOK_TEST_VAR"] = "xyz"
-            rc = _default_hook_runner(
+            result = _default_hook_runner(
                 '[ "$HOOK_TEST_VAR" = "xyz" ]', env, Path(d),
             )
-            self.assertEqual(rc, 0)
+            self.assertEqual(result.exit_code, 0)
 
     def test_default_runner_cwd_is_honored(self):
         from pathlib import Path
         from actor.hooks import _default_hook_runner
         with tempfile.TemporaryDirectory() as d:
             real = str(Path(d).resolve())
-            rc = _default_hook_runner(
+            result = _default_hook_runner(
                 f'[ "$(pwd -P)" = "{real}" ]', dict(os.environ), Path(d),
             )
-            self.assertEqual(rc, 0)
+            self.assertEqual(result.exit_code, 0)
+
+    def test_default_runner_captures_stdout_and_stderr(self):
+        # Hooks run in contexts (MCP server JSON on stdout, TUI redraw) where
+        # inherited stdio would corrupt the parent. Capture both streams so
+        # the operator still sees the output inside HookFailedError but the
+        # parent process stays clean.
+        from pathlib import Path
+        from actor.hooks import _default_hook_runner
+        with tempfile.TemporaryDirectory() as d:
+            result = _default_hook_runner(
+                'echo out; echo err 1>&2', dict(os.environ), Path(d),
+            )
+            self.assertEqual(result.exit_code, 0)
+            self.assertIn("out", result.stdout)
+            self.assertIn("err", result.stderr)
+
+    def test_default_runner_closes_stdin(self):
+        # A hook that reads stdin must not block forever waiting for input
+        # from an operator who may not even have a TTY attached.
+        from pathlib import Path
+        from actor.hooks import _default_hook_runner
+        with tempfile.TemporaryDirectory() as d:
+            # `cat` reads stdin until EOF. If stdin is DEVNULL, it reads zero
+            # bytes, prints nothing, exits 0 — we assert we don't hang.
+            result = _default_hook_runner("cat", dict(os.environ), Path(d))
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.stdout, "")
+
+
+class TestHookFailedErrorOutput(unittest.TestCase):
+
+    def test_error_message_includes_stderr_tail(self):
+        from actor.errors import HookFailedError
+        err = HookFailedError(
+            event="on-run",
+            command="false",
+            exit_code=1,
+            stdout="",
+            stderr="boom: something went wrong\n",
+        )
+        msg = str(err)
+        self.assertIn("on-run", msg)
+        self.assertIn("boom", msg)
+
+    def test_error_without_output_omits_tail(self):
+        from actor.errors import HookFailedError
+        err = HookFailedError(
+            event="on-start", command="false", exit_code=1,
+        )
+        msg = str(err)
+        self.assertIn("on-start", msg)
+        self.assertIn("exit 1", msg)
+
+    def test_default_runner_failure_surfaces_stderr_in_error(self):
+        from pathlib import Path
+        from actor.hooks import run_hook
+        from actor.errors import HookFailedError
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(HookFailedError) as ctx:
+                run_hook(
+                    "on-run",
+                    'echo out; echo err-from-hook 1>&2; exit 7',
+                    dict(os.environ),
+                    Path(d),
+                )
+            self.assertEqual(ctx.exception.exit_code, 7)
+            self.assertIn("err-from-hook", str(ctx.exception))
 
 
 # ──────────────────────────────────────────────────────────────────────

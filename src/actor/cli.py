@@ -339,10 +339,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         return _create_agent(actor.agent)
 
     try:
-        # Load config once up front — cmd_new needs it for templates, and
-        # every hook-aware command (new / run / discard) needs app_config.hooks.
-        # The import is kept function-local so tests can patch
-        # `actor.config.load_config` without a module-level binding race.
+        # Load config once so templates (for `new`) and hooks (for every
+        # lifecycle command) come from a single parse. The import stays
+        # function-local because several tests patch
+        # `actor.config.load_config` — a module-level `from .config import
+        # load_config` would bind the name at CLI import time and dodge
+        # the patch.
         from .config import load_config
         app_config = load_config()
 
@@ -403,6 +405,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 agent = agent_for(args.name)
                 exit_code, msg = cmd_interactive(
                     db, agent, proc_mgr, name=args.name,
+                    hooks=app_config.hooks,
                 )
                 print(msg, file=sys.stderr)
                 # POSIX convention for signal termination: 128 + signum.

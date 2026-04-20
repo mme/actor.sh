@@ -217,6 +217,7 @@ def _parse_kdl_file(path: Path) -> AppConfig:
     except kdl.ParseError as e:
         raise ConfigError(f"parse error in {path}: {e}") from e
     cfg = AppConfig()
+    hooks_seen = False
     for node in doc.nodes:
         if node.name == "template":
             tpl = _parse_template(node, path)
@@ -226,6 +227,11 @@ def _parse_kdl_file(path: Path) -> AppConfig:
                 )
             cfg.templates[tpl.name] = tpl
         elif node.name == "hooks":
+            if hooks_seen:
+                raise ConfigError(
+                    f"duplicate hooks block in {path}"
+                )
+            hooks_seen = True
             cfg.hooks = _parse_hooks(node, path)
         # Silently ignore agent / alias — those belong to follow-up
         # tickets #31 / #33 and are not implemented here.

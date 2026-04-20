@@ -136,11 +136,16 @@ hooks {
 
 - `on-start` — fires once during `actor new`, after the actor row is
   recorded. Non-zero rolls back the new actor (row + worktree).
-- `on-run` — fires before every `actor run`, before the Run row is
-  inserted. Non-zero aborts the run.
+- `on-run` — fires before every `actor run` (including `actor run -i`
+  interactive), before the Run row is inserted. Non-zero aborts the run.
 - `on-discard` — fires during `actor discard`, after resource cleanup
   (running agents stopped) and before the DB row is removed. Non-zero
-  aborts discard unless `actor discard --force` / `-f` is passed.
+  aborts discard unless `actor discard --force` / `-f` is passed. If the
+  actor's worktree directory no longer exists, the hook runs from
+  `$HOME` instead — `ACTOR_DIR` still points at the (missing) path so
+  the hook can react. When `--force` is used after a hook failure, the
+  actor is fully discarded; any side effects the hook had already
+  performed are left as-is.
 
 Project hooks override user hooks per event (same merge rule as
 templates).

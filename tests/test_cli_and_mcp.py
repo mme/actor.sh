@@ -281,9 +281,11 @@ class NewCommandTests(unittest.TestCase):
 
 class RunCommandTests(unittest.TestCase):
     def test_run_passes_config_overrides(self):
+        from actor import AppConfig
         cmd_run = MagicMock(return_value="ok")
         fake_db = MagicMock()
-        with patch("actor.cli.cmd_run", cmd_run), \
+        with patch("actor.config.load_config", return_value=AppConfig()), \
+             patch("actor.cli.cmd_run", cmd_run), \
              patch("actor.cli.Database") as db_cls, \
              patch("actor.cli._create_agent", return_value=MagicMock()):
             db_cls.open.return_value = fake_db
@@ -296,10 +298,12 @@ class RunCommandTests(unittest.TestCase):
 
     def test_run_dash_i_dispatches_to_cmd_interactive(self):
         """`actor run foo -i` must route through cmd_interactive, not cmd_run."""
+        from actor import AppConfig
         cmd_interactive = MagicMock(return_value=(0, "ok"))
         cmd_run = MagicMock(return_value="should-not-run")
         fake_db = MagicMock()
-        with patch("actor.cli.cmd_interactive", cmd_interactive), \
+        with patch("actor.config.load_config", return_value=AppConfig()), \
+             patch("actor.cli.cmd_interactive", cmd_interactive), \
              patch("actor.cli.cmd_run", cmd_run), \
              patch("actor.cli.Database") as db_cls, \
              patch("actor.cli._create_agent", return_value=MagicMock()):
@@ -314,10 +318,12 @@ class RunCommandTests(unittest.TestCase):
 
     def test_run_dash_i_maps_signal_to_posix_exit(self):
         """Negative exit code from cmd_interactive (signal) → 128 + signum."""
+        from actor import AppConfig
         import signal as _sig
         cmd_interactive = MagicMock(return_value=(-_sig.SIGTERM, "stopped"))
         fake_db = MagicMock()
-        with patch("actor.cli.cmd_interactive", cmd_interactive), \
+        with patch("actor.config.load_config", return_value=AppConfig()), \
+             patch("actor.cli.cmd_interactive", cmd_interactive), \
              patch("actor.cli.Database") as db_cls, \
              patch("actor.cli._create_agent", return_value=MagicMock()):
             db_cls.open.return_value = fake_db
@@ -327,8 +333,10 @@ class RunCommandTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 128 + _sig.SIGTERM)
 
     def test_run_without_prompt_and_tty_exits_nonzero(self):
+        from actor import AppConfig
         fake_db = MagicMock()
-        with patch("actor.cli.Database") as db_cls:
+        with patch("actor.config.load_config", return_value=AppConfig()), \
+             patch("actor.cli.Database") as db_cls:
             db_cls.open.return_value = fake_db
             stdin = io.StringIO("")
             stdin.isatty = lambda: True  # type: ignore[assignment]
