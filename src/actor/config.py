@@ -194,6 +194,27 @@ def _parse_kdl_file(path: Path) -> AppConfig:
                     f"duplicate template '{tpl.name}' in {path}"
                 )
             cfg.templates[tpl.name] = tpl
+        elif node.name == "configure-default":
+            if not node.args or not isinstance(node.args[0], str):
+                raise ConfigError(
+                    f"configure-default in {path} must be a string: "
+                    f'configure-default "on" | "off"'
+                )
+            if len(node.args) > 1:
+                raise ConfigError(
+                    f"configure-default in {path} accepts exactly one argument"
+                )
+            if getattr(node, "props", None):
+                raise ConfigError(
+                    f"configure-default in {path} does not accept properties"
+                )
+            value = node.args[0]
+            if value not in ("on", "off"):
+                raise ConfigError(
+                    f"configure-default in {path} must be \"on\" or \"off\", "
+                    f"got {value!r}"
+                )
+            cfg.configure_default = value
         # Silently ignore hooks / agent / alias — those belong to follow-up
         # tickets #30 / #31 / #33 and are not implemented here.
     return cfg

@@ -299,6 +299,50 @@ class TestLoadConfigCwdUnderHome(unittest.TestCase):
             self.assertEqual(cfg.templates["qa"].agent, "codex")
 
 
+class TestConfigureDefaultParsing(unittest.TestCase):
+
+    def _load(self, body: str) -> AppConfig:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(body)
+            return load_config(cwd=Path(cwd), home=Path(home))
+
+    def test_default_when_absent_is_on(self):
+        cfg = self._load('template "qa" {\n    agent "claude"\n}\n')
+        self.assertEqual(cfg.configure_default, "on")
+
+    def test_explicit_off(self):
+        cfg = self._load('configure-default "off"\n')
+        self.assertEqual(cfg.configure_default, "off")
+
+    def test_explicit_on(self):
+        cfg = self._load('configure-default "on"\n')
+        self.assertEqual(cfg.configure_default, "on")
+
+    def test_invalid_value_raises(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text('configure-default "maybe"\n')
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn("configure-default", str(ctx.exception))
+
+    def test_project_off_overrides_user_on(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            (Path(home) / ".actor").mkdir()
+            (Path(home) / ".actor" / "settings.kdl").write_text(
+                'configure-default "on"\n'
+            )
+            (Path(cwd) / ".actor").mkdir()
+            (Path(cwd) / ".actor" / "settings.kdl").write_text(
+                'configure-default "off"\n'
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(cfg.configure_default, "off")
+
+
 class TestAppConfigDefaults(unittest.TestCase):
 
     def test_empty_app_config_has_no_agents_and_on_default(self):
