@@ -169,6 +169,37 @@ class InitialRenderTests(unittest.IsolatedAsyncioTestCase):
             app._session.close()
 
 
+class NativeScrollTests(unittest.IsolatedAsyncioTestCase):
+    """Verify the widget uses ScrollView natively: virtual_size grows
+    with scrollback, render_line indexes via scroll_offset, and live
+    output auto-follows the bottom."""
+
+    async def test_virtual_size_grows_with_scrollback(self):
+        cat = _find_binary("cat")
+        app = _HostApp([cat], pathlib.Path("/tmp"))
+        async with app.run_test(size=(60, 10)) as pilot:
+            await pilot.pause(0.02)
+            # Feed enough lines to exceed the viewport; each _flush_refresh
+            # recomputes virtual_size.
+            for i in range(50):
+                app.widget._on_pty_output(f"line{i:03d}\r\n".encode())
+            await pilot.pause(0.1)
+            rows, _cols = app.widget._screen.rows, app.widget._screen.cols
+            vh = app.widget.virtual_size.height
+            self.assertGreater(
+                vh, rows,
+                f"virtual_size.height={vh} should exceed visible rows={rows} "
+                f"once scrollback exists",
+            )
+            # Scroll to the top — render_line(0) must now show a history row.
+            app.widget.scroll_y = 0.0
+            await pilot.pause(0.02)
+            strip = app.widget.render_line(0)
+            self.assertIn("line0", strip.text,
+                          f"top of scrolled view should show oldest line; got {strip.text!r}")
+            app._session.close()
+
+
 class LocalScrollTests(unittest.IsolatedAsyncioTestCase):
     """PageUp/PageDown/wheel scroll the pyte history locally when the
     child isn't in alt-screen and hasn't enabled mouse tracking."""

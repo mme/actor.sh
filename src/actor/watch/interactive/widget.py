@@ -5,11 +5,12 @@ import time
 from typing import Optional
 
 from textual import events
+from textual.geometry import Size
 from textual.message import Message
 from textual.reactive import reactive
+from textual.scroll_view import ScrollView
 from textual.strip import Strip
 from textual.timer import Timer
-from textual.widget import Widget
 
 from .batcher import RefreshBatcher
 from .diagnostics import DiagnosticRecorder, EventKind
@@ -23,17 +24,19 @@ from .pty_session import PtySession
 from .screen import TerminalScreen
 
 
-class TerminalWidget(Widget, can_focus=True):
-    """An embedded terminal view bound to a PtySession."""
+class TerminalWidget(ScrollView, can_focus=True):
+    """An embedded terminal view bound to a PtySession.
 
-    # overflow-y: auto gives us Textual's native scrolling: wheel +
-    # PageUp/PageDown drive self.scroll_y and render_line is called
-    # with virtual-y coords.
+    Inherits from ScrollView so PageUp/PageDown/wheel drive Textual's
+    native scroll. render_line(y) receives viewport-relative y; we
+    translate via self.scroll_offset.y to index into the virtual row
+    list (pyte history + visible buffer).
+    """
+
     DEFAULT_CSS = """
     TerminalWidget {
         background: $background;
         color: $foreground;
-        overflow-y: auto;
         scrollbar-size-vertical: 1;
     }
     """
@@ -124,11 +127,11 @@ class TerminalWidget(Widget, can_focus=True):
             self.scroll_end(animate=False)
 
     def _update_virtual_size(self) -> None:
-        from textual.geometry import Size
         rows = self._screen.rows + self._screen.history_size()
         cols = max(self.size.width, self._screen.cols)
-        if self.virtual_size != Size(cols, rows):
-            self.virtual_size = Size(cols, rows)
+        new_size = Size(cols, rows)
+        if self.virtual_size != new_size:
+            self.virtual_size = new_size
 
     def _is_following_bottom(self) -> bool:
         # Near-bottom if within a couple rows of the max scroll. Newly
@@ -157,10 +160,11 @@ class TerminalWidget(Widget, can_focus=True):
             self._sync_size(self.size.height, self.size.width)
         if not self._first_output_received:
             return self._placeholder_line(y)
+        # ScrollView passes viewport-relative y; translate to virtual.
+        virtual_y = y + int(self.scroll_offset.y)
         strips = self._get_strips()
-        # y here is a *virtual* row index (covers scrollback + visible).
-        if 0 <= y < len(strips):
-            return strips[y]
+        if 0 <= virtual_y < len(strips):
+            return strips[virtual_y]
         return Strip.blank(self.size.width)
 
     def _placeholder_line(self, y: int) -> Strip:
