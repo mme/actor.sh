@@ -237,6 +237,8 @@ def cmd_run(
     name: str,
     prompt: str,
     config_pairs: List[str],
+    hooks: Optional["Hooks"] = None,
+    hook_runner: Optional[HookRunner] = None,
 ) -> str:
     actor = db.get_actor(name)
 
@@ -255,6 +257,19 @@ def cmd_run(
         raise ActorError(
             f"actor directory '{actor.dir}' does not exist \u2014 use 'actor discard {name}' to clean up"
         )
+
+    # on-run hook fires before the Run row is inserted so a failing
+    # pre-flight check doesn't leave a phantom run behind.
+    on_run = hooks.on_run if hooks is not None else None
+    if on_run is not None:
+        env = hook_env(
+            os.environ,
+            actor_name=name,
+            actor_dir=dir_path,
+            actor_agent=actor.agent.as_str(),
+            actor_session_id=actor.agent_session,
+        )
+        run_hook("on-run", on_run, env, dir_path, runner=hook_runner)
 
     # Merge config: actor defaults + run overrides
     run_overrides = parse_config(config_pairs)

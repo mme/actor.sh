@@ -2365,6 +2365,107 @@ class TestCmdNewOnStartHook(unittest.TestCase):
 
 
 # ──────────────────────────────────────────────────────────────────────
+#  Test: cmd_run on-run hook (issue #30)
+# ──────────────────────────────────────────────────────────────────────
+
+class TestCmdRunOnRunHook(unittest.TestCase):
+
+    def _db(self) -> Database:
+        return Database.open(":memory:")
+
+    def test_on_run_fires_with_env(self):
+        from actor import Hooks
+        seen = []
+
+        def runner(cmd, env, cwd):
+            seen.append(dict(env))
+            return 0
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+        agent = FakeAgent()
+        pm = FakeProcessManager()
+        cmd_run(
+            db, agent, pm,
+            name="test",
+            prompt="do the thing",
+            config_pairs=[],
+            hooks=Hooks(on_run="echo run"),
+            hook_runner=runner,
+        )
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["ACTOR_NAME"], "test")
+        self.assertEqual(seen[0]["ACTOR_AGENT"], "claude")
+
+    def test_on_run_failure_aborts_without_run_row(self):
+        from actor import Hooks, HookFailedError
+
+        def runner(cmd, env, cwd):
+            return 2
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+        agent = FakeAgent()
+        pm = FakeProcessManager()
+        with self.assertRaises(HookFailedError):
+            cmd_run(
+                db, agent, pm,
+                name="test",
+                prompt="go",
+                config_pairs=[],
+                hooks=Hooks(on_run="false"),
+                hook_runner=runner,
+            )
+        self.assertEqual(agent.calls, [])
+        self.assertIsNone(db.latest_run("test"))
+
+    def test_on_run_sees_session_id_when_resuming(self):
+        from actor import Hooks
+        seen = []
+
+        def runner(cmd, env, cwd):
+            seen.append(dict(env))
+            return 0
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+        db.update_actor_session("test", "sess-42")
+        agent = FakeAgent()
+        pm = FakeProcessManager()
+        cmd_run(
+            db, agent, pm,
+            name="test",
+            prompt="continue",
+            config_pairs=[],
+            hooks=Hooks(on_run="echo"),
+            hook_runner=runner,
+        )
+        self.assertEqual(seen[0]["ACTOR_SESSION_ID"], "sess-42")
+
+    def test_no_on_run_hook_no_runner_calls(self):
+        from actor import Hooks
+        seen = []
+
+        def runner(cmd, env, cwd):
+            seen.append(cmd)
+            return 0
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+        agent = FakeAgent()
+        pm = FakeProcessManager()
+        cmd_run(
+            db, agent, pm,
+            name="test",
+            prompt="go",
+            config_pairs=[],
+            hooks=Hooks(),
+            hook_runner=runner,
+        )
+        self.assertEqual(seen, [])
+
+
+# ──────────────────────────────────────────────────────────────────────
 #  Test: hooks.py (runner + env builder) — issue #30
 # ──────────────────────────────────────────────────────────────────────
 
