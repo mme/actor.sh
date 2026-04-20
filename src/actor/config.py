@@ -277,8 +277,17 @@ def _parse_kdl_file(path: Path) -> AppConfig:
 def _merge(base: AppConfig, over: AppConfig) -> AppConfig:
     merged_templates = dict(base.templates)
     merged_templates.update(over.templates)
-    merged_agent_defaults = dict(base.agent_defaults)
-    merged_agent_defaults.update(over.agent_defaults)
+
+    # Agent defaults merge per key, not per agent block: a user-wide
+    # `model` plus a project-scoped `effort` both survive. Same-key
+    # conflicts resolve project-wins (over beats base).
+    merged_agent_defaults: Dict[str, Dict[str, str]] = {
+        agent: dict(keys) for agent, keys in base.agent_defaults.items()
+    }
+    for agent, keys in over.agent_defaults.items():
+        existing = merged_agent_defaults.setdefault(agent, {})
+        existing.update(keys)
+
     return AppConfig(
         templates=merged_templates,
         agent_defaults=merged_agent_defaults,

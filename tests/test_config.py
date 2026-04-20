@@ -490,5 +490,97 @@ class TestLoadConfigAgentDefaultsStrict(unittest.TestCase):
         )
 
 
+class TestLoadConfigAgentDefaultsMerge(unittest.TestCase):
+
+    def _write(self, path: Path, body: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+
+    def test_project_wins_on_same_key(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    default-config {\n'
+                '        model "sonnet"\n'
+                '    }\n'
+                '}\n',
+            )
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    default-config {\n'
+                '        model "opus"\n'
+                '    }\n'
+                '}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(cfg.agent_defaults["claude"], {"model": "opus"})
+
+    def test_distinct_keys_merge(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    default-config {\n'
+                '        model "opus"\n'
+                '    }\n'
+                '}\n',
+            )
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    default-config {\n'
+                '        effort "max"\n'
+                '    }\n'
+                '}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(cfg.agent_defaults["claude"], {
+                "model": "opus", "effort": "max",
+            })
+
+    def test_distinct_agents_in_user_and_project_both_survive(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    default-config {\n'
+                '        model "opus"\n'
+                '    }\n'
+                '}\n',
+            )
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'agent "codex" {\n'
+                '    default-config {\n'
+                '        sandbox "danger-full-access"\n'
+                '    }\n'
+                '}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(cfg.agent_defaults["claude"], {"model": "opus"})
+            self.assertEqual(cfg.agent_defaults["codex"], {"sandbox": "danger-full-access"})
+
+    def test_templates_and_agent_defaults_coexist_in_same_file(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(
+                'template "qa" {\n'
+                '    agent "claude"\n'
+                '    prompt "you are qa"\n'
+                '}\n'
+                'agent "claude" {\n'
+                '    default-config {\n'
+                '        model "opus"\n'
+                '    }\n'
+                '}\n'
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(cfg.templates["qa"].agent, "claude")
+            self.assertEqual(cfg.agent_defaults["claude"], {"model": "opus"})
+
+
 if __name__ == "__main__":
     unittest.main()
