@@ -2258,6 +2258,151 @@ class TestCodexAgent(unittest.TestCase):
 
 
 # ──────────────────────────────────────────────────────────────────────
+#  Test: hooks.py (runner + env builder) — issue #30
+# ──────────────────────────────────────────────────────────────────────
+
+class TestHookEnv(unittest.TestCase):
+
+    def test_hook_env_sets_required_vars(self):
+        from pathlib import Path
+        from actor.hooks import hook_env
+        env = hook_env(
+            {"PATH": "/bin"},
+            actor_name="foo",
+            actor_dir=Path("/tmp/foo"),
+            actor_agent="claude",
+            actor_session_id=None,
+        )
+        self.assertEqual(env["ACTOR_NAME"], "foo")
+        self.assertEqual(env["ACTOR_DIR"], "/tmp/foo")
+        self.assertEqual(env["ACTOR_AGENT"], "claude")
+        self.assertNotIn("ACTOR_SESSION_ID", env)
+        self.assertEqual(env["PATH"], "/bin")
+
+    def test_hook_env_includes_session_id_when_set(self):
+        from pathlib import Path
+        from actor.hooks import hook_env
+        env = hook_env(
+            {},
+            actor_name="foo",
+            actor_dir=Path("/tmp/foo"),
+            actor_agent="codex",
+            actor_session_id="sess-123",
+        )
+        self.assertEqual(env["ACTOR_SESSION_ID"], "sess-123")
+
+    def test_hook_env_does_not_mutate_base_env(self):
+        from pathlib import Path
+        from actor.hooks import hook_env
+        base = {"PATH": "/bin"}
+        hook_env(
+            base,
+            actor_name="foo",
+            actor_dir=Path("/tmp"),
+            actor_agent="claude",
+            actor_session_id=None,
+        )
+        self.assertNotIn("ACTOR_NAME", base)
+
+
+class TestRunHook(unittest.TestCase):
+
+    def test_run_hook_no_command_is_noop(self):
+        from pathlib import Path
+        from actor.hooks import run_hook
+        calls = []
+
+        def runner(cmd, env, cwd):
+            calls.append((cmd, env, cwd))
+            return 0
+
+        run_hook("on-start", None, {}, Path("/tmp"), runner=runner)
+        self.assertEqual(calls, [])
+
+    def test_run_hook_success_returns_none(self):
+        from pathlib import Path
+        from actor.hooks import run_hook
+
+        def runner(cmd, env, cwd):
+            return 0
+
+        # Should not raise.
+        run_hook("on-start", "echo hi", {}, Path("/tmp"), runner=runner)
+
+    def test_run_hook_nonzero_raises_hook_failed(self):
+        from pathlib import Path
+        from actor.hooks import run_hook
+        from actor.errors import HookFailedError
+
+        def runner(cmd, env, cwd):
+            return 3
+
+        with self.assertRaises(HookFailedError) as ctx:
+            run_hook("on-run", "false", {}, Path("/tmp"), runner=runner)
+        self.assertEqual(ctx.exception.event, "on-run")
+        self.assertEqual(ctx.exception.exit_code, 3)
+        self.assertEqual(ctx.exception.command, "false")
+
+    def test_run_hook_passes_env_and_cwd_to_runner(self):
+        from pathlib import Path
+        from actor.hooks import run_hook
+        seen = {}
+
+        def runner(cmd, env, cwd):
+            seen["cmd"] = cmd
+            seen["env"] = dict(env)
+            seen["cwd"] = cwd
+            return 0
+
+        run_hook(
+            "on-start", "echo",
+            env={"FOO": "bar"}, cwd=Path("/tmp/x"), runner=runner,
+        )
+        self.assertEqual(seen["cmd"], "echo")
+        self.assertEqual(seen["env"], {"FOO": "bar"})
+        self.assertEqual(seen["cwd"], Path("/tmp/x"))
+
+
+class TestDefaultHookRunner(unittest.TestCase):
+    """Exercises the real subprocess path with trivial shell commands."""
+
+    def test_default_runner_zero_exit(self):
+        from pathlib import Path
+        from actor.hooks import _default_hook_runner
+        with tempfile.TemporaryDirectory() as d:
+            rc = _default_hook_runner("true", dict(os.environ), Path(d))
+            self.assertEqual(rc, 0)
+
+    def test_default_runner_nonzero_exit(self):
+        from pathlib import Path
+        from actor.hooks import _default_hook_runner
+        with tempfile.TemporaryDirectory() as d:
+            rc = _default_hook_runner("false", dict(os.environ), Path(d))
+            self.assertNotEqual(rc, 0)
+
+    def test_default_runner_sees_env(self):
+        from pathlib import Path
+        from actor.hooks import _default_hook_runner
+        with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ)
+            env["HOOK_TEST_VAR"] = "xyz"
+            rc = _default_hook_runner(
+                '[ "$HOOK_TEST_VAR" = "xyz" ]', env, Path(d),
+            )
+            self.assertEqual(rc, 0)
+
+    def test_default_runner_cwd_is_honored(self):
+        from pathlib import Path
+        from actor.hooks import _default_hook_runner
+        with tempfile.TemporaryDirectory() as d:
+            real = str(Path(d).resolve())
+            rc = _default_hook_runner(
+                f'[ "$(pwd -P)" = "{real}" ]', dict(os.environ), Path(d),
+            )
+            self.assertEqual(rc, 0)
+
+
+# ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     unittest.main()
