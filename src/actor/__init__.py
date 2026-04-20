@@ -45,6 +45,14 @@ from .config import (
     load_config,
 )
 
+# Configure flow
+from .configure import (
+    BUILTIN_QUESTIONS,
+    ConfigureDisabledError,
+    questions_to_payload,
+    resolve_questions,
+)
+
 # Interfaces
 from .interfaces import (
     LogEntryKind,
@@ -120,6 +128,11 @@ __all__ = [
     "ConfigureBlock",
     "AgentSettings",
     "load_config",
+    # Configure flow
+    "BUILTIN_QUESTIONS",
+    "ConfigureDisabledError",
+    "questions_to_payload",
+    "resolve_questions",
     # Interfaces
     "LogEntryKind",
     "LogEntry",
