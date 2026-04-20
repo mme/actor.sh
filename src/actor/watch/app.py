@@ -275,7 +275,20 @@ class ActorWatchApp(App):
             splash.set_class(False, "-active")
             header.set_class(True, "-active")
         if was_splash != self._splash_active:
-            self.refresh_bindings()
+            # Defer so the class-toggle above has settled through the
+            # DOM first; otherwise the Footer re-queries bindings from
+            # a stale layout and keeps showing the full set.
+            self.call_after_refresh(self._refresh_footer_bindings)
+
+    def _refresh_footer_bindings(self) -> None:
+        self.refresh_bindings()
+        # Belt-and-suspenders: force the Footer to recompose so
+        # check_action is re-evaluated for every binding.
+        try:
+            footer = self.query_one(Footer)
+            footer.refresh(recompose=True)
+        except Exception:
+            pass
 
         running = sum(1 for s in statuses.values() if s == Status.RUNNING)
         done = sum(1 for s in statuses.values() if s == Status.DONE)
