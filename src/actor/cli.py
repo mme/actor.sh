@@ -5,6 +5,7 @@ import os
 import sys
 from typing import List, Optional
 
+from . import __version__
 from .errors import ActorError
 from .interfaces import Agent
 from .types import AgentKind, Status
@@ -46,6 +47,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="actor",
         description="Manage coding agents in parallel",
+    )
+    parser.add_argument(
+        "--version", "-V",
+        action="version",
+        version=f"actor-sh {__version__}",
     )
     sub = parser.add_subparsers(dest="command")
 
