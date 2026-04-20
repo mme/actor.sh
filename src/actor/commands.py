@@ -135,8 +135,20 @@ def cmd_new(
     if not binary_exists(agent_kind.binary_name):
         print(f"warning: '{agent_kind.binary_name}' not found on PATH", file=sys.stderr)
 
-    # Config precedence: template's config is the base; CLI pairs overlay on top.
-    config: Dict[str, str] = dict(template.config) if template else {}
+    # Config precedence (lowest → highest):
+    #   per-agent default-config for the chosen agent
+    #     → template.config
+    #       → CLI --config pairs.
+    # Defaults key off the already-chosen agent_kind, so CLI --agent
+    # overriding a template's agent correctly picks up the new agent's
+    # defaults rather than the template's.
+    config: Dict[str, str] = {}
+    if app_config is not None:
+        agent_defaults = app_config.agent_defaults.get(agent_kind.as_str())
+        if agent_defaults:
+            config.update(agent_defaults)
+    if template is not None:
+        config.update(template.config)
     for k, v in parse_config(config_pairs).items():
         config[k] = v
     config = _sorted_config(config)

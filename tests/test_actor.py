@@ -695,6 +695,159 @@ class TestCmdNewTemplate(unittest.TestCase):
 
 
 # ──────────────────────────────────────────────────────────────────────
+#  Test: cmd_new with per-agent default-config (ticket #31)
+# ──────────────────────────────────────────────────────────────────────
+
+class TestCmdNewAgentDefaults(unittest.TestCase):
+
+    def _db(self) -> Database:
+        return Database.open(":memory:")
+
+    def _cfg(self, **kwargs):
+        from actor import AppConfig
+        return AppConfig(**kwargs)
+
+    def test_agent_defaults_applied_for_claude(self):
+        db = self._db()
+        git = FakeGit()
+        cfg = self._cfg(agent_defaults={"claude": {"model": "opus"}})
+        actor = cmd_new(
+            db, git,
+            name="a", dir="/tmp", no_worktree=True, base=None,
+            agent_name="claude", config_pairs=[],
+            app_config=cfg,
+        )
+        self.assertEqual(actor.config["model"], "opus")
+
+    def test_only_chosen_agent_defaults_apply(self):
+        db = self._db()
+        git = FakeGit()
+        cfg = self._cfg(agent_defaults={
+            "claude": {"model": "opus"},
+            "codex": {"sandbox": "danger-full-access"},
+        })
+        actor = cmd_new(
+            db, git,
+            name="a", dir="/tmp", no_worktree=True, base=None,
+            agent_name="codex", config_pairs=[],
+            app_config=cfg,
+        )
+        self.assertEqual(actor.config, {"sandbox": "danger-full-access"})
+        self.assertNotIn("model", actor.config)
+
+    def test_cli_config_pair_overrides_agent_default(self):
+        db = self._db()
+        git = FakeGit()
+        cfg = self._cfg(agent_defaults={"claude": {"model": "opus"}})
+        actor = cmd_new(
+            db, git,
+            name="a", dir="/tmp", no_worktree=True, base=None,
+            agent_name="claude", config_pairs=["model=haiku"],
+            app_config=cfg,
+        )
+        self.assertEqual(actor.config["model"], "haiku")
+
+    def test_template_config_overrides_agent_default(self):
+        # Agent defaults sit BELOW templates in the precedence ladder.
+        from actor import AppConfig, Template
+        db = self._db()
+        git = FakeGit()
+        cfg = AppConfig(
+            templates={"qa": Template(
+                name="qa", agent="claude", config={"model": "sonnet"},
+            )},
+            agent_defaults={"claude": {"model": "opus", "effort": "max"}},
+        )
+        actor = cmd_new(
+            db, git,
+            name="a", dir="/tmp", no_worktree=True, base=None,
+            agent_name=None, config_pairs=[],
+            template_name="qa", app_config=cfg,
+        )
+        self.assertEqual(actor.config["model"], "sonnet")
+        self.assertEqual(actor.config["effort"], "max")
+
+    def test_cli_overrides_both_template_and_agent_default(self):
+        from actor import AppConfig, Template
+        db = self._db()
+        git = FakeGit()
+        cfg = AppConfig(
+            templates={"qa": Template(
+                name="qa", agent="claude", config={"model": "sonnet"},
+            )},
+            agent_defaults={"claude": {"model": "opus"}},
+        )
+        actor = cmd_new(
+            db, git,
+            name="a", dir="/tmp", no_worktree=True, base=None,
+            agent_name=None, config_pairs=["model=haiku"],
+            template_name="qa", app_config=cfg,
+        )
+        self.assertEqual(actor.config["model"], "haiku")
+
+    def test_defaults_follow_cli_agent_not_template_agent(self):
+        # Template says claude, but CLI --agent=codex wins → codex
+        # defaults apply, claude defaults do NOT.
+        from actor import AppConfig, Template
+        db = self._db()
+        git = FakeGit()
+        cfg = AppConfig(
+            templates={"qa": Template(name="qa", agent="claude")},
+            agent_defaults={
+                "claude": {"model": "opus"},
+                "codex": {"sandbox": "danger-full-access"},
+            },
+        )
+        actor = cmd_new(
+            db, git,
+            name="a", dir="/tmp", no_worktree=True, base=None,
+            agent_name="codex", config_pairs=[],
+            template_name="qa", app_config=cfg,
+        )
+        self.assertEqual(actor.agent, AgentKind.CODEX)
+        self.assertEqual(actor.config, {"sandbox": "danger-full-access"})
+
+    def test_no_defaults_for_agent_is_noop(self):
+        db = self._db()
+        git = FakeGit()
+        cfg = self._cfg(agent_defaults={"codex": {"sandbox": "x"}})
+        actor = cmd_new(
+            db, git,
+            name="a", dir="/tmp", no_worktree=True, base=None,
+            agent_name="claude", config_pairs=[],
+            app_config=cfg,
+        )
+        self.assertEqual(actor.config, {})
+
+    def test_none_app_config_is_noop(self):
+        # Backward-compat: callers that don't pass app_config see the old
+        # behavior (no defaults applied).
+        db = self._db()
+        git = FakeGit()
+        actor = cmd_new(
+            db, git,
+            name="a", dir="/tmp", no_worktree=True, base=None,
+            agent_name="claude", config_pairs=["model=sonnet"],
+        )
+        self.assertEqual(actor.config, {"model": "sonnet"})
+
+    def test_defaults_applied_when_agent_name_defaults_to_claude(self):
+        # agent_name=None + no template → chosen agent is claude.
+        # Claude defaults should still apply.
+        db = self._db()
+        git = FakeGit()
+        cfg = self._cfg(agent_defaults={"claude": {"model": "opus"}})
+        actor = cmd_new(
+            db, git,
+            name="a", dir="/tmp", no_worktree=True, base=None,
+            agent_name=None, config_pairs=[],
+            app_config=cfg,
+        )
+        self.assertEqual(actor.agent, AgentKind.CLAUDE)
+        self.assertEqual(actor.config["model"], "opus")
+
+
+# ──────────────────────────────────────────────────────────────────────
 #  Test: cmd_run  (8 tests from run.rs)
 # ──────────────────────────────────────────────────────────────────────
 
