@@ -280,16 +280,6 @@ class ActorWatchApp(App):
             # a stale layout and keeps showing the full set.
             self.call_after_refresh(self._refresh_footer_bindings)
 
-    def _refresh_footer_bindings(self) -> None:
-        self.refresh_bindings()
-        # Belt-and-suspenders: force the Footer to recompose so
-        # check_action is re-evaluated for every binding.
-        try:
-            footer = self.query_one(Footer)
-            footer.refresh(recompose=True)
-        except Exception:
-            pass
-
         running = sum(1 for s in statuses.values() if s == Status.RUNNING)
         done = sum(1 for s in statuses.values() if s == Status.DONE)
         errors = sum(1 for s in statuses.values() if s == Status.ERROR)
@@ -301,6 +291,16 @@ class ActorWatchApp(App):
         )
 
         self._refresh_detail()
+
+    def _refresh_footer_bindings(self) -> None:
+        self.refresh_bindings()
+        # Belt-and-suspenders: force the Footer to recompose so
+        # check_action is re-evaluated for every binding.
+        try:
+            footer = self.query_one(Footer)
+            footer.refresh(recompose=True)
+        except Exception:
+            pass
 
     def _refresh_detail(self) -> None:
         actor_list = self.query_one(ActorTree)
