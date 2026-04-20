@@ -37,7 +37,7 @@ class TerminalWidget(ScrollView, can_focus=True):
     TerminalWidget {
         background: $background;
         color: $foreground;
-        scrollbar-size-vertical: 1;
+        scrollbar-size: 0 0;
     }
     """
 
