@@ -77,7 +77,8 @@ Examples:
     p_new.add_argument("--dir", default=None, help="Base directory (defaults to CWD)")
     p_new.add_argument("--no-worktree", action="store_true", help="Skip worktree creation, run in the directory directly")
     p_new.add_argument("--base", default=None, help="Branch to create the worktree from (defaults to current branch)")
-    p_new.add_argument("--agent", default="claude", help="Coding agent to use")
+    p_new.add_argument("--agent", default=None, help="Coding agent to use (defaults to template's agent or 'claude')")
+    p_new.add_argument("--template", default=None, help="Apply a template from settings.kdl")
     p_new.add_argument("--model", default=None, help="Model for the agent to use")
     p_new.add_argument("--strip-api-keys", action="store_true", default=True, dest="strip_api_keys", help="Strip API keys from environment (default)")
     p_new.add_argument("--no-strip-api-keys", action="store_false", dest="strip_api_keys", help="Pass API keys through to the agent")
@@ -332,6 +333,9 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     try:
         if args.command == "new":
+            from .config import load_config
+            app_config = load_config()
+
             config_pairs = list(args.config)
             if args.model is not None:
                 config_pairs.append(f"model={args.model}")
@@ -345,6 +349,8 @@ def main(argv: Optional[List[str]] = None) -> None:
                 base=args.base,
                 agent_name=args.agent,
                 config_pairs=config_pairs,
+                template_name=args.template,
+                app_config=app_config,
             )
             print(f"{actor.name} created ({actor.dir})")
 
@@ -356,6 +362,10 @@ def main(argv: Optional[List[str]] = None) -> None:
             if stdin_consumed and not prompt:
                 print("error: stdin was empty — expected a prompt", file=sys.stderr)
                 sys.exit(1)
+            if prompt is None and args.template is not None:
+                tpl = app_config.templates.get(args.template)
+                if tpl is not None and tpl.prompt:
+                    prompt = tpl.prompt
             if prompt:
                 try:
                     agent = agent_for(args.name)

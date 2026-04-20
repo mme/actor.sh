@@ -45,6 +45,7 @@ class NewCommandTests(unittest.TestCase):
 
     def _run(self, argv, stdin_text=None, stdin_is_tty=True):
         """Invoke cli.main with argv, patching cmd_new/cmd_run/stdin/Database."""
+        from actor import AppConfig
         fake_db = MagicMock()
         fake_actor = MagicMock()
         fake_actor.name = argv[1] if len(argv) > 1 else "a"
@@ -60,6 +61,7 @@ class NewCommandTests(unittest.TestCase):
 
         with patch("actor.cli.cmd_new", cmd_new), \
              patch("actor.cli.cmd_run", cmd_run), \
+             patch("actor.config.load_config", return_value=AppConfig()), \
              patch("actor.cli.Database") as db_cls, \
              patch("sys.stdin", stdin):
             db_cls.open.return_value = fake_db
@@ -110,6 +112,75 @@ class NewCommandTests(unittest.TestCase):
         pairs = cmd_new.call_args.kwargs["config_pairs"]
         self.assertIn("model=sonnet", pairs)
         self.assertIn("strip-api-keys=false", pairs)
+
+    def test_new_passes_template_arg_to_cmd_new_and_uses_template_prompt(self):
+        fake_db = MagicMock()
+        fake_actor = MagicMock()
+        fake_actor.name = "foo"
+        fake_actor.dir = "/tmp/actor"
+        cmd_new = MagicMock(return_value=fake_actor)
+        cmd_run = MagicMock(return_value="done")
+
+        from actor import AppConfig, Template
+        fake_app_cfg = AppConfig(templates={
+            "qa": Template(name="qa", agent="claude", prompt="run tests"),
+        })
+
+        stdin = io.StringIO("")
+        stdin.isatty = lambda: True  # type: ignore[assignment]
+
+        with patch("actor.cli.cmd_new", cmd_new), \
+             patch("actor.cli.cmd_run", cmd_run), \
+             patch("actor.config.load_config", return_value=fake_app_cfg), \
+             patch("actor.cli.Database") as db_cls, \
+             patch("actor.cli._create_agent", return_value=MagicMock()), \
+             patch("sys.stdin", stdin):
+            db_cls.open.return_value = fake_db
+            try:
+                main(["new", "foo", "--template", "qa"])
+                code = 0
+            except SystemExit as e:
+                code = e.code if isinstance(e.code, int) else 1
+        cmd_new.assert_called_once()
+        kwargs = cmd_new.call_args.kwargs
+        self.assertEqual(kwargs["template_name"], "qa")
+        self.assertIsNotNone(kwargs["app_config"])
+        self.assertEqual(code, 0)
+        cmd_run.assert_called_once()
+        self.assertEqual(cmd_run.call_args.kwargs["prompt"], "run tests")
+
+    def test_new_cli_prompt_beats_template_prompt(self):
+        fake_db = MagicMock()
+        fake_actor = MagicMock()
+        fake_actor.name = "foo"
+        fake_actor.dir = "/tmp/actor"
+        cmd_new = MagicMock(return_value=fake_actor)
+        cmd_run = MagicMock(return_value="done")
+
+        from actor import AppConfig, Template
+        fake_app_cfg = AppConfig(templates={
+            "qa": Template(name="qa", agent="claude", prompt="template says run tests"),
+        })
+
+        stdin = io.StringIO("")
+        stdin.isatty = lambda: True  # type: ignore[assignment]
+
+        with patch("actor.cli.cmd_new", cmd_new), \
+             patch("actor.cli.cmd_run", cmd_run), \
+             patch("actor.config.load_config", return_value=fake_app_cfg), \
+             patch("actor.cli.Database") as db_cls, \
+             patch("actor.cli._create_agent", return_value=MagicMock()), \
+             patch("sys.stdin", stdin):
+            db_cls.open.return_value = fake_db
+            main(["new", "foo", "custom prompt", "--template", "qa"])
+        self.assertEqual(cmd_run.call_args.kwargs["prompt"], "custom prompt")
+
+    def test_new_without_template_does_not_pass_template_kwargs(self):
+        """Regression check: normal `actor new foo` must still work end-to-end."""
+        cmd_new, cmd_run, code = self._run(["new", "foo"])
+        kwargs = cmd_new.call_args.kwargs
+        self.assertIsNone(kwargs["template_name"])
+        self.assertEqual(code, 0)
 
     def test_new_with_prompt_run_failure_surfaces_partial_success(self):
         fake_db = MagicMock()
