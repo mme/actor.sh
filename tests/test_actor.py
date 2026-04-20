@@ -577,6 +577,124 @@ class TestCmdNew(unittest.TestCase):
 
 
 # ──────────────────────────────────────────────────────────────────────
+#  Test: cmd_new with --template (ticket #29)
+# ──────────────────────────────────────────────────────────────────────
+
+class TestCmdNewTemplate(unittest.TestCase):
+
+    def _db(self) -> Database:
+        return Database.open(":memory:")
+
+    def _cfg_with_qa(self):
+        from actor import AppConfig, Template
+        return AppConfig(templates={
+            "qa": Template(
+                name="qa",
+                agent="codex",
+                prompt="you're qa",
+                config={"model": "opus", "effort": "max"},
+            ),
+        })
+
+    def test_template_applies_agent_and_config(self):
+        db = self._db()
+        git = FakeGit()
+        actor = cmd_new(
+            db, git,
+            name="fix-auth",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name=None,
+            config_pairs=[],
+            template_name="qa",
+            app_config=self._cfg_with_qa(),
+        )
+        self.assertEqual(actor.agent, AgentKind.CODEX)
+        self.assertEqual(actor.config["model"], "opus")
+        self.assertEqual(actor.config["effort"], "max")
+
+    def test_cli_agent_overrides_template_agent(self):
+        db = self._db()
+        git = FakeGit()
+        actor = cmd_new(
+            db, git,
+            name="fix-auth",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name="claude",
+            config_pairs=[],
+            template_name="qa",
+            app_config=self._cfg_with_qa(),
+        )
+        self.assertEqual(actor.agent, AgentKind.CLAUDE)
+
+    def test_cli_config_pair_overrides_template_config(self):
+        db = self._db()
+        git = FakeGit()
+        actor = cmd_new(
+            db, git,
+            name="fix-auth",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name=None,
+            config_pairs=["model=haiku"],
+            template_name="qa",
+            app_config=self._cfg_with_qa(),
+        )
+        self.assertEqual(actor.config["model"], "haiku")
+        self.assertEqual(actor.config["effort"], "max")
+
+    def test_unknown_template_raises_config_error(self):
+        from actor.errors import ConfigError
+        db = self._db()
+        git = FakeGit()
+        with self.assertRaises(ConfigError):
+            cmd_new(
+                db, git,
+                name="fix-auth",
+                dir="/tmp",
+                no_worktree=True,
+                base=None,
+                agent_name=None,
+                config_pairs=[],
+                template_name="does-not-exist",
+                app_config=self._cfg_with_qa(),
+            )
+
+    def test_no_template_backward_compatible(self):
+        db = self._db()
+        git = FakeGit()
+        actor = cmd_new(
+            db, git,
+            name="plain",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name="claude",
+            config_pairs=["model=sonnet"],
+        )
+        self.assertEqual(actor.agent, AgentKind.CLAUDE)
+        self.assertEqual(actor.config["model"], "sonnet")
+
+    def test_agent_name_none_without_template_defaults_to_claude(self):
+        db = self._db()
+        git = FakeGit()
+        actor = cmd_new(
+            db, git,
+            name="x",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name=None,
+            config_pairs=[],
+        )
+        self.assertEqual(actor.agent, AgentKind.CLAUDE)
+
+
+# ──────────────────────────────────────────────────────────────────────
 #  Test: cmd_run  (8 tests from run.rs)
 # ──────────────────────────────────────────────────────────────────────
 

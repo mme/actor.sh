@@ -5,14 +5,18 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
 from .errors import (
     ActorError,
     AgentNotFoundError,
+    ConfigError,
     IsRunningError,
     NotRunningError,
 )
+
+if TYPE_CHECKING:
+    from .config import AppConfig
 from .interfaces import Agent, GitOps, LogEntry, LogEntryKind, ProcessManager, binary_exists
 from .types import (
     Actor,
@@ -110,17 +114,32 @@ def cmd_new(
     dir: Optional[str],
     no_worktree: bool,
     base: Optional[str],
-    agent_name: str,
+    agent_name: Optional[str],
     config_pairs: List[str],
+    template_name: Optional[str] = None,
+    app_config: Optional["AppConfig"] = None,
 ) -> Actor:
     validate_name(name)
 
+    template = None
+    if template_name is not None:
+        if app_config is None or template_name not in app_config.templates:
+            raise ConfigError(f"unknown template: '{template_name}'")
+        template = app_config.templates[template_name]
+
+    # Agent precedence: explicit CLI flag > template's agent > "claude"
+    if agent_name is None:
+        agent_name = template.agent if (template and template.agent) else "claude"
     agent_kind = AgentKind.from_str(agent_name)
 
     if not binary_exists(agent_kind.binary_name):
         print(f"warning: '{agent_kind.binary_name}' not found on PATH", file=sys.stderr)
 
-    config = parse_config(config_pairs)
+    # Config precedence: template's config is the base; CLI pairs overlay on top.
+    config: Dict[str, str] = dict(template.config) if template else {}
+    for k, v in parse_config(config_pairs).items():
+        config[k] = v
+    config = _sorted_config(config)
 
     if dir is not None:
         try:
