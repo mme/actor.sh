@@ -117,14 +117,22 @@ class TerminalWidget(ScrollView, can_focus=True):
         self._batcher.mark_refreshed(now)
         if self._recorder is not None:
             self._recorder.record(EventKind.REFRESH)
-        # Auto-follow live output if the user is at (or very near) the
-        # bottom of the scrollback; if they've scrolled up to look at
-        # history, respect their position.
+        # Auto-follow live output unless the user has manually scrolled
+        # up to look at history.
         was_following = self._is_following_bottom()
         self._frame_counter += 1
         self._update_virtual_size()
         if was_following:
-            self.scroll_end(animate=False)
+            # Defer scroll_end so it runs AFTER the layout pass has
+            # processed the new virtual_size (otherwise max_scroll_y is
+            # stale and scroll_end is a no-op — the symptom is the
+            # first frame appearing at the top of the viewport).
+            self.call_after_refresh(self._force_scroll_end)
+
+    def _force_scroll_end(self) -> None:
+        # scroll_end with force=True ignores current scroll target state
+        # and jumps to the current max_scroll_y.
+        self.scroll_end(animate=False, force=True)
 
     def _update_virtual_size(self) -> None:
         rows = self._screen.rows + self._screen.history_size()
