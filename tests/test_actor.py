@@ -2466,6 +2466,141 @@ class TestCmdRunOnRunHook(unittest.TestCase):
 
 
 # ──────────────────────────────────────────────────────────────────────
+#  Test: cmd_discard on-discard hook (issue #30)
+# ──────────────────────────────────────────────────────────────────────
+
+class TestCmdDiscardOnDiscardHook(unittest.TestCase):
+
+    def _db(self) -> Database:
+        return Database.open(":memory:")
+
+    def test_on_discard_fires_with_env_before_delete(self):
+        from actor import Hooks
+        seen = []
+        db = self._db()
+        create_actor(db, "test", config=[])
+
+        def runner(cmd, env, cwd):
+            seen.append(dict(env))
+            # Actor row must still exist at hook time.
+            db.get_actor("test")
+            return 0
+
+        pm = FakeProcessManager()
+        cmd_discard(
+            db, pm, name="test",
+            hooks=Hooks(on_discard="echo"),
+            hook_runner=runner,
+        )
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["ACTOR_NAME"], "test")
+        with self.assertRaises(NotFound):
+            db.get_actor("test")
+
+    def test_on_discard_nonzero_without_force_aborts(self):
+        from actor import Hooks, HookFailedError
+
+        def runner(cmd, env, cwd):
+            return 1
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+        pm = FakeProcessManager()
+        with self.assertRaises(HookFailedError):
+            cmd_discard(
+                db, pm, name="test",
+                hooks=Hooks(on_discard="false"),
+                hook_runner=runner,
+            )
+        db.get_actor("test")
+
+    def test_on_discard_nonzero_with_force_proceeds(self):
+        from actor import Hooks
+
+        def runner(cmd, env, cwd):
+            return 1
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+        pm = FakeProcessManager()
+        cmd_discard(
+            db, pm, name="test",
+            hooks=Hooks(on_discard="false"),
+            hook_runner=runner,
+            force=True,
+        )
+        with self.assertRaises(NotFound):
+            db.get_actor("test")
+
+    def test_on_discard_stops_actor_before_hook_runs(self):
+        from actor import Hooks
+
+        ran = {"alive": None}
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+        pm = FakeProcessManager()
+        run = Run(
+            id=0, actor_name="test", prompt="go", status=Status.RUNNING,
+            exit_code=None, pid=555, config={},
+            started_at="2026-01-01T00:00:00Z", finished_at=None,
+        )
+        db.insert_run(run)
+        pm.mark_alive(555)
+
+        def runner(cmd, env, cwd):
+            ran["alive"] = pm.is_alive(555)
+            return 0
+
+        cmd_discard(
+            db, pm, name="test",
+            hooks=Hooks(on_discard="echo"),
+            hook_runner=runner,
+        )
+        self.assertFalse(ran["alive"])
+
+    def test_on_discard_cascades_force_to_children(self):
+        from actor import Hooks
+
+        def runner(cmd, env, cwd):
+            return 1
+
+        db = self._db()
+        create_actor(db, "parent", config=[])
+        child = make_actor("child", parent="parent", dir="/tmp")
+        db.insert_actor(child)
+        pm = FakeProcessManager()
+
+        cmd_discard(
+            db, pm, name="parent",
+            hooks=Hooks(on_discard="false"),
+            hook_runner=runner,
+            force=True,
+        )
+        for n in ("parent", "child"):
+            with self.assertRaises(NotFound):
+                db.get_actor(n)
+
+    def test_no_on_discard_hook_no_runner_calls(self):
+        from actor import Hooks
+        seen = []
+
+        def runner(cmd, env, cwd):
+            seen.append(cmd)
+            return 0
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+        pm = FakeProcessManager()
+        cmd_discard(
+            db, pm, name="test",
+            hooks=Hooks(),
+            hook_runner=runner,
+        )
+        self.assertEqual(seen, [])
+
+
+# ──────────────────────────────────────────────────────────────────────
 #  Test: hooks.py (runner + env builder) — issue #30
 # ──────────────────────────────────────────────────────────────────────
 

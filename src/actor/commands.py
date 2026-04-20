@@ -658,27 +658,51 @@ def cmd_discard(
     db: Database,
     proc_mgr: ProcessManager,
     name: str,
+    hooks: Optional["Hooks"] = None,
+    hook_runner: Optional[HookRunner] = None,
+    force: bool = False,
     _visited: set[str] | None = None,
 ) -> str:
-    db.get_actor(name)
+    actor = db.get_actor(name)
 
     # Track visited to prevent infinite recursion on circular parent chains
     if _visited is None:
         _visited = set()
     _visited.add(name)
 
-    # Recursively discard children first
+    # Recursively discard children first — they see the same hooks / force.
     children = db.list_children(name)
     discarded = []
     for child in children:
         if child.name not in _visited:
-            msg = cmd_discard(db, proc_mgr, name=child.name, _visited=_visited)
+            msg = cmd_discard(
+                db, proc_mgr, name=child.name,
+                hooks=hooks, hook_runner=hook_runner, force=force,
+                _visited=_visited,
+            )
             discarded.append(msg)
 
-    # Stop if running
+    # Stop if running (resource cleanup — happens before the hook runs).
     status = db.resolve_actor_status(name, proc_mgr)
     if status == Status.RUNNING:
         _force_stop(db, proc_mgr, name)
+
+    # on-discard hook — fires after resource cleanup, before DB deletion.
+    on_discard = hooks.on_discard if hooks is not None else None
+    if on_discard is not None:
+        env = hook_env(
+            os.environ,
+            actor_name=name,
+            actor_dir=Path(actor.dir),
+            actor_agent=actor.agent.as_str(),
+            actor_session_id=actor.agent_session,
+        )
+        try:
+            run_hook("on-discard", on_discard, env, Path(actor.dir), runner=hook_runner)
+        except Exception:
+            if not force:
+                raise
+            # --force: swallow the failure and continue with deletion.
 
     db.delete_actor(name)
     discarded.append(f"{name} discarded")
