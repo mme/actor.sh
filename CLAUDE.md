@@ -147,8 +147,15 @@ prompt / stdin) override the template. `agent` and `prompt` are promoted to
 top-level fields; every other child is stored as a config key (values
 coerced to strings).
 
-Unknown top-level nodes (e.g. `hooks`, `agent`, `alias`) are silently
-ignored for forward-compat with follow-up tickets.
+Per-agent default config lives in `agent "claude" { default-config { … } }`
+(and the same shape for `codex`). Any actor of that kind picks up those
+keys as the lowest config layer — below templates and below CLI
+`--config`. User-wide keys merge per-key with project-level ones
+(project wins on same-key conflicts). See `spec/PLAN-AGENT-DEFAULTS.md`
+for the full precedence ladder.
+
+Unknown top-level nodes (e.g. `hooks`, `alias`) are silently ignored
+for forward-compat with follow-up tickets #30 / #33.
 
 Load programmatically via `actor.config.load_config(cwd=..., home=...)` —
 both args default to `Path.cwd()` / `$HOME` so tests can inject temp dirs.

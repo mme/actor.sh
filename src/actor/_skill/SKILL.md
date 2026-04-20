@@ -119,9 +119,42 @@ template "reviewer" {
   numbers; they're all coerced to strings to match the actor config
   pipeline.
 
-Unknown top-level nodes (`hooks`, `agent`, `alias`) parse as no-ops today —
+Unknown top-level nodes (`hooks`, `alias`) parse as no-ops today —
 they're reserved for follow-up tickets. Malformed KDL raises an error
 with the file path.
+
+**Per-agent defaults:**
+
+Alongside templates you can declare default config scoped to a specific
+coding agent. Any Claude actor picks up the `agent "claude"` block; any
+Codex actor picks up the `agent "codex"` block. Neither competes with
+the other.
+
+```kdl
+agent "claude" {
+    default-config {
+        model "opus"
+        effort "max"
+        strip-api-keys true
+    }
+}
+
+agent "codex" {
+    default-config {
+        sandbox "danger-full-access"
+    }
+}
+```
+
+Valid keys are anything the agent itself accepts — same catalogue as
+[claude-config.md](claude-config.md) and [codex-config.md](codex-config.md).
+
+Precedence (lowest → highest): built-in defaults → user `settings.kdl`
+→ project `settings.kdl` → **per-agent defaults for the chosen agent**
+→ template (`--template X`) → CLI `--config key=value` → per-actor DB
+config. Same-key conflicts between the user and project `agent` blocks
+resolve per key, with project winning; keys the project doesn't
+restate are kept from the user block.
 
 **Applying a template** (CLI only — see note below):
 
