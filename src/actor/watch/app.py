@@ -476,7 +476,10 @@ class ActorWatchApp(App):
         if info is None:
             # No live session for the selected actor — swap to the tabs
             # pane and unmount any lingering terminal widget so a future
-            # re-mount doesn't compete with a stale one.
+            # re-mount doesn't compete with a stale one. Widget.remove()
+            # is fire-and-forget (returns an AwaitRemove we don't await);
+            # the switcher already hides the view so a one-frame overlap
+            # during teardown is invisible.
             if switcher.current != "tabs-view":
                 switcher.current = "tabs-view"
             for child in list(view.children):

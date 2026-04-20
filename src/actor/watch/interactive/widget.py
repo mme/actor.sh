@@ -120,12 +120,38 @@ class TerminalWidget(Widget, can_focus=True):
     # -- rendering ---------------------------------------------------------
 
     def render_line(self, y: int) -> Strip:
+        # Belt-and-suspenders: if on_mount fired with size=(0,0) and
+        # on_resize hasn't delivered a non-zero size yet, pyte stays at
+        # the default 24x80 forever. Resync here once we see a real size.
+        if (
+            self.size.width > 0 and self.size.height > 0
+            and (self._screen.rows != self.size.height
+                 or self._screen.cols != self.size.width)
+        ):
+            self._sync_size(self.size.height, self.size.width)
         if not self._first_output_received:
-            return Strip.blank(self.size.width)
+            return self._placeholder_line(y)
         strips = self._get_strips()
         if 0 <= y < len(strips):
             return strips[y]
         return Strip.blank(self.size.width)
+
+    def _placeholder_line(self, y: int) -> Strip:
+        """Rendered while waiting for the child's first frame. Shows a
+        centered "Connecting…" hint so a hung/slow startup isn't just
+        an inscrutable blank box."""
+        width = self.size.width
+        height = self.size.height
+        if width <= 0 or height <= 0 or y != height // 2:
+            return Strip.blank(width)
+        msg = "Connecting…"
+        pad = max(0, (width - len(msg)) // 2)
+        text = " " * pad + msg
+        text += " " * max(0, width - len(text))
+        from rich.text import Text
+        from rich.style import Style
+        line = Text(text, style=Style(dim=True))
+        return Strip(list(line.render(self.app.console)))
 
     def _get_strips(self) -> list[Strip]:
         if self._cached_at_frame == self._frame_counter and self._cached_strips is not None:

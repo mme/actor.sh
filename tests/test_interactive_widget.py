@@ -145,14 +145,24 @@ class InitialRenderTests(unittest.IsolatedAsyncioTestCase):
     fill briefly flashes as a dark box while Textual's first layout
     settles."""
 
-    async def test_blank_until_first_output(self):
+    async def test_placeholder_before_first_output(self):
+        """Before the child produces its first frame, non-centered rows
+        render blank and the middle row shows a "Connecting…" hint so a
+        hung startup isn't an inscrutable blank box."""
         cat = _find_binary("cat")
         app = _HostApp([cat], pathlib.Path("/tmp"))
         async with app.run_test(size=(40, 10)) as pilot:
             app.widget._first_output_received = False
-            strip = app.widget.render_line(0)
-            self.assertEqual(strip.text, " " * app.widget.size.width,
-                             "first render must be blank before any PTY output")
+            top = app.widget.render_line(0)
+            self.assertTrue(
+                top.text.strip() == "",
+                f"non-center rows should be blank; got {top.text!r}",
+            )
+            middle = app.widget.render_line(app.widget.size.height // 2)
+            self.assertIn(
+                "Connecting", middle.text,
+                f"center row should show the placeholder; got {middle.text!r}",
+            )
             # After feeding a byte, subsequent renders use the pyte frame.
             app.widget._on_pty_output(b"X")
             self.assertTrue(app.widget._first_output_received)
