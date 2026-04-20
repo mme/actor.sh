@@ -67,6 +67,11 @@ class TerminalWidget(Widget, can_focus=True):
         # Single pending timer for deferred refresh — stacking N timers on
         # bursty output would waste memory and re-render cycles.
         self._deferred_timer: Optional[Timer] = None
+        # Don't render the empty pyte screen — the default cursor-at-(0,0)
+        # overlay + dark fill on unused columns briefly shows as a box on
+        # the right while Textual settles our size. Render blank until the
+        # child has produced its first frame.
+        self._first_output_received = False
         # Callbacks set once at construction; surviving unmount/remount
         # (the manager owns lifetime, not the DOM). Both callbacks are
         # set via `set_callbacks` so consumers that need additional hooks
@@ -79,6 +84,7 @@ class TerminalWidget(Widget, can_focus=True):
         if self._recorder is not None:
             self._recorder.record(EventKind.READ, data)
         self._screen.feed(data)
+        self._first_output_received = True
         now = time.monotonic()
         self._batcher.on_bytes(len(data), now)
         if self._batcher.should_refresh_now(now):
@@ -114,6 +120,8 @@ class TerminalWidget(Widget, can_focus=True):
     # -- rendering ---------------------------------------------------------
 
     def render_line(self, y: int) -> Strip:
+        if not self._first_output_received:
+            return Strip.blank(self.size.width)
         strips = self._get_strips()
         if 0 <= y < len(strips):
             return strips[y]
@@ -133,8 +141,19 @@ class TerminalWidget(Widget, can_focus=True):
     # -- resize ------------------------------------------------------------
 
     def on_resize(self, event: events.Resize) -> None:
-        rows = max(1, event.size.height)
-        cols = max(1, event.size.width)
+        self._sync_size(event.size.height, event.size.width)
+
+    def on_mount(self) -> None:
+        # Textual's first on_resize fires after initial layout; without
+        # this, pyte stays at the default 24x80 until the first resize
+        # event lands, which briefly renders a pyte-sized frame inside
+        # a larger detail pane. Syncing here closes that gap.
+        if self.size.height > 0 and self.size.width > 0:
+            self._sync_size(self.size.height, self.size.width)
+
+    def _sync_size(self, rows: int, cols: int) -> None:
+        rows = max(1, rows)
+        cols = max(1, cols)
         if rows == self._screen.rows and cols == self._screen.cols:
             return
         self._screen.resize(rows=rows, cols=cols)

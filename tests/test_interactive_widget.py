@@ -139,6 +139,26 @@ class TerminalWidgetIntegrationTests(unittest.IsolatedAsyncioTestCase):
             app._session.close()
 
 
+class InitialRenderTests(unittest.IsolatedAsyncioTestCase):
+    """Before the child has produced any output, the widget should
+    render as blank — otherwise the empty pyte cursor + unused column
+    fill briefly flashes as a dark box while Textual's first layout
+    settles."""
+
+    async def test_blank_until_first_output(self):
+        cat = _find_binary("cat")
+        app = _HostApp([cat], pathlib.Path("/tmp"))
+        async with app.run_test(size=(40, 10)) as pilot:
+            app.widget._first_output_received = False
+            strip = app.widget.render_line(0)
+            self.assertEqual(strip.text, " " * app.widget.size.width,
+                             "first render must be blank before any PTY output")
+            # After feeding a byte, subsequent renders use the pyte frame.
+            app.widget._on_pty_output(b"X")
+            self.assertTrue(app.widget._first_output_received)
+            app._session.close()
+
+
 class LocalScrollTests(unittest.IsolatedAsyncioTestCase):
     """PageUp/PageDown/wheel scroll the pyte history locally when the
     child isn't in alt-screen and hasn't enabled mouse tracking."""
@@ -225,6 +245,9 @@ class RenderCacheTests(unittest.IsolatedAsyncioTestCase):
             # Invalidate any cache Textual populated during pilot setup.
             app.widget._cached_strips = None
             app.widget._cached_at_frame = -1
+            # Skip the pre-first-output blank-render guard for the cache
+            # test: we want to exercise the strip-builder path.
+            app.widget._first_output_received = True
             calls["n"] = 0
             for y in range(app.widget._screen.rows):
                 app.widget.render_line(y)
@@ -249,6 +272,7 @@ class RenderCacheTests(unittest.IsolatedAsyncioTestCase):
             app.widget._screen.render_lines = counting_render_lines  # type: ignore
             app.widget._cached_strips = None
             app.widget._cached_at_frame = -1
+            app.widget._first_output_received = True
             calls["n"] = 0
             app.widget.render_line(0)
             app.widget._frame_counter += 1

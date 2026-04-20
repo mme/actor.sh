@@ -465,25 +465,32 @@ class ActorWatchApp(App):
 
         try:
             switcher = self.query_one("#detail-switcher", ContentSwitcher)
+            view = self.query_one("#interactive-view", Vertical)
         except NoMatches:
             return
         actor = self.query_one(ActorTree).selected_actor
-        if actor is None or not self._interactive.has(actor.name):
+        info = (
+            self._interactive.get(actor.name) if actor is not None else None
+        )
+
+        if info is None:
+            # No live session for the selected actor — swap to the tabs
+            # pane and unmount any lingering terminal widget so a future
+            # re-mount doesn't compete with a stale one.
             if switcher.current != "tabs-view":
                 switcher.current = "tabs-view"
-                self._interactive_active = None
-            return
-
-        info = self._interactive.get(actor.name)
-        if info is None:
-            switcher.current = "tabs-view"
+            for child in list(view.children):
+                child.remove()
             self._interactive_active = None
             return
 
-        view = self.query_one("#interactive-view", Vertical)
+        # Actor has a live session — mount its terminal (unmounting any
+        # previously-shown one first).
         for child in list(view.children):
-            child.remove()
-        view.mount(info.widget)
+            if child is not info.widget:
+                child.remove()
+        if info.widget not in view.children:
+            view.mount(info.widget)
         switcher.current = "interactive-view"
         self._interactive_active = actor.name
         info.widget.focus()
@@ -533,26 +540,16 @@ class ActorWatchApp(App):
         self._sync_detail_view()
 
     def on_terminal_widget_exit_requested(self, message: TerminalWidget.ExitRequested) -> None:
-        from textual.css.query import NoMatches
-
-        if self._interactive_active is None:
-            return
-        try:
-            self.query_one("#detail-switcher", ContentSwitcher).current = "tabs-view"
-        except NoMatches:
-            pass
-        self._interactive_active = None
-        # Dropping focus before re-focusing the tree is necessary because
-        # the terminal widget still holds focus at the moment of the key
-        # event; calling .focus() on the tree alone competes with the
-        # widget's re-focus pass. Defer via call_after_refresh so the
-        # switcher's layout change settles first.
+        """Ctrl+Z from the embedded terminal: only shift focus to the
+        actor tree. The terminal view stays visible — while an
+        interactive session is live for the selected actor, that actor's
+        terminal is always shown in the detail pane."""
+        # Drop the terminal's focus so the tree's .focus() takes effect
+        # cleanly, then defer to let the key event settle.
         self.set_focus(None)
         self.call_after_refresh(lambda: self.query_one(ActorTree).focus())
 
     def on_terminal_widget_session_exited(self, message: TerminalWidget.SessionExited) -> None:
-        from textual.css.query import NoMatches
-
         target: str | None = None
         for name in self._interactive.live_names():
             info = self._interactive.get(name)
@@ -562,16 +559,14 @@ class ActorWatchApp(App):
         if target is None:
             return
         self._interactive.close(target)
-        if self._interactive_active == target:
-            try:
-                self.query_one("#detail-switcher", ContentSwitcher).current = "tabs-view"
-            except NoMatches:
-                pass
-            self._interactive_active = None
         code = message.exit_code
         severity = "information" if code == 0 else "warning"
         self.notify(f"{target} interactive session ended (exit {code})", severity=severity)
+        # _sync_detail_view handles the ContentSwitcher swap AND unmounts
+        # the dead terminal widget from #interactive-view — the session
+        # is no longer in the registry so the "no session" branch fires.
         self._refresh_detail()
+        self._sync_detail_view()
 
     def action_dump_diagnostics(self) -> None:
         import sys
