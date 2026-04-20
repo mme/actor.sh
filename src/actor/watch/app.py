@@ -419,6 +419,18 @@ class ActorWatchApp(App):
         except Exception as e:
             self.call_from_thread(self._set_diff_text, f"Diff error: {e}")
 
+    def _set_logs_tab_label(self, label: str) -> None:
+        """Swap the Logs tab label between 'Logs' and 'Interactive'
+        without changing the tab id (the `l` shortcut still targets it)."""
+        from textual.css.query import NoMatches
+        try:
+            tabs = self.query_one("#tabs", TabbedContent)
+            tab = tabs.get_tab("logs")
+        except NoMatches:
+            return
+        if str(tab.label) != label:
+            tab.label = label
+
     def _update_diff_tab_label(self, added: int = 0, removed: int = 0) -> None:
         tabs = self.query_one("#tabs", TabbedContent)
         tab = tabs.get_tab("diff")
@@ -514,6 +526,7 @@ class ActorWatchApp(App):
                 logs_pane.mount(
                     RichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False)
                 )
+            self._set_logs_tab_label("Logs")
             self._interactive_active = None
             return
 
@@ -523,6 +536,7 @@ class ActorWatchApp(App):
             for child in current_children:
                 child.remove()
             logs_pane.mount(info.widget)
+        self._set_logs_tab_label("Interactive")
         # Activate the Logs tab if we're elsewhere, so the user actually
         # sees the terminal they just opened.
         try:
