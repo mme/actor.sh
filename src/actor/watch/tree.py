@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from textual.binding import Binding
 from textual.widgets import Tree
 
 from ..types import Actor, Status
@@ -14,14 +13,6 @@ RUNNING_FRAMES = ["♤", "♡", "♢", "♧"]
 
 class ActorTree(Tree[Actor]):
     """Left panel showing all actors as a tree."""
-
-    # The Enter-on-tree path routes through Tree.NodeSelected → the
-    # app's action_enter_interactive. The footer entry is provided by
-    # the app-level `i` binding which sets key_display="⏎ / i", so we
-    # hide this one to avoid showing Interactive twice.
-    BINDINGS = [
-        Binding("enter", "select_cursor", "Interactive", show=False),
-    ]
 
     DEFAULT_CSS = """
     ActorTree {
