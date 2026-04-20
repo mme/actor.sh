@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from actor.config import AppConfig, Template, load_config
 from actor.errors import ConfigError
@@ -241,7 +242,12 @@ class TestLoadConfigCoercion(unittest.TestCase):
 class TestLoadConfigHomeUnset(unittest.TestCase):
 
     def test_home_none_skips_user_config_and_loads_project(self):
-        with tempfile.TemporaryDirectory() as cwd:
+        # load_config(home=None) still consults $HOME as a fallback, so we
+        # scrub it here to exercise the "no home" branch and prove the
+        # project config still loads.
+        with tempfile.TemporaryDirectory() as cwd, patch.dict(
+            "os.environ", {}, clear=True
+        ):
             proj = Path(cwd) / ".actor"
             proj.mkdir()
             (proj / "settings.kdl").write_text(

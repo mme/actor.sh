@@ -1,4 +1,4 @@
-"""Lifecycle hook execution for actor.sh (issue #30).
+"""Lifecycle hook execution for actor.sh.
 
 Hooks are single shell commands declared in settings.kdl under the
 `hooks {}` block. They run via /bin/sh -c, inherit the caller's env plus
@@ -13,7 +13,7 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping, Optional, Union
+from typing import Callable, Dict, Mapping, Optional, Union
 
 from .errors import HookFailedError
 
@@ -55,10 +55,15 @@ def run_hook(
         exit_code = result.exit_code
         stdout = result.stdout
         stderr = result.stderr
-    else:
-        exit_code = int(result)
+    elif isinstance(result, int):
+        exit_code = result
         stdout = ""
         stderr = ""
+    else:
+        raise TypeError(
+            f"HookRunner for '{event}' returned {type(result).__name__}, "
+            "expected int or HookResult"
+        )
     if exit_code != 0:
         raise HookFailedError(
             event, command, exit_code, stdout=stdout, stderr=stderr,
@@ -89,7 +94,7 @@ def hook_env(
     actor_dir: Path,
     actor_agent: str,
     actor_session_id: Optional[str],
-) -> dict:
+) -> Dict[str, str]:
     """Return a fresh dict combining base_env with ACTOR_* variables."""
     env = dict(base_env)
     env["ACTOR_NAME"] = actor_name

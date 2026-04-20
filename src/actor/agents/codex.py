@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 from ..errors import ActorError
 from ..interfaces import Agent, LogEntry, LogEntryKind
@@ -66,13 +66,19 @@ class CodexAgent(Agent):
         return args
 
     def _spawn_and_capture(
-        self, args: List[str], cwd: Optional[Path], config: Config
+        self,
+        args: List[str],
+        cwd: Optional[Path],
+        config: Config,
+        env_extra: Optional[Mapping[str, str]] = None,
     ) -> Tuple[int, Optional[str]]:
         strip = config.get("strip-api-keys", "true") != "false"
         if strip:
             env = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
         else:
             env = dict(os.environ)
+        if env_extra:
+            env.update(env_extra)
         kwargs: dict = dict(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -166,7 +172,13 @@ class CodexAgent(Agent):
         except Exception as e:
             raise ActorError(f"codex DB query failed: {e}")
 
-    def start(self, dir: Path, prompt: str, config: Config) -> Tuple[int, Optional[str]]:
+    def start(
+        self,
+        dir: Path,
+        prompt: str,
+        config: Config,
+        env_extra: Optional[Mapping[str, str]] = None,
+    ) -> Tuple[int, Optional[str]]:
         args = [
             "codex",
             "exec",
@@ -177,9 +189,16 @@ class CodexAgent(Agent):
             *self._config_args(config),
             prompt,
         ]
-        return self._spawn_and_capture(args, cwd=None, config=config)
+        return self._spawn_and_capture(args, cwd=None, config=config, env_extra=env_extra)
 
-    def resume(self, dir: Path, session_id: str, prompt: str, config: Config) -> int:
+    def resume(
+        self,
+        dir: Path,
+        session_id: str,
+        prompt: str,
+        config: Config,
+        env_extra: Optional[Mapping[str, str]] = None,
+    ) -> int:
         args = [
             "codex",
             "exec",
@@ -190,7 +209,7 @@ class CodexAgent(Agent):
             *self._config_args(config),
             prompt,
         ]
-        pid, _ = self._spawn_and_capture(args, cwd=dir, config=config)
+        pid, _ = self._spawn_and_capture(args, cwd=dir, config=config, env_extra=env_extra)
         return pid
 
     def wait(self, pid: int) -> Tuple[int, str]:

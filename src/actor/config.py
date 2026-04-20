@@ -79,7 +79,12 @@ def _find_project_config(
     return None
 
 
-def _coerce_value(value: object) -> str:
+def _coerce_value(
+    value: object,
+    *,
+    key: Optional[str] = None,
+    source: Optional[Path] = None,
+) -> str:
     """Coerce a KDL-parsed arg (str/bool/float) into a string for the
     stringly-typed actor config pipeline. Unknown types raise ConfigError
     so a future kdl-py change can't silently stringify something
@@ -95,7 +100,16 @@ def _coerce_value(value: object) -> str:
         return str(int(value)) if value.is_integer() else str(value)
     if isinstance(value, int):
         return str(value)
-    raise ConfigError(f"unsupported KDL value type: {type(value).__name__}")
+    location = ""
+    if key is not None and source is not None:
+        location = f" (key '{key}' in {source})"
+    elif key is not None:
+        location = f" (key '{key}')"
+    elif source is not None:
+        location = f" (in {source})"
+    raise ConfigError(
+        f"unsupported KDL value type: {type(value).__name__}{location}"
+    )
 
 
 def _parse_template(node, source: Path) -> Template:
@@ -144,7 +158,7 @@ def _parse_template(node, source: Path) -> Template:
             raise ConfigError(
                 f"template '{name}' in {source}: '{key}' must be a string"
             )
-        value_str = _coerce_value(raw)
+        value_str = _coerce_value(raw, key=key, source=source)
         if key == "agent":
             tpl.agent = value_str
         elif key == "prompt":

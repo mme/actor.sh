@@ -321,10 +321,6 @@ def main(argv: Optional[List[str]] = None) -> None:
             sys.exit(1)
         return
 
-    # 'claude' subcommand is short-circuited above before argparse runs;
-    # this block is unreachable but kept for clarity if anything routes
-    # back into argparse with command == "claude".
-
     try:
         db = Database.open(_db_path())
     except Exception as e:

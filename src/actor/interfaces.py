@@ -5,7 +5,7 @@ import shutil
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Mapping, Optional, Tuple
 
 from .types import Config
 
@@ -30,11 +30,28 @@ class LogEntry:
 
 class Agent(abc.ABC):
     @abc.abstractmethod
-    def start(self, dir: Path, prompt: str, config: Config) -> Tuple[int, Optional[str]]:
-        """Start a new agent session. Returns (pid, optional session_id)."""
+    def start(
+        self,
+        dir: Path,
+        prompt: str,
+        config: Config,
+        env_extra: Optional[Mapping[str, str]] = None,
+    ) -> Tuple[int, Optional[str]]:
+        """Start a new agent session. Returns (pid, optional session_id).
+
+        env_extra augments the child process env (e.g. ACTOR_NAME). Implementations
+        must not mutate os.environ so concurrent callers don't see each other's keys.
+        """
 
     @abc.abstractmethod
-    def resume(self, dir: Path, session_id: str, prompt: str, config: Config) -> int:
+    def resume(
+        self,
+        dir: Path,
+        session_id: str,
+        prompt: str,
+        config: Config,
+        env_extra: Optional[Mapping[str, str]] = None,
+    ) -> int:
         """Resume an existing session with a new prompt. Returns pid."""
 
     @abc.abstractmethod

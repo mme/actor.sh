@@ -332,6 +332,24 @@ class RunCommandTests(unittest.TestCase):
                     main(["run", "foo", "-i"])
         self.assertEqual(ctx.exception.code, 128 + _sig.SIGTERM)
 
+    def test_run_dash_i_forwards_hooks_to_cmd_interactive(self):
+        """`actor run foo -i` must forward hooks= from loaded config."""
+        from actor import AppConfig, Hooks
+        hooks = Hooks(on_run="echo run-i")
+        app_config = AppConfig(hooks=hooks)
+        cmd_interactive = MagicMock(return_value=(0, "ok"))
+        fake_db = MagicMock()
+        with patch("actor.config.load_config", return_value=app_config), \
+             patch("actor.cli.cmd_interactive", cmd_interactive), \
+             patch("actor.cli.Database") as db_cls, \
+             patch("actor.cli._create_agent", return_value=MagicMock()):
+            db_cls.open.return_value = fake_db
+            with patch("sys.stderr", io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    main(["run", "foo", "-i"])
+        cmd_interactive.assert_called_once()
+        self.assertIs(cmd_interactive.call_args.kwargs.get("hooks"), hooks)
+
     def test_run_without_prompt_and_tty_exits_nonzero(self):
         from actor import AppConfig
         fake_db = MagicMock()
@@ -512,7 +530,7 @@ class SubClaudeChannelTests(unittest.TestCase):
 
         captured = {}
 
-        def fake_spawn(self, args, cwd, config):
+        def fake_spawn(self, args, cwd, config, env_extra=None):
             captured["args"] = args
             return 12345
 
@@ -530,7 +548,7 @@ class SubClaudeChannelTests(unittest.TestCase):
 
         captured = {}
 
-        def fake_spawn(self, args, cwd, config):
+        def fake_spawn(self, args, cwd, config, env_extra=None):
             captured["args"] = args
             return 12345
 
@@ -601,6 +619,62 @@ class McpToolTests(unittest.TestCase):
             server.run_actor(name="foo", prompt="do x", config=["model=opus"])
         args, kwargs = spawn.call_args
         self.assertEqual(kwargs["config_pairs"], ["model=opus"])
+
+    def test_new_actor_forwards_hooks_and_template(self):
+        """new_actor must thread hooks and template through to cmd_new so
+        on-start fires under the MCP path, not just the CLI path."""
+        from actor import server, AppConfig, Hooks
+        app_config = AppConfig(hooks=Hooks(on_start="echo start"))
+        with patch("actor.server._load_app_config", return_value=app_config), \
+             patch("actor.server.cmd_new") as cmd_new:
+            fake_actor = MagicMock()
+            fake_actor.dir = "/tmp/foo"
+            cmd_new.return_value = fake_actor
+            server.new_actor(name="foo", template="qa")
+        kwargs = cmd_new.call_args.kwargs
+        self.assertIs(kwargs["hooks"], app_config.hooks)
+        self.assertEqual(kwargs["template_name"], "qa")
+        self.assertIs(kwargs["app_config"], app_config)
+
+    def test_discard_actor_forwards_hooks_and_force(self):
+        from actor import server, AppConfig, Hooks
+        app_config = AppConfig(hooks=Hooks(on_discard="echo bye"))
+        with patch("actor.server._load_app_config", return_value=app_config), \
+             patch("actor.server.cmd_discard", return_value="foo discarded") as cmd_discard:
+            server.discard_actor(name="foo", force=True)
+        kwargs = cmd_discard.call_args.kwargs
+        self.assertIs(kwargs["hooks"], app_config.hooks)
+        self.assertTrue(kwargs["force"])
+
+    def test_spawn_background_run_forwards_hooks_to_cmd_run(self):
+        """The thread body inside _spawn_background_run must call cmd_run
+        with hooks= from the loaded config."""
+        from actor import server, AppConfig, Hooks
+        app_config = AppConfig(hooks=Hooks(on_run="echo run"))
+        captured: dict = {}
+
+        def fake_thread(target, daemon=False):
+            class _T:
+                def start(self_inner):
+                    target()
+            return _T()
+
+        class _FakeActor:
+            agent = "claude"
+        fake_db = MagicMock()
+        fake_db.get_actor.return_value = _FakeActor()
+        fake_db.resolve_actor_status.return_value = MagicMock(value="done")
+
+        with patch("actor.server._load_app_config", return_value=app_config), \
+             patch("actor.server._db", return_value=fake_db), \
+             patch("actor.server.Database") as Db_cls, \
+             patch("actor.server._create_agent"), \
+             patch("actor.server.cmd_run", return_value="ok") as cmd_run, \
+             patch("actor.server.threading.Thread", side_effect=fake_thread):
+            Db_cls.open.return_value = fake_db
+            server._spawn_background_run("foo", "do x", config_pairs=[], ctx=None)
+            captured["kwargs"] = cmd_run.call_args.kwargs
+        self.assertIs(captured["kwargs"]["hooks"], app_config.hooks)
 
 
 if __name__ == "__main__":

@@ -78,16 +78,6 @@ def _format_duration(started_at: str, finished_at: Optional[str]) -> str:
     return f"{remainder}s"
 
 
-def _create_agent(kind: AgentKind) -> Agent:
-    if kind == AgentKind.CLAUDE:
-        return ClaudeAgent()
-    elif kind == AgentKind.CODEX:
-        return CodexAgent()
-    else:
-        raise ActorError(f"unknown agent kind: {kind}")
-
-
-
 def _format_log_timestamp(ts: Optional[str]) -> str:
     if ts is None:
         return ""
@@ -195,9 +185,10 @@ def cmd_new(
         db.insert_actor(actor)
     except ActorError:
         if worktree:
+            assert source_repo is not None
             wt_path = _worktree_path(name)
             try:
-                git.remove_worktree(Path(source_repo), wt_path)  # type: ignore[arg-type]
+                git.remove_worktree(Path(source_repo), wt_path)
             except Exception as cleanup_err:
                 print(f"warning: failed to clean up worktree at {wt_path}: {cleanup_err}", file=sys.stderr)
         raise
@@ -211,23 +202,24 @@ def cmd_new(
             actor_agent=agent_kind.as_str(),
             actor_session_id=None,
         )
+        # Broad catch: custom hook_runner (injectable) can raise anything.
+        # We still need to roll back the freshly-inserted actor row + worktree.
         try:
             run_hook("on-start", on_start, env, Path(actor_dir), runner=hook_runner)
-        except HookFailedError:
+        except Exception:
             try:
                 db.delete_actor(name)
             except Exception as rollback_err:
-                # Rollback best-effort: surface the failure so the operator
-                # knows the DB row may still be present after the hook aborted.
                 print(
                     f"warning: failed to roll back actor row for '{name}' "
                     f"after on-start hook failure: {rollback_err}",
                     file=sys.stderr,
                 )
             if worktree:
+                assert source_repo is not None
                 wt_path = _worktree_path(name)
                 try:
-                    git.remove_worktree(Path(source_repo), wt_path)  # type: ignore[arg-type]
+                    git.remove_worktree(Path(source_repo), wt_path)
                 except Exception as cleanup_err:
                     print(f"warning: failed to clean up worktree at {wt_path}: {cleanup_err}", file=sys.stderr)
             raise
@@ -285,8 +277,6 @@ def cmd_run(
         effective_config[k] = v
     effective_config = _sorted_config(effective_config)
 
-    dir_p = Path(actor.dir)
-
     # Insert run row BEFORE starting agent so list/show see it immediately
     now = _now_iso()
     run = Run(
@@ -303,27 +293,26 @@ def cmd_run(
     run_id = db.insert_run(run)
     db.touch_actor(name)
 
-    # Expose actor name to the agent process (set for child, cleaned up after)
-    prev_actor_name = os.environ.get("ACTOR_NAME")
-    os.environ["ACTOR_NAME"] = name
+    # Expose actor name to the agent process via env_extra — passed per-call
+    # so concurrent MCP runs don't clobber each other's ACTOR_NAME.
+    env_extra = {"ACTOR_NAME": name}
 
     # Start or resume
     try:
         if actor.agent_session is not None:
-            pid = agent.resume(dir_p, actor.agent_session, prompt, effective_config)
+            pid = agent.resume(
+                dir_path, actor.agent_session, prompt, effective_config,
+                env_extra=env_extra,
+            )
             new_session: Optional[str] = None
         else:
-            pid, new_session = agent.start(dir_p, prompt, effective_config)
+            pid, new_session = agent.start(
+                dir_path, prompt, effective_config, env_extra=env_extra,
+            )
     except Exception:
         # Agent failed to start — mark run as error
         db.update_run_status(run_id, Status.ERROR, -1)
         raise
-    finally:
-        # Restore ACTOR_NAME so the MCP server process isn't polluted
-        if prev_actor_name is None:
-            os.environ.pop("ACTOR_NAME", None)
-        else:
-            os.environ["ACTOR_NAME"] = prev_actor_name
 
     # Update PID on the run row
     db.update_run_pid(run_id, pid)
@@ -412,10 +401,16 @@ def cmd_interactive(
 
     env = dict(os.environ)
     env["ACTOR_NAME"] = name
+    # Scrub any inherited ACTOR_SESSION_ID so a parent actor's session doesn't
+    # leak into the child; set it explicitly when we know it.
+    if session_id is not None:
+        env["ACTOR_SESSION_ID"] = session_id
+    else:
+        env.pop("ACTOR_SESSION_ID", None)
 
     try:
         exit_code = (runner or _default_interactive_runner)(argv, dir_path, env)
-    except BaseException:
+    except Exception:
         db.update_run_status(run_id, Status.ERROR, -1)
         raise
 
@@ -441,13 +436,12 @@ def _default_interactive_runner(argv: List[str], cwd: Path, env: dict) -> int:
             try:
                 return proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                # Give up rather than block the shell forever. Surface a
-                # warning so the user can chase a zombie/stuck process.
-                print(
-                    f"warning: child pid {proc.pid} did not exit after SIGKILL",
-                    file=sys.stderr,
+                # Give up rather than block the shell forever. Raise so
+                # cmd_interactive marks the run as error; a negative sentinel
+                # would trick the CLI into reporting a signal (128-N).
+                raise ActorError(
+                    f"child pid {proc.pid} did not exit after SIGKILL"
                 )
-                return -1
 
 
 # -- cmd_list --

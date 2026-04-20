@@ -121,10 +121,11 @@ template "reviewer" {
 
 ### Lifecycle hooks
 
-Per-actor shell hooks declared in the same `settings.kdl` file. Each runs
-via `/bin/sh -c`, inheriting the caller's env plus `ACTOR_NAME`,
-`ACTOR_DIR`, `ACTOR_AGENT`, and (when set) `ACTOR_SESSION_ID`. Cwd is the
-actor directory.
+Shell hooks declared in the same `settings.kdl` file. They apply to
+every actor (merged across user + project `settings.kdl`). Each runs via
+`/bin/sh -c`, inheriting the caller's env plus `ACTOR_NAME`, `ACTOR_DIR`,
+`ACTOR_AGENT`, and (when set) `ACTOR_SESSION_ID`. Cwd is the actor
+directory.
 
 ```kdl
 hooks {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for actor CLI — ported from the Rust test suite (153 tests)."""
+"""Tests for actor CLI — ported from the Rust test suite."""
 from __future__ import annotations
 import json
 import os
@@ -39,11 +39,19 @@ AgentNotFound = AgentNotFoundError
 # ──────────────────────────────────────────────────────────────────────
 
 class FakeAgentCall:
-    def __init__(self, dir: str, prompt: str, config: dict, session_id: str | None):
+    def __init__(
+        self,
+        dir: str,
+        prompt: str,
+        config: dict,
+        session_id: str | None,
+        env_extra: dict | None = None,
+    ):
         self.dir = dir
         self.prompt = prompt
         self.config = config
         self.session_id = session_id
+        self.env_extra = env_extra
 
 
 class FakeAgent(Agent):
@@ -72,7 +80,13 @@ class FakeAgent(Agent):
 
     # -- Agent interface --
 
-    def start(self, dir: str, prompt: str, config: dict) -> tuple[int, str | None]:
+    def start(
+        self,
+        dir: str,
+        prompt: str,
+        config: dict,
+        env_extra: dict | None = None,
+    ) -> tuple[int, str | None]:
         if self.next_start_error is not None:
             err = self.next_start_error
             self.next_start_error = None
@@ -80,13 +94,28 @@ class FakeAgent(Agent):
         pid = self.next_pid
         self.next_pid += 1
         session_id = self.next_session_id
-        self.calls.append(FakeAgentCall(dir, prompt, dict(config), session_id=None))
+        self.calls.append(FakeAgentCall(
+            dir, prompt, dict(config),
+            session_id=None,
+            env_extra=dict(env_extra) if env_extra else None,
+        ))
         return pid, session_id
 
-    def resume(self, dir: str, session_id: str, prompt: str, config: dict) -> int:
+    def resume(
+        self,
+        dir: str,
+        session_id: str,
+        prompt: str,
+        config: dict,
+        env_extra: dict | None = None,
+    ) -> int:
         pid = self.next_pid
         self.next_pid += 1
-        self.calls.append(FakeAgentCall(dir, prompt, dict(config), session_id=session_id))
+        self.calls.append(FakeAgentCall(
+            dir, prompt, dict(config),
+            session_id=session_id,
+            env_extra=dict(env_extra) if env_extra else None,
+        ))
         return pid
 
     def wait(self, pid: int) -> tuple[int, str]:
@@ -919,7 +948,7 @@ class TestCmdInteractive(unittest.TestCase):
         def stop_race(argv, cwd, env):
             # Simulate the stop race: during the run, status flips to STOPPED
             latest = db.latest_run("test")
-            db.update_run_status(latest.id, Status.STOPPED, -1)
+            db.update_run_status(latest.id, Status.STOPPED, None)
             return 0
 
         cmd_interactive(
@@ -1970,7 +1999,7 @@ class TestCmdDiscard(unittest.TestCase):
         with self.assertRaises(NotFound):
             db.get_actor("feature")
 
-    def test_discard_force_stops_running_actor(self):
+    def test_discard_stops_running_actor(self):
         db = self._db()
         create_actor(db, "test", config=[])
         pm = FakeProcessManager()
@@ -2455,8 +2484,6 @@ class TestCmdNewOnStartHook(unittest.TestCase):
         def runner(cmd, env, cwd):
             return 1
 
-        original_delete = db.delete_actor
-
         def boom(name):
             raise RuntimeError("db busy")
 
@@ -2478,9 +2505,6 @@ class TestCmdNewOnStartHook(unittest.TestCase):
                 )
         self.assertIn("failed to roll back", stderr.getvalue())
         self.assertIn("foo", stderr.getvalue())
-
-        # Restore for any further use (paranoia; db is per-test anyway).
-        db.delete_actor = original_delete  # type: ignore[method-assign]
 
 
 # ──────────────────────────────────────────────────────────────────────

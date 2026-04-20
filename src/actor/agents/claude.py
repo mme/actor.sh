@@ -7,7 +7,7 @@ import subprocess
 import threading
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 from ..errors import ActorError
 from ..interfaces import Agent, LogEntry, LogEntryKind
@@ -43,12 +43,20 @@ class ClaudeAgent(Agent):
             return ["--dangerously-skip-permissions"]
         return ["--permission-mode", mode]
 
-    def _spawn_and_track(self, args: List[str], cwd: Path, config: Config) -> int:
+    def _spawn_and_track(
+        self,
+        args: List[str],
+        cwd: Path,
+        config: Config,
+        env_extra: Optional[Mapping[str, str]] = None,
+    ) -> int:
         strip = config.get("strip-api-keys", "true") != "false"
         if strip:
             env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
         else:
             env = dict(os.environ)
+        if env_extra:
+            env.update(env_extra)
         proc = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
@@ -80,7 +88,13 @@ class ClaudeAgent(Agent):
     # orchestrate their own children identically to the top-level Claude session.
     _CHANNEL_ARGS = ["--dangerously-load-development-channels", "server:actor"]
 
-    def start(self, dir: Path, prompt: str, config: Config) -> Tuple[int, Optional[str]]:
+    def start(
+        self,
+        dir: Path,
+        prompt: str,
+        config: Config,
+        env_extra: Optional[Mapping[str, str]] = None,
+    ) -> Tuple[int, Optional[str]]:
         session_id = str(uuid.uuid4())
         args = [
             "claude",
@@ -93,10 +107,17 @@ class ClaudeAgent(Agent):
             "--",
             prompt,
         ]
-        pid = self._spawn_and_track(args, dir, config)
+        pid = self._spawn_and_track(args, dir, config, env_extra=env_extra)
         return pid, session_id
 
-    def resume(self, dir: Path, session_id: str, prompt: str, config: Config) -> int:
+    def resume(
+        self,
+        dir: Path,
+        session_id: str,
+        prompt: str,
+        config: Config,
+        env_extra: Optional[Mapping[str, str]] = None,
+    ) -> int:
         args = [
             "claude",
             *self._CHANNEL_ARGS,
@@ -108,7 +129,7 @@ class ClaudeAgent(Agent):
             "--",
             prompt,
         ]
-        return self._spawn_and_track(args, dir, config)
+        return self._spawn_and_track(args, dir, config, env_extra=env_extra)
 
     def wait(self, pid: int) -> Tuple[int, str]:
         with self._lock:

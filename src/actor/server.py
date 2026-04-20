@@ -15,6 +15,7 @@ from mcp.server.stdio import stdio_server
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage, JSONRPCNotification
 
+from .config import AppConfig, load_config
 from .db import Database
 from .errors import ActorError
 from .git import RealGit
@@ -30,6 +31,13 @@ from .commands import (
     cmd_stop,
 )
 from .cli import _db_path, _create_agent
+
+
+def _load_app_config() -> AppConfig:
+    """Fresh AppConfig per call: settings.kdl can change between tool
+    invocations and we want new templates / hook edits to take effect
+    without restarting the MCP server."""
+    return load_config()
 
 
 class ActorMCP(FastMCP):
@@ -142,13 +150,20 @@ def stop_actor(name: str) -> str:
 
 
 @mcp.tool()
-def discard_actor(name: str) -> str:
+def discard_actor(name: str, force: bool = False) -> str:
     """Remove an actor from the database. Stops it first if running. Worktree stays on disk.
 
     Args:
         name: Actor name.
+        force: Bypass on-discard hook failures.
     """
-    return cmd_discard(_db(), RealProcessManager(), name=name)
+    app_config = _load_app_config()
+    return cmd_discard(
+        _db(), RealProcessManager(),
+        name=name,
+        hooks=app_config.hooks,
+        force=force,
+    )
 
 
 @mcp.tool()
@@ -172,6 +187,7 @@ def _spawn_background_run(
     pm = RealProcessManager()
     actor = _db().get_actor(name)
     agent_impl = _create_agent(actor.agent)
+    app_config = _load_app_config()
 
     session = ctx.session if ctx else None
     try:
@@ -188,6 +204,7 @@ def _spawn_background_run(
                 name=name,
                 prompt=prompt,
                 config_pairs=config_pairs,
+                hooks=app_config.hooks,
             )
         except Exception as e:
             output = str(e)
@@ -222,6 +239,7 @@ def new_actor(
     base: str | None = None,
     no_worktree: bool = False,
     config: List[str] | None = None,
+    template: str | None = None,
     ctx: Context | None = None,
 ) -> str:
     """Create a new actor. If a prompt is given, also runs it in the background.
@@ -234,9 +252,11 @@ def new_actor(
         base: Branch to create the worktree from (defaults to current branch).
         no_worktree: If True, skip worktree creation.
         config: Config key=value pairs saved as actor defaults (e.g. ["model=opus", "effort=max"]).
+        template: Name of a template from settings.kdl to apply.
     """
     db = _db()
     git = RealGit()
+    app_config = _load_app_config()
     actor = cmd_new(
         db, git,
         name=name,
@@ -245,6 +265,9 @@ def new_actor(
         base=base,
         agent_name=agent,
         config_pairs=config or [],
+        template_name=template,
+        app_config=app_config,
+        hooks=app_config.hooks,
     )
 
     if prompt is not None:
