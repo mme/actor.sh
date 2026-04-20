@@ -291,5 +291,88 @@ class TestLoadConfigCwdUnderHome(unittest.TestCase):
             self.assertEqual(cfg.templates["qa"].agent, "codex")
 
 
+class TestLoadConfigAgentDefaults(unittest.TestCase):
+
+    def _load(self, body: str) -> AppConfig:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(body)
+            return load_config(cwd=Path(cwd), home=Path(home))
+
+    def test_single_key_default_config(self):
+        cfg = self._load(
+            'agent "claude" {\n'
+            '    default-config {\n'
+            '        model "opus"\n'
+            '    }\n'
+            '}\n'
+        )
+        self.assertEqual(cfg.agent_defaults, {"claude": {"model": "opus"}})
+
+    def test_multiple_keys_in_default_config(self):
+        cfg = self._load(
+            'agent "claude" {\n'
+            '    default-config {\n'
+            '        model "opus"\n'
+            '        effort "max"\n'
+            '        strip-api-keys true\n'
+            '    }\n'
+            '}\n'
+        )
+        self.assertEqual(cfg.agent_defaults["claude"], {
+            "model": "opus", "effort": "max", "strip-api-keys": "true",
+        })
+
+    def test_blocks_for_multiple_agents(self):
+        cfg = self._load(
+            'agent "claude" {\n'
+            '    default-config {\n'
+            '        model "opus"\n'
+            '    }\n'
+            '}\n'
+            'agent "codex" {\n'
+            '    default-config {\n'
+            '        sandbox "danger-full-access"\n'
+            '    }\n'
+            '}\n'
+        )
+        self.assertEqual(cfg.agent_defaults["claude"], {"model": "opus"})
+        self.assertEqual(cfg.agent_defaults["codex"], {"sandbox": "danger-full-access"})
+
+    def test_empty_default_config_block_yields_empty_dict(self):
+        cfg = self._load(
+            'agent "claude" {\n'
+            '    default-config {\n'
+            '    }\n'
+            '}\n'
+        )
+        # Empty default-config contributes no keys; presence in
+        # agent_defaults implies at least one declared key.
+        self.assertNotIn("claude", cfg.agent_defaults)
+
+    def test_agent_block_without_default_config_is_ignored(self):
+        # Forward-compat: hooks etc. may live under `agent` in future
+        # tickets; an agent block with no `default-config` child parses
+        # without error and contributes no defaults.
+        cfg = self._load('agent "claude" {\n}\n')
+        self.assertNotIn("claude", cfg.agent_defaults)
+
+    def test_non_default_config_children_of_agent_are_ignored(self):
+        # Forward-compat: #30 will add `hooks {}` under `agent`. Unknown
+        # children parse as no-ops today.
+        cfg = self._load(
+            'agent "claude" {\n'
+            '    hooks {\n'
+            '        on-start "echo hi"\n'
+            '    }\n'
+            '    default-config {\n'
+            '        model "opus"\n'
+            '    }\n'
+            '}\n'
+        )
+        self.assertEqual(cfg.agent_defaults["claude"], {"model": "opus"})
+
+
 if __name__ == "__main__":
     unittest.main()

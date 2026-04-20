@@ -2,22 +2,23 @@
 
 Loads ~/.actor/settings.kdl (user) and <project>/.actor/settings.kdl
 (project), merges them, and exposes the merged AppConfig with its
-templates map. Project config overrides user config on same-key conflict.
+templates map and per-agent default-config overrides. Project config
+overrides user config on same-key conflict.
 
-Out of scope (see tickets #30 / #31 / #33): hooks, per-agent default-config
-blocks, aliases. Their nodes are skipped at parse time without error for
-forward compatibility.
+Out of scope (see tickets #30 / #33): hooks, aliases. Their nodes are
+skipped at parse time without error for forward compatibility.
 """
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import kdl
 
 from .errors import ConfigError
+from .types import AgentKind
 
 
 @dataclass
@@ -31,6 +32,7 @@ class Template:
 @dataclass
 class AppConfig:
     templates: Dict[str, Template] = field(default_factory=dict)
+    agent_defaults: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
 
 def _find_project_config(
@@ -145,6 +147,99 @@ def _parse_template(node, source: Path) -> Template:
     return tpl
 
 
+def _parse_default_config(node, agent_name: str, source: Path) -> Dict[str, str]:
+    """Parse a `default-config { … }` block inside an `agent` block.
+
+    Same shape rules as template children: each child is `key "value"`
+    with exactly one scalar arg, no props, no duplicates. Unknown keys
+    pass through (no fixed schema — they're consumed by the agent at
+    spawn time).
+    """
+    if node.args:
+        raise ConfigError(
+            f"agent '{agent_name}' in {source}: `default-config` does not "
+            f"accept positional arguments"
+        )
+    if getattr(node, "props", None):
+        raise ConfigError(
+            f"agent '{agent_name}' in {source}: `default-config` does not "
+            f"accept properties"
+        )
+    out: Dict[str, str] = {}
+    for child in node.nodes:
+        key = child.name
+        if key in out:
+            raise ConfigError(
+                f"agent '{agent_name}' in {source}: duplicate key '{key}' "
+                f"in default-config"
+            )
+        if not child.args:
+            raise ConfigError(
+                f"agent '{agent_name}' in {source}: '{key}' needs a value"
+            )
+        if len(child.args) > 1:
+            raise ConfigError(
+                f"agent '{agent_name}' in {source}: '{key}' has extra args "
+                f"(only a single value is supported)"
+            )
+        if getattr(child, "props", None):
+            raise ConfigError(
+                f"agent '{agent_name}' in {source}: '{key}' does not accept "
+                f"properties"
+            )
+        out[key] = _coerce_value(child.args[0])
+    return out
+
+
+def _parse_agent_block(node, source: Path) -> Tuple[str, Dict[str, str]]:
+    """Parse an `agent "name" { … }` block. Returns (agent_name, defaults).
+
+    Validates the agent name against AgentKind so typos (`agent "cluade"`)
+    fail fast. Children other than `default-config` are silently ignored
+    so future tickets (hooks etc.) can share the block without breaking
+    today's parser.
+    """
+    if not node.args or not isinstance(node.args[0], str):
+        raise ConfigError(
+            f"agent block in {source} must have a name "
+            f"(e.g. `agent \"claude\" {{ … }}`)"
+        )
+    if not node.args[0]:
+        raise ConfigError(
+            f"agent block in {source} must have a non-empty name"
+        )
+    if len(node.args) > 1:
+        raise ConfigError(
+            f"agent '{node.args[0]}' in {source} has extra positional args"
+        )
+    if getattr(node, "props", None):
+        raise ConfigError(
+            f"agent '{node.args[0]}' in {source} does not accept properties"
+        )
+    name = node.args[0]
+    valid = [k.value for k in AgentKind]
+    if name not in valid:
+        raise ConfigError(
+            f"agent block in {source}: unknown agent '{name}' "
+            f"(valid: {', '.join(valid)})"
+        )
+
+    defaults: Dict[str, str] = {}
+    seen_default_config = False
+    for child in node.nodes:
+        if child.name != "default-config":
+            # Forward-compat: e.g. hooks (#30). Silently skipped today.
+            continue
+        if seen_default_config:
+            raise ConfigError(
+                f"agent '{name}' in {source}: multiple `default-config` "
+                f"blocks (only one is allowed)"
+            )
+        seen_default_config = True
+        defaults = _parse_default_config(child, name, source)
+    return name, defaults
+
+
 def _parse_kdl_file(path: Path) -> AppConfig:
     try:
         text = path.read_text()
@@ -163,15 +258,31 @@ def _parse_kdl_file(path: Path) -> AppConfig:
                     f"duplicate template '{tpl.name}' in {path}"
                 )
             cfg.templates[tpl.name] = tpl
-        # Silently ignore hooks / agent / alias — those belong to follow-up
-        # tickets #30 / #31 / #33 and are not implemented here.
+        elif node.name == "agent":
+            name, defaults = _parse_agent_block(node, path)
+            if name in cfg.agent_defaults:
+                raise ConfigError(
+                    f"duplicate agent block '{name}' in {path}"
+                )
+            # An agent block with no `default-config` child contributes
+            # nothing — preserve the invariant "presence in
+            # agent_defaults implies at least one declared key".
+            if defaults:
+                cfg.agent_defaults[name] = defaults
+        # Silently ignore hooks / alias — those belong to follow-up
+        # tickets #30 / #33 and are not implemented here.
     return cfg
 
 
 def _merge(base: AppConfig, over: AppConfig) -> AppConfig:
     merged_templates = dict(base.templates)
     merged_templates.update(over.templates)
-    return AppConfig(templates=merged_templates)
+    merged_agent_defaults = dict(base.agent_defaults)
+    merged_agent_defaults.update(over.agent_defaults)
+    return AppConfig(
+        templates=merged_templates,
+        agent_defaults=merged_agent_defaults,
+    )
 
 
 def load_config(
