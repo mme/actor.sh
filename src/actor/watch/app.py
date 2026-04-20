@@ -110,7 +110,7 @@ class ActorWatchApp(App):
         Binding("down,ctrl+n", "navigate_down", show=False),
         Binding("a", "focus_actors", "Actors"),
         Binding("p", "command_palette", "Palette"),
-        Binding("i", "enter_interactive", "Interactive", key_display="⏎ / i"),
+        Binding("i", "enter_interactive", "Interactive", key_display="⏎/i"),
         Binding("l", "show_tab('logs')", "Logs"),
         Binding("d", "show_tab('diff')", "Diff"),
         Binding("question_mark", "show_tab('info')", "Info"),
