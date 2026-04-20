@@ -15,6 +15,8 @@ from mcp.server.stdio import stdio_server
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage, JSONRPCNotification
 
+from .config import AppConfig, load_config
+from .configure import questions_to_payload, resolve_questions
 from .db import Database
 from .errors import ActorError
 from .git import RealGit
@@ -71,6 +73,12 @@ mcp = ActorMCP("actor.sh", instructions=_build_instructions())
 
 def _db() -> Database:
     return Database.open(_db_path())
+
+
+def _load_app_config() -> AppConfig:
+    """Indirection so tests can patch the config load without touching the
+    real filesystem."""
+    return load_config()
 
 
 async def _send_channel_notification(
@@ -149,6 +157,32 @@ def discard_actor(name: str) -> str:
         name: Actor name.
     """
     return cmd_discard(_db(), RealProcessManager(), name=name)
+
+
+@mcp.tool()
+def get_configure_questions(agent: str, model: str | None = None) -> dict:
+    """Return the configure question set for (agent, model) as an AskUserQuestion-shaped payload.
+
+    Use this when the user explicitly asks to be walked through actor setup
+    (e.g. "create an actor with setup", "help me configure this",
+    "--configure"). Pipe the returned `questions` array into AskUserQuestion
+    after dropping each entry's `key`, `kind`, `optional` fields — those
+    are only for mapping answers back to `new_actor` parameters.
+
+    When AskUserQuestion returns `{question_text: answer_value}`:
+      - If kind=="text" and answer_value is "Skip" / "Enter below",
+        the user didn't provide an answer — skip it.
+      - If key == "prompt", use answer_value as the `prompt` param on new_actor.
+      - Otherwise append "key=answer_value" to the `config` list on new_actor.
+
+    Args:
+        agent: Coding agent — "claude" or "codex".
+        model: Optional model hint. Selects a model-scoped configure block if
+               one exists in settings.kdl, otherwise the agent-level default.
+    """
+    cfg = _load_app_config()
+    questions = resolve_questions(cfg, agent=agent, model=model)
+    return questions_to_payload(questions)
 
 
 @mcp.tool()

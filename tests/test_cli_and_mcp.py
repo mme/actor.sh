@@ -476,5 +476,73 @@ class McpToolTests(unittest.TestCase):
         self.assertEqual(kwargs["config_pairs"], ["model=opus"])
 
 
+class GetConfigureQuestionsTests(unittest.TestCase):
+    """MCP `get_configure_questions(agent, model)` tool."""
+
+    def _call(self, agent="claude", model=None, app_config=None):
+        from actor import AppConfig, server
+        if app_config is None:
+            app_config = AppConfig()
+        with patch("actor.server._load_app_config", return_value=app_config):
+            return server.get_configure_questions(agent=agent, model=model)
+
+    def test_returns_builtin_claude_questions(self):
+        from actor.configure import BUILTIN_QUESTIONS
+        result = self._call(agent="claude")
+        keys = [q["key"] for q in result["questions"]]
+        self.assertEqual(keys, [q.key for q in BUILTIN_QUESTIONS["claude"]])
+
+    def test_returns_builtin_codex_questions(self):
+        result = self._call(agent="codex")
+        keys = {q["key"] for q in result["questions"]}
+        self.assertIn("sandbox", keys)
+
+    def test_unknown_agent_raises(self):
+        with self.assertRaises(ActorError):
+            self._call(agent="bogus")
+
+    def test_disabled_raises(self):
+        from actor import AppConfig
+        from actor.configure import ConfigureDisabledError
+        cfg = AppConfig(configure_default="off")
+        with self.assertRaises(ConfigureDisabledError):
+            self._call(agent="claude", app_config=cfg)
+
+    def test_model_scoped_override_is_honored(self):
+        from actor import (
+            AgentSettings,
+            AppConfig,
+            ConfigureBlock,
+            Question,
+            QuestionOption,
+        )
+        agent = AgentSettings(
+            name="claude",
+            configure_blocks={
+                "opus": ConfigureBlock(
+                    model="opus",
+                    questions=[
+                        Question(
+                            key="custom",
+                            prompt="Custom?",
+                            header="Custom",
+                            options=[QuestionOption("x"), QuestionOption("y")],
+                        )
+                    ],
+                )
+            },
+        )
+        cfg = AppConfig(agents={"claude": agent})
+        result = self._call(agent="claude", model="opus", app_config=cfg)
+        self.assertEqual([q["key"] for q in result["questions"]], ["custom"])
+
+    def test_text_question_gets_two_sentinel_options(self):
+        result = self._call(agent="claude")
+        prompt_q = next(q for q in result["questions"] if q["key"] == "prompt")
+        labels = {o["label"] for o in prompt_q["options"]}
+        self.assertIn("Skip", labels)
+        self.assertIn("Enter below", labels)
+
+
 if __name__ == "__main__":
     unittest.main()
