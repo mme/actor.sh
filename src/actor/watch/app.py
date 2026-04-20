@@ -583,6 +583,11 @@ class ActorWatchApp(App):
         # is no longer in the registry so the "no session" branch fires.
         self._refresh_detail()
         self._sync_detail_view()
+        # The terminal widget just unmounted — focus would otherwise
+        # land on nothing. Drop it back onto the tree so the user can
+        # immediately navigate to another actor.
+        self.set_focus(None)
+        self.call_after_refresh(lambda: self.query_one(ActorTree).focus())
 
     def action_dump_diagnostics(self) -> None:
         import sys
