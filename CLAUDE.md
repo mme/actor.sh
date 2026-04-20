@@ -8,7 +8,7 @@ Manages multiple Claude/Codex agents running in isolated git worktrees.
 src/actor/               # Python package
   cli.py                 # argparse CLI, command dispatch
   commands.py            # Command implementations (cmd_new, cmd_run, cmd_list, etc.)
-  config.py              # KDL loader for ~/.actor/settings.kdl + <repo>/.actor/settings.kdl — templates
+  config.py              # KDL loader for ~/.actor/settings.kdl + <repo>/.actor/settings.kdl — templates & per-agent defaults
   setup.py               # 'actor setup' / 'actor update' — deploy bundled skill + register MCP
   server.py              # MCP server entry point
   db.py                  # SQLite database layer (~/.actor/actor.db)
@@ -152,12 +152,14 @@ Per-agent default config lives in `agent "claude" { default-config { … } }`
 keys at creation time. User-wide and project-level blocks merge per key;
 project wins on same-key conflicts.
 
-Precedence for the final per-actor config (lowest → highest): built-in
-agent defaults → per-agent `default-config` (merged user+project) →
-template config (`--template`) → CLI `--config key=value`. The resolved
-merge is snapshotted into the DB at `actor new`; later edits to
-`settings.kdl` don't retroactively change existing actors — use
-`actor config <name> key=value` to mutate an actor's stored config.
+Precedence at actor creation (`actor new`), lowest → highest: per-agent
+`default-config` (merged user+project) → template config (`--template`)
+→ CLI `--config key=value`. The resolved merge is snapshotted into the
+DB at creation; later edits to `settings.kdl` don't retroactively change
+existing actors — use `actor config <name> key=value` to mutate an
+actor's stored config. At run time (`actor run`), the stored config is
+the base and per-run `--config` arguments layer on top for that run
+only.
 
 Unknown top-level nodes (e.g. `hooks`, `alias`) are silently ignored
 for forward-compat with follow-up tickets #30 / #33.

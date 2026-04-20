@@ -149,24 +149,27 @@ agent "codex" {
 Valid keys are anything the agent itself accepts — same catalogue as
 [claude-config.md](claude-config.md) and [codex-config.md](codex-config.md).
 
-Precedence (lowest → highest):
+Precedence at actor **creation** (`new_actor` / `actor new`),
+lowest → highest:
 
-1. Built-in defaults (hard-coded per agent)
-2. **Per-agent defaults from `settings.kdl`** (user + project merged per
-   key; project wins on same-key conflicts)
-3. Template config (`--template X`)
-4. CLI `--config key=value`
-5. Per-actor DB config (persisted by `config_actor` / `actor config`)
+1. **Per-agent defaults from `settings.kdl`** (user + project merged
+   per key; project wins on same-key conflicts)
+2. Template config (`--template X`)
+3. CLI `config` / `--config key=value`
 
-User and project `settings.kdl` are not separate layers in the precedence
-chain — they merge per key into a single per-agent map before precedence
-is applied, so a user-wide `model "opus"` plus a project-scoped
+User and project `settings.kdl` are not separate layers in this chain —
+they merge per key into a single per-agent map before precedence is
+applied, so a user-wide `model "opus"` plus a project-scoped
 `effort "max"` both survive.
 
-`settings.kdl` is read when the actor is **created**. Editing the file
-later does not retroactively change existing actors — use
-`config_actor(name="…", pairs=[…])` (MCP) or `actor config <name> key=value`
-(CLI) to update an actor's stored config.
+The merge result is snapshotted into the actor's stored config. Editing
+`settings.kdl` later does not retroactively change existing actors —
+use `config_actor(name="…", pairs=[…])` (MCP) or
+`actor config <name> key=value` (CLI) to update the stored config.
+
+Precedence at **run** (`run_actor` / `actor run`): the actor's stored
+config is the base; per-run `config` / `--config` arguments layer on
+top for that run only and are not saved.
 
 **Applying a template** (CLI only — see note below):
 

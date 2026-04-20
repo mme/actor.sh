@@ -85,14 +85,16 @@ class TestLoadConfigAgentDefaults(unittest.TestCase):
         self.assertEqual(cfg.agent_defaults["claude"], {"model": "opus"})
         self.assertEqual(cfg.agent_defaults["codex"], {"sandbox": "danger-full-access"})
 
-    def test_empty_default_config_block_yields_empty_dict(self):
+    def test_empty_default_config_block_omits_agent_from_defaults(self):
         cfg = self._load(
             'agent "claude" {\n'
             '    default-config {\n'
             '    }\n'
             '}\n'
         )
-        self.assertEqual(cfg.agent_defaults["claude"], {})
+        # Empty default-config contributes no keys; presence in
+        # agent_defaults implies at least one declared key.
+        self.assertNotIn("claude", cfg.agent_defaults)
 
     def test_agent_block_without_default_config_is_ignored(self):
         # Forward-compat: hooks etc. may live under `agent` in future
@@ -147,11 +149,16 @@ Replace the import line `from typing import Dict, Optional` with:
 from typing import Dict, Optional, Tuple
 ```
 
-Add right after the existing `from .errors import ConfigError` line:
+Widen the errors import and add an AgentKind import:
 
 ```python
+from .errors import ActorError, ConfigError
 from .types import AgentKind
 ```
+
+(`ActorError` is the base class `AgentKind.from_str` raises; we catch
+it when re-raising as `ConfigError` so downstream typo messages stay
+uniform across the codebase.)
 
 Replace the `AppConfig` dataclass (currently around lines 31-33):
 
@@ -213,14 +220,21 @@ def _parse_agent_block(node, source: Path) -> Tuple[str, Dict[str, str]]:
     """Parse an `agent "name" { … }` block. Returns (agent_name, defaults).
 
     Validates the agent name against AgentKind so typos (`agent "cluade"`)
-    fail fast. Children other than `default-config` are silently ignored
-    so future tickets (hooks etc.) can share the block without breaking
-    today's parser.
+    fail fast. Block-style children other than `default-config` (no args)
+    are silently accepted as forward-compat no-ops for follow-up tickets
+    (hooks #30 etc.). Key-with-value children directly under `agent` —
+    e.g. `model "opus"` instead of `default-config { model "opus" }` —
+    raise so the user's keys aren't silently dropped.
     """
-    if not node.args or not isinstance(node.args[0], str):
+    if not node.args:
         raise ConfigError(
             f"agent block in {source} must have a name "
             f"(e.g. `agent \"claude\" {{ … }}`)"
+        )
+    if not isinstance(node.args[0], str):
+        raise ConfigError(
+            f"agent block in {source}: name must be a string, "
+            f"got {type(node.args[0]).__name__}"
         )
     if not node.args[0]:
         raise ConfigError(
@@ -237,25 +251,31 @@ def _parse_agent_block(node, source: Path) -> Tuple[str, Dict[str, str]]:
     name = node.args[0]
     try:
         AgentKind.from_str(name)
-    except Exception as e:
+    except ActorError as e:
+        valid = ", ".join(k.value for k in AgentKind)
         raise ConfigError(
             f"agent block in {source}: unknown agent '{name}' "
-            f"(valid: {', '.join(k.value for k in AgentKind)})"
+            f"(valid: {valid})"
         ) from e
 
     defaults: Dict[str, str] = {}
     seen_default_config = False
     for child in node.nodes:
-        if child.name != "default-config":
-            # Forward-compat: e.g. hooks (#30). Silently skipped today.
+        if child.name == "default-config":
+            if seen_default_config:
+                raise ConfigError(
+                    f"agent '{name}' in {source}: multiple `default-config` "
+                    f"blocks (only one is allowed)"
+                )
+            seen_default_config = True
+            defaults = _parse_default_config(child, name, source)
             continue
-        if seen_default_config:
+        if child.args:
             raise ConfigError(
-                f"agent '{name}' in {source}: multiple `default-config` "
-                f"blocks (only one is allowed)"
+                f"agent '{name}' in {source}: `{child.name}` cannot sit "
+                f"directly under an `agent` block — nest config keys "
+                f"inside `default-config {{ … }}`"
             )
-        seen_default_config = True
-        defaults = _parse_default_config(child, name, source)
     return name, defaults
 ```
 
@@ -272,6 +292,11 @@ def _parse_kdl_file(path: Path) -> AppConfig:
     except kdl.ParseError as e:
         raise ConfigError(f"parse error in {path}: {e}") from e
     cfg = AppConfig()
+    # Track seen agent names separately from `cfg.agent_defaults`, which
+    # only records agents that contributed at least one key. Without the
+    # separate set, a first empty `agent "claude" { … }` block would not
+    # be detected as a duplicate when a later block declared real keys.
+    seen_agents: set[str] = set()
     for node in doc.nodes:
         if node.name == "template":
             tpl = _parse_template(node, path)
@@ -282,15 +307,25 @@ def _parse_kdl_file(path: Path) -> AppConfig:
             cfg.templates[tpl.name] = tpl
         elif node.name == "agent":
             name, defaults = _parse_agent_block(node, path)
-            if name in cfg.agent_defaults:
+            if name in seen_agents:
                 raise ConfigError(
                     f"duplicate agent block '{name}' in {path}"
                 )
-            # An agent block with no `default-config` child contributes no
-            # defaults — don't create an empty entry, keep the invariant
-            # "presence in agent_defaults implies defaults were declared".
+            seen_agents.add(name)
+            # An agent block with no `default-config` child contributes
+            # nothing — preserve the invariant "presence in
+            # agent_defaults implies at least one declared key".
             if defaults:
                 cfg.agent_defaults[name] = defaults
+        elif node.name == "default-config":
+            # A top-level `default-config` block is a common misread of
+            # the schema; without this branch the user's keys would
+            # silently vanish.
+            raise ConfigError(
+                f"top-level `default-config` block in {path} is not "
+                f"supported — nest it inside `agent \"claude\" {{ … }}` "
+                f"or `agent \"codex\" {{ … }}`"
+            )
         # Silently ignore hooks / alias — those belong to follow-up
         # tickets #30 / #33 and are not implemented here.
     return cfg
@@ -853,23 +888,26 @@ that:
 2. Points to `claude-config.md` / `codex-config.md` for valid keys.
 3. Spells out the precedence ladder and merge rule. Treat user and
    project `settings.kdl` as a single merged layer — NOT as separate
-   ordered steps — to match how `_merge` folds them per key. Recommended
-   phrasing:
+   ordered steps — to match how `_merge` folds them per key. The ladder
+   covers only the inputs `cmd_new` actually consumes at creation time;
+   don't invent phantom layers (e.g. "built-in defaults") that don't
+   exist in the code. Recommended phrasing:
 
    ```
-   Precedence (lowest → highest):
+   Precedence at actor creation (lowest → highest):
 
-   1. Built-in defaults
-   2. Per-agent defaults from `settings.kdl` (user + project merged per
+   1. Per-agent defaults from `settings.kdl` (user + project merged per
       key; project wins on conflicts)
-   3. Template config (`--template X`)
-   4. CLI `--config key=value`
-   5. Per-actor DB config
+   2. Template config (`--template X`)
+   3. CLI `--config key=value`
 
    `settings.kdl` is read at actor CREATION time. Editing the file later
    does not retroactively change existing actors — use
    `config_actor(name="…", pairs=[…])` / `actor config <name> key=value`
    to update an actor's stored config.
+
+   At run time (`actor run`), the stored config is the base and per-run
+   `--config` arguments layer on top for that run only.
    ```
 
 - [ ] **Step 2: Update CLAUDE.md — extend the "Config files & templates" section**
@@ -879,10 +917,9 @@ In `CLAUDE.md`, replace the forward-compat paragraph that mentions
 
 1. A per-agent-defaults paragraph that describes the block shape,
    mentions user+project per-key merge, and inlines the precedence
-   ladder (lowest → highest: built-in → per-agent defaults → template →
-   CLI `--config`). Include a sentence about snapshot-at-creation —
-   editing `settings.kdl` later does not retroactively change existing
-   actors.
+   ladder (lowest → highest: per-agent defaults → template → CLI
+   `--config`). Include a sentence about snapshot-at-creation — editing
+   `settings.kdl` later does not retroactively change existing actors.
 2. A short forward-compat paragraph that still mentions `hooks` / `alias`
    (no longer `agent`) as silently ignored for tickets #30 / #33.
 

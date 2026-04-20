@@ -407,7 +407,7 @@ class TestLoadConfigAgentDefaultsStrict(unittest.TestCase):
     def test_non_string_agent_name_raises(self):
         self._expect_error(
             'agent 42 {\n    default-config {\n    }\n}\n',
-            "name",
+            "must be a string",
         )
 
     def test_extra_positional_on_agent_raises(self):
@@ -419,14 +419,14 @@ class TestLoadConfigAgentDefaultsStrict(unittest.TestCase):
     def test_props_on_agent_node_raises(self):
         self._expect_error(
             'agent "claude" flag="x" {\n    default-config {\n    }\n}\n',
-            "claude",
+            "does not accept properties",
         )
 
     def test_duplicate_agent_block_in_file_raises(self):
         self._expect_error(
             'agent "claude" {\n    default-config {\n        model "opus"\n    }\n}\n'
             'agent "claude" {\n    default-config {\n        model "sonnet"\n    }\n}\n',
-            "claude",
+            "duplicate agent block 'claude'",
         )
 
     def test_multiple_default_config_blocks_in_one_agent_raises(self):
@@ -510,6 +510,72 @@ class TestLoadConfigAgentDefaultsStrict(unittest.TestCase):
             "default-config",
         )
 
+    def test_duplicate_agent_block_detected_even_if_first_is_empty(self):
+        # Regression: the duplicate check used to key off
+        # `cfg.agent_defaults`, which skipped empty blocks. A first empty
+        # block would therefore let a second block pass unchecked.
+        self._expect_error(
+            'agent "claude" {\n'
+            '    default-config {\n'
+            '    }\n'
+            '}\n'
+            'agent "claude" {\n'
+            '    default-config {\n'
+            '        model "opus"\n'
+            '    }\n'
+            '}\n',
+            "duplicate agent block 'claude'",
+        )
+
+    def test_duplicate_agent_block_detected_when_both_empty(self):
+        self._expect_error(
+            'agent "claude" {\n}\n'
+            'agent "claude" {\n}\n',
+            "duplicate agent block 'claude'",
+        )
+
+    def test_top_level_default_config_raises_helpful_error(self):
+        # A top-level `default-config {}` is almost always a misread of
+        # the schema. Without this check the keys would silently vanish
+        # into the forward-compat no-op bucket.
+        self._expect_error(
+            'default-config {\n'
+            '    model "opus"\n'
+            '}\n',
+            "top-level `default-config`",
+        )
+
+    def test_key_with_value_directly_under_agent_raises_helpful_error(self):
+        # User writing `model "opus"` directly under `agent "claude"`
+        # (forgetting the `default-config {}` wrapper) would otherwise
+        # see their config silently dropped.
+        self._expect_error(
+            'agent "claude" {\n'
+            '    model "opus"\n'
+            '}\n',
+            "nest config keys",
+        )
+
+    def test_forward_compat_block_children_of_agent_still_silently_parse(self):
+        # The key-with-value guard must not break forward-compat: a
+        # block-style child (e.g. `hooks { … }` from #30) has no args
+        # and should still be ignored as a no-op.
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(
+                'agent "claude" {\n'
+                '    hooks {\n'
+                '        on-start "echo hi"\n'
+                '    }\n'
+                '    default-config {\n'
+                '        model "opus"\n'
+                '    }\n'
+                '}\n'
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(cfg.agent_defaults["claude"], {"model": "opus"})
+
 
 class TestLoadConfigAgentDefaultsMerge(unittest.TestCase):
 
@@ -582,6 +648,41 @@ class TestLoadConfigAgentDefaultsMerge(unittest.TestCase):
             cfg = load_config(cwd=Path(cwd), home=Path(home))
             self.assertEqual(cfg.agent_defaults["claude"], {"model": "opus"})
             self.assertEqual(cfg.agent_defaults["codex"], {"sandbox": "danger-full-access"})
+
+    def test_asymmetric_mix_user_has_two_agents_project_only_one(self):
+        # User defines both claude + codex; project only touches claude.
+        # Expect: claude per-key merges (project wins), codex passes
+        # through unchanged.
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    default-config {\n'
+                '        model "opus"\n'
+                '        effort "max"\n'
+                '    }\n'
+                '}\n'
+                'agent "codex" {\n'
+                '    default-config {\n'
+                '        sandbox "danger-full-access"\n'
+                '    }\n'
+                '}\n',
+            )
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    default-config {\n'
+                '        model "sonnet"\n'
+                '    }\n'
+                '}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(cfg.agent_defaults["claude"], {
+                "model": "sonnet", "effort": "max",
+            })
+            self.assertEqual(cfg.agent_defaults["codex"], {
+                "sandbox": "danger-full-access",
+            })
 
     def test_templates_and_agent_defaults_coexist_in_same_file(self):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
