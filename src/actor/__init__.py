@@ -35,7 +35,15 @@ from .types import (
 )
 
 # Config
-from .config import AppConfig, Template, load_config
+from .config import (
+    AgentSettings,
+    AppConfig,
+    ConfigureBlock,
+    Question,
+    QuestionOption,
+    Template,
+    load_config,
+)
 
 # Interfaces
 from .interfaces import (
@@ -107,6 +115,10 @@ __all__ = [
     # Config
     "AppConfig",
     "Template",
+    "Question",
+    "QuestionOption",
+    "ConfigureBlock",
+    "AgentSettings",
     "load_config",
     # Interfaces
     "LogEntryKind",

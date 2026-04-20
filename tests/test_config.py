@@ -6,7 +6,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from actor.config import AppConfig, Template, load_config
+from actor.config import (
+    AgentSettings,
+    AppConfig,
+    ConfigureBlock,
+    Question,
+    QuestionOption,
+    Template,
+    load_config,
+)
 from actor.errors import ConfigError
 
 
@@ -289,6 +297,29 @@ class TestLoadConfigCwdUnderHome(unittest.TestCase):
             )
             cfg = load_config(cwd=proj, home=home_p)
             self.assertEqual(cfg.templates["qa"].agent, "codex")
+
+
+class TestAppConfigDefaults(unittest.TestCase):
+
+    def test_empty_app_config_has_no_agents_and_on_default(self):
+        cfg = AppConfig()
+        self.assertEqual(cfg.agents, {})
+        self.assertEqual(cfg.configure_default, "on")
+
+    def test_agent_settings_roundtrip(self):
+        block = ConfigureBlock(
+            model="opus",
+            questions=[
+                Question(
+                    key="effort",
+                    prompt="How hard?",
+                    header="Effort",
+                    options=[QuestionOption(label="max"), QuestionOption(label="low")],
+                )
+            ],
+        )
+        s = AgentSettings(name="claude", configure_blocks={"opus": block})
+        self.assertEqual(s.configure_blocks["opus"].questions[0].key, "effort")
 
 
 if __name__ == "__main__":

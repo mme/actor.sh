@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import kdl
 
@@ -29,8 +29,39 @@ class Template:
 
 
 @dataclass
+class QuestionOption:
+    label: str
+    description: str = ""
+
+
+@dataclass
+class Question:
+    key: str
+    prompt: str
+    header: str
+    options: List[QuestionOption]
+    kind: str = "options"
+    optional: bool = False
+    multi_select: bool = False
+
+
+@dataclass
+class ConfigureBlock:
+    model: Optional[str]
+    questions: List[Question]
+
+
+@dataclass
+class AgentSettings:
+    name: str
+    configure_blocks: Dict[Optional[str], ConfigureBlock] = field(default_factory=dict)
+
+
+@dataclass
 class AppConfig:
     templates: Dict[str, Template] = field(default_factory=dict)
+    agents: Dict[str, AgentSettings] = field(default_factory=dict)
+    configure_default: str = "on"
 
 
 def _find_project_config(
@@ -171,7 +202,29 @@ def _parse_kdl_file(path: Path) -> AppConfig:
 def _merge(base: AppConfig, over: AppConfig) -> AppConfig:
     merged_templates = dict(base.templates)
     merged_templates.update(over.templates)
-    return AppConfig(templates=merged_templates)
+    merged_agents: Dict[str, AgentSettings] = dict(base.agents)
+    for name, over_agent in over.agents.items():
+        if name in merged_agents:
+            merged_blocks = dict(merged_agents[name].configure_blocks)
+            merged_blocks.update(over_agent.configure_blocks)
+            merged_agents[name] = AgentSettings(
+                name=name, configure_blocks=merged_blocks
+            )
+        else:
+            merged_agents[name] = over_agent
+    # configure_default: a non-default value in `over` overrides. If `over`
+    # didn't set it, it's still "on" (the field default), so this preserves
+    # whatever `base` had.
+    merged_default = (
+        over.configure_default
+        if over.configure_default != "on"
+        else base.configure_default
+    )
+    return AppConfig(
+        templates=merged_templates,
+        agents=merged_agents,
+        configure_default=merged_default,
+    )
 
 
 def load_config(
