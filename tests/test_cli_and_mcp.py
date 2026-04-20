@@ -11,8 +11,33 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
+from actor import __version__
 from actor.cli import main
 from actor.errors import ActorError
+
+
+class VersionFlagTests(unittest.TestCase):
+    """`actor --version` / `-V` prints the installed version and exits 0."""
+
+    def _run(self, argv):
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            try:
+                main(argv)
+                code = 0
+            except SystemExit as e:
+                code = e.code if isinstance(e.code, int) else 1
+        return buf.getvalue(), code
+
+    def test_long_flag_prints_version(self):
+        out, code = self._run(["--version"])
+        self.assertEqual(code, 0)
+        self.assertIn(f"actor-sh {__version__}", out)
+
+    def test_short_flag_prints_version(self):
+        out, code = self._run(["-V"])
+        self.assertEqual(code, 0)
+        self.assertIn(f"actor-sh {__version__}", out)
 
 
 class NewCommandTests(unittest.TestCase):
