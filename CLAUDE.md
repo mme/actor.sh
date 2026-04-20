@@ -8,6 +8,7 @@ Manages multiple Claude/Codex agents running in isolated git worktrees.
 src/actor/               # Python package
   cli.py                 # argparse CLI, command dispatch
   commands.py            # Command implementations (cmd_new, cmd_run, cmd_list, etc.)
+  config.py              # KDL loader for ~/.actor/settings.kdl + <repo>/.actor/settings.kdl — templates
   setup.py               # 'actor setup' / 'actor update' — deploy bundled skill + register MCP
   server.py              # MCP server entry point
   db.py                  # SQLite database layer (~/.actor/actor.db)
@@ -114,6 +115,35 @@ Local dev installs (`uv sync`) get a PEP 440 dev version like
 `0.1.4.dev3+g1a2b3c4` derived from git state at install time, so
 `actor --version`, the MCP server's announced version, and the deployed
 SKILL.md all agree and the drift check still works.
+
+## Config files & templates
+
+`actor new` reads `~/.actor/settings.kdl` (user-wide) and
+`<repo>/.actor/settings.kdl` (project-local, discovered by walking up from
+CWD). Project values win when the same key appears in both. Missing files
+are ignored silently; malformed KDL raises `ConfigError` with the path.
+
+Templates are named presets for `actor new`:
+
+```kdl
+template "qa" {
+    agent "claude"
+    model "opus"
+    prompt "You're a QA engineer. Write tests for the changed code."
+}
+```
+
+Usage: `actor new foo --template qa` applies the template's agent + config +
+prompt. Explicit CLI flags (`--agent`, `--model`, `--config`, positional
+prompt / stdin) override the template. `agent` and `prompt` are promoted to
+top-level fields; every other child is stored as a config key (values
+coerced to strings).
+
+Unknown top-level nodes (e.g. `hooks`, `agent`, `alias`) are silently
+ignored for forward-compat with follow-up tickets.
+
+Load programmatically via `actor.config.load_config(cwd=..., home=...)` —
+both args default to `Path.cwd()` / `$HOME` so tests can inject temp dirs.
 
 ## Interactive mode
 
