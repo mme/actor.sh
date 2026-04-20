@@ -117,9 +117,16 @@ class InteractiveSessionManager:
         pty_session.spawn()
         # Record the pid so resolve_actor_status can see the child is alive;
         # without this the Run is classified ERROR by the liveness probe.
+        # The session is already live at this point — a DB hiccup here
+        # shouldn't kill the spawn, so we record and move on.
         if pty_session.pid is not None:
-            with self._db_opener() as db:
-                db.update_run_pid(run_id, pty_session.pid)
+            try:
+                with self._db_opener() as db:
+                    db.update_run_pid(run_id, pty_session.pid)
+            except Exception as e:
+                self._record_error(
+                    f"create({actor_name!r}) update_run_pid failed: {e!r}",
+                )
         return info
 
     def close(self, actor_name: str) -> None:

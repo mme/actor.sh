@@ -215,11 +215,23 @@ class PtySession:
                 self._record_error(f"shutdown remove_reader: {e!r}")
             self._unregister_writer()
         if self._pid is not None:
+            already_reaped = False
             try:
                 pid, status = os.waitpid(self._pid, os.WNOHANG)
             except ChildProcessError:
-                pid, status = -1, 0
-            if pid == 0:
+                # ECHILD: child already reaped elsewhere (asyncio child
+                # watcher, parent's SIGCHLD handler, etc). Record it so
+                # a future bug involving double-reap or pid reuse is
+                # visible in diagnostics.
+                self._record_error(
+                    f"shutdown_kill: pid {self._pid} already reaped (ECHILD)",
+                )
+                self._exit_code = -int(signal.SIGKILL)
+                already_reaped = True
+
+            if already_reaped:
+                pass
+            elif pid == 0:
                 # Still alive; don't block. Accept a transient zombie.
                 self._exit_code = -int(signal.SIGKILL)
                 self._record_error(

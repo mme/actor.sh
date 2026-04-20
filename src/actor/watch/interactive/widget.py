@@ -153,18 +153,21 @@ class TerminalWidget(Widget, can_focus=True):
 
         # PageUp/PageDown scroll local scrollback when the child isn't in
         # alt-screen (no scrollback ownership) and doesn't want to handle
-        # mouse/cursor events itself.
+        # mouse/cursor events itself. Always consume the event in this
+        # mode: forwarding PageUp to a shell when nothing moved would
+        # silently "do something else" in tools like less or the python
+        # REPL, which is worse than a visible no-op.
         if event.key in ("pageup", "pagedown") and self._should_scroll_locally():
+            event.stop()
+            event.prevent_default()
             moved = (
                 self._screen.history_up(self._screen.rows)
                 if event.key == "pageup"
                 else self._screen.history_down(self._screen.rows)
             )
             if moved:
-                event.stop()
-                event.prevent_default()
                 self._frame_counter += 1
-                return
+            return
 
         data = key_to_bytes(
             event.key,

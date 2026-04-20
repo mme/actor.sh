@@ -193,24 +193,16 @@ class LocalScrollTests(unittest.IsolatedAsyncioTestCase):
             app.widget._session.write = lambda data, _orig=orig, w=written: (
                 w.append(data), _orig(data),
             )[1]
-            from actor.watch.interactive.input import MouseButton
-            # Pre-scroll: emit wheel-up via the widget's emit path. Since
-            # should_scroll_locally is True, _emit_mouse won't be called —
-            # we need to invoke via the on_mouse_scroll_up handler. Go
-            # through the widget's internals to simulate.
-            # Direct handler call: scroll history instead of emitting bytes.
-            before_bottom_count = 0  # we don't measure directly; just assert no bytes
-            import textual.events as _evs
-            # Build event with minimal required fields.
-            event_cls = _evs.MouseScrollUp
-            # Just use the underlying routing logic — we already verified
-            # scroll-wheel mouse emit in MouseInputTests; here we assert
-            # the opposite branch.
-            # _should_scroll_locally is True (no alt_screen, no tracking).
-            self.assertTrue(app.widget._should_scroll_locally())
-            # Call history_up + bump counter to simulate the handler body.
-            moved = app.widget._screen.history_up(3)
-            self.assertTrue(moved, "should have history to scroll to")
+            # Build + dispatch a real MouseScrollUp through the handler.
+            from unittest.mock import MagicMock
+            fake = MagicMock(spec_set=["x", "y", "stop"])
+            fake.x, fake.y = 1, 1
+            await app.widget.on_mouse_scroll_up(fake)
+            fake.stop.assert_called_once()
+            self.assertEqual(
+                written, [],
+                "scroll-wheel-up in local mode must not forward bytes to child",
+            )
             app._session.close()
 
 

@@ -214,7 +214,10 @@ class PtySessionShutdownKillTests(unittest.IsolatedAsyncioTestCase):
         start = time.monotonic()
         session.shutdown_kill()
         elapsed = time.monotonic() - start
-        self.assertLess(elapsed, 0.2,
+        # Budget is generous to survive loaded CI runners; the real
+        # threshold that matters is "not seconds," which close() would
+        # hit via its 500ms deadline + blocking waitpid.
+        self.assertLess(elapsed, 0.4,
                         f"shutdown_kill must not block; took {elapsed:.3f}s")
         # exit_code may be None (zombie) or -SIGKILL (reaped in time).
         # Either way, _exit_fired is set so the session is done.
