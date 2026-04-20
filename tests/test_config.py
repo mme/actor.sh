@@ -342,6 +342,34 @@ class TestConfigureDefaultParsing(unittest.TestCase):
             cfg = load_config(cwd=Path(cwd), home=Path(home))
             self.assertEqual(cfg.configure_default, "off")
 
+    def test_project_on_overrides_user_off(self):
+        # A user who disabled configure globally should be able to re-enable
+        # it per-project — explicit overrides should win regardless of value.
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            (Path(home) / ".actor").mkdir()
+            (Path(home) / ".actor" / "settings.kdl").write_text(
+                'configure-default "off"\n'
+            )
+            (Path(cwd) / ".actor").mkdir()
+            (Path(cwd) / ".actor" / "settings.kdl").write_text(
+                'configure-default "on"\n'
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(cfg.configure_default, "on")
+
+    def test_user_off_preserved_when_project_does_not_set(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            (Path(home) / ".actor").mkdir()
+            (Path(home) / ".actor" / "settings.kdl").write_text(
+                'configure-default "off"\n'
+            )
+            (Path(cwd) / ".actor").mkdir()
+            (Path(cwd) / ".actor" / "settings.kdl").write_text(
+                'template "qa" {\n    agent "claude"\n}\n'
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(cfg.configure_default, "off")
+
 
 class TestAgentConfigureParsing(unittest.TestCase):
 
@@ -497,6 +525,19 @@ class TestAgentConfigureParsing(unittest.TestCase):
         )
         with self.assertRaises(ConfigError):
             self._load(body)
+
+    def test_empty_configure_block_raises(self):
+        # An empty `configure { }` block used to silently erase the agent's
+        # built-in question set. Force the user to be explicit.
+        body = (
+            'agent "claude" {\n'
+            "    configure {\n"
+            "    }\n"
+            "}\n"
+        )
+        with self.assertRaises(ConfigError) as ctx:
+            self._load(body)
+        self.assertIn("empty", str(ctx.exception))
 
     def test_project_configure_replaces_user_configure_for_same_agent_and_model(self):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:

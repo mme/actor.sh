@@ -351,19 +351,25 @@ def main(argv: Optional[List[str]] = None) -> None:
 
             configure_prompt: Optional[str] = None
             if args.configure is True:
-                # Resolve the agent hint the same way cmd_new does: explicit
-                # --agent wins; otherwise fall back to the template's agent if
-                # a template was named; otherwise default to claude.
+                # Resolve the agent + model the same way cmd_new does:
+                # explicit CLI args win; otherwise fall back to the template's
+                # values if a template was named; otherwise default to claude.
                 resolved_agent = args.agent or "claude"
-                if args.agent is None and args.template is not None:
+                resolved_model: Optional[str] = args.model
+                if args.template is not None:
                     tpl = app_config.templates.get(args.template)
-                    if tpl is not None and tpl.agent:
-                        resolved_agent = tpl.agent
+                    if tpl is not None:
+                        if args.agent is None and tpl.agent:
+                            resolved_agent = tpl.agent
+                        if resolved_model is None:
+                            tpl_model = tpl.config.get("model")
+                            if tpl_model:
+                                resolved_model = tpl_model
                 try:
                     questions = resolve_questions(
                         app_config,
                         agent=resolved_agent,
-                        model=args.model,
+                        model=resolved_model,
                     )
                 except ConfigureDisabledError as e:
                     print(f"error: {e}", file=sys.stderr)

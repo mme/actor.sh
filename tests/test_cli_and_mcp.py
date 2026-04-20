@@ -574,6 +574,55 @@ class ConfigureFlagTests(unittest.TestCase):
         cmd_run.assert_called_once()
         self.assertEqual(cmd_run.call_args.kwargs["prompt"], "cli prompt")
 
+    def test_configure_flag_uses_template_model_for_resolution(self):
+        """When --configure + --template is used (no explicit --model), the
+        resolver should see the template's model so model-scoped `configure`
+        blocks apply."""
+        from actor import AppConfig
+        from actor.config import (
+            AgentSettings,
+            ConfigureBlock,
+            Question,
+            QuestionOption,
+            Template,
+        )
+
+        opus_block = ConfigureBlock(
+            model="opus",
+            questions=[
+                Question(
+                    key="opus-only",
+                    prompt="?",
+                    header="Opus",
+                    options=[QuestionOption("a"), QuestionOption("b")],
+                )
+            ],
+        )
+        app_config = AppConfig(
+            templates={
+                "qa": Template(name="qa", agent="claude", config={"model": "opus"})
+            },
+            agents={
+                "claude": AgentSettings(
+                    name="claude", configure_blocks={"opus": opus_block}
+                )
+            },
+        )
+
+        captured = {}
+
+        def fake_prompt(questions, **_):
+            captured["keys"] = [q.key for q in questions]
+            return {}
+
+        prompt_fn = MagicMock(side_effect=fake_prompt)
+        self._run(
+            ["new", "foo", "--configure", "--template", "qa"],
+            prompt_fn=prompt_fn,
+            app_config=app_config,
+        )
+        self.assertEqual(captured["keys"], ["opus-only"])
+
 
 class GetConfigureQuestionsTests(unittest.TestCase):
     """MCP `get_configure_questions(agent, model)` tool."""

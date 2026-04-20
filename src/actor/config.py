@@ -62,6 +62,11 @@ class AppConfig:
     templates: Dict[str, Template] = field(default_factory=dict)
     agents: Dict[str, AgentSettings] = field(default_factory=dict)
     configure_default: str = "on"
+    # Did a config file explicitly set `configure_default`? Needed during
+    # merge so a project file can override a user file's value in both
+    # directions (e.g. user "off" → project "on"), independent of which
+    # value happens to equal the hardcoded default.
+    configure_default_set: bool = False
 
 
 def _find_project_config(
@@ -325,6 +330,11 @@ def _parse_configure_block(node, agent_name: str, source: Path) -> ConfigureBloc
             )
         seen_keys.add(q.key)
         questions.append(q)
+    if not questions:
+        raise ConfigError(
+            f"{block_desc} in {source}: block is empty — declare at least "
+            f"one question, or remove the block to fall back to built-ins"
+        )
     return ConfigureBlock(model=model, questions=questions)
 
 
@@ -393,6 +403,7 @@ def _parse_kdl_file(path: Path) -> AppConfig:
                     f"got {value!r}"
                 )
             cfg.configure_default = value
+            cfg.configure_default_set = True
         elif node.name == "agent":
             agent = _parse_agent(node, path)
             if agent.name in cfg.agents:
@@ -418,18 +429,19 @@ def _merge(base: AppConfig, over: AppConfig) -> AppConfig:
             )
         else:
             merged_agents[name] = over_agent
-    # configure_default: a non-default value in `over` overrides. If `over`
-    # didn't set it, it's still "on" (the field default), so this preserves
-    # whatever `base` had.
-    merged_default = (
-        over.configure_default
-        if over.configure_default != "on"
-        else base.configure_default
-    )
+    # configure_default: if `over` explicitly set it, that wins (either
+    # value). Otherwise inherit from `base` including its "set" flag.
+    if over.configure_default_set:
+        merged_default = over.configure_default
+        merged_default_set = True
+    else:
+        merged_default = base.configure_default
+        merged_default_set = base.configure_default_set
     return AppConfig(
         templates=merged_templates,
         agents=merged_agents,
         configure_default=merged_default,
+        configure_default_set=merged_default_set,
     )
 
 
