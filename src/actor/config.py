@@ -2,11 +2,12 @@
 
 Loads ~/.actor/settings.kdl (user) and <project>/.actor/settings.kdl
 (project), merges them, and exposes the merged AppConfig with its
-templates map. Project config overrides user config on same-key conflict.
+templates map and lifecycle hooks. Project config overrides user config
+on same-key conflict (templates by name, hooks per event).
 
-Out of scope (see tickets #30 / #31 / #33): hooks, per-agent default-config
-blocks, aliases. Their nodes are skipped at parse time without error for
-forward compatibility.
+Out of scope (see tickets #31 / #33): per-agent default-config blocks,
+aliases. Their nodes are skipped at parse time without error for forward
+compatibility.
 """
 from __future__ import annotations
 
@@ -29,8 +30,16 @@ class Template:
 
 
 @dataclass
+class Hooks:
+    on_start: Optional[str] = None
+    on_run: Optional[str] = None
+    on_discard: Optional[str] = None
+
+
+@dataclass
 class AppConfig:
     templates: Dict[str, Template] = field(default_factory=dict)
+    hooks: Hooks = field(default_factory=Hooks)
 
 
 def _find_project_config(
@@ -145,6 +154,59 @@ def _parse_template(node, source: Path) -> Template:
     return tpl
 
 
+_HOOK_KEYS = {
+    "on-start": "on_start",
+    "on-run": "on_run",
+    "on-discard": "on_discard",
+}
+
+
+def _parse_hooks(node, source: Path) -> Hooks:
+    if node.args:
+        raise ConfigError(
+            f"hooks block in {source} does not accept positional args"
+        )
+    if getattr(node, "props", None):
+        raise ConfigError(
+            f"hooks block in {source} does not accept properties"
+        )
+    hooks = Hooks()
+    seen: set[str] = set()
+    for child in node.nodes:
+        key = child.name
+        attr = _HOOK_KEYS.get(key)
+        if attr is None:
+            raise ConfigError(
+                f"hooks block in {source}: unknown hook '{key}' "
+                f"(valid: on-start, on-run, on-discard)"
+            )
+        if key in seen:
+            raise ConfigError(
+                f"hooks block in {source}: duplicate hook '{key}'"
+            )
+        seen.add(key)
+        if not child.args:
+            raise ConfigError(
+                f"hooks block in {source}: '{key}' needs a value"
+            )
+        if len(child.args) > 1:
+            raise ConfigError(
+                f"hooks block in {source}: '{key}' has extra args "
+                f"(only a single shell command is supported)"
+            )
+        if getattr(child, "props", None):
+            raise ConfigError(
+                f"hooks block in {source}: '{key}' does not accept properties"
+            )
+        raw = child.args[0]
+        if not isinstance(raw, str):
+            raise ConfigError(
+                f"hooks block in {source}: '{key}' must be a string"
+            )
+        setattr(hooks, attr, raw)
+    return hooks
+
+
 def _parse_kdl_file(path: Path) -> AppConfig:
     try:
         text = path.read_text()
@@ -163,15 +225,22 @@ def _parse_kdl_file(path: Path) -> AppConfig:
                     f"duplicate template '{tpl.name}' in {path}"
                 )
             cfg.templates[tpl.name] = tpl
-        # Silently ignore hooks / agent / alias — those belong to follow-up
-        # tickets #30 / #31 / #33 and are not implemented here.
+        elif node.name == "hooks":
+            cfg.hooks = _parse_hooks(node, path)
+        # Silently ignore agent / alias — those belong to follow-up
+        # tickets #31 / #33 and are not implemented here.
     return cfg
 
 
 def _merge(base: AppConfig, over: AppConfig) -> AppConfig:
     merged_templates = dict(base.templates)
     merged_templates.update(over.templates)
-    return AppConfig(templates=merged_templates)
+    merged_hooks = Hooks(
+        on_start=over.hooks.on_start if over.hooks.on_start is not None else base.hooks.on_start,
+        on_run=over.hooks.on_run if over.hooks.on_run is not None else base.hooks.on_run,
+        on_discard=over.hooks.on_discard if over.hooks.on_discard is not None else base.hooks.on_discard,
+    )
+    return AppConfig(templates=merged_templates, hooks=merged_hooks)
 
 
 def load_config(

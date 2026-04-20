@@ -145,13 +145,12 @@ class TestLoadConfigParseShapes(unittest.TestCase):
             self.assertEqual(cfg.templates["x"].config["max-budget-usd"], "5")
 
     def test_unknown_top_level_nodes_are_ignored(self):
-        # Forward-compat: hooks/agent/alias exist in follow-up tickets but
+        # Forward-compat: agent/alias exist in follow-up tickets but
         # should parse as no-ops today rather than erroring.
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             p = Path(cwd) / ".actor" / "settings.kdl"
             p.parent.mkdir()
             p.write_text(
-                'hooks {\n    on-start "echo hi"\n}\n'
                 'alias "max" template="qa"\n'
                 'template "qa" {\n    agent "claude"\n}\n'
             )
@@ -289,6 +288,119 @@ class TestLoadConfigCwdUnderHome(unittest.TestCase):
             )
             cfg = load_config(cwd=proj, home=home_p)
             self.assertEqual(cfg.templates["qa"].agent, "codex")
+
+
+class TestLoadConfigHooks(unittest.TestCase):
+
+    def test_hooks_block_parsed(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(
+                'hooks {\n'
+                '    on-start "echo start"\n'
+                '    on-run "echo run"\n'
+                '    on-discard "echo discard"\n'
+                '}\n'
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(cfg.hooks.on_start, "echo start")
+            self.assertEqual(cfg.hooks.on_run, "echo run")
+            self.assertEqual(cfg.hooks.on_discard, "echo discard")
+
+    def test_hooks_partial_block(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text('hooks {\n    on-start "echo start"\n}\n')
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(cfg.hooks.on_start, "echo start")
+            self.assertIsNone(cfg.hooks.on_run)
+            self.assertIsNone(cfg.hooks.on_discard)
+
+    def test_missing_hooks_block_is_empty(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIsNone(cfg.hooks.on_start)
+            self.assertIsNone(cfg.hooks.on_run)
+            self.assertIsNone(cfg.hooks.on_discard)
+
+    def test_unknown_hook_key_raises(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text('hooks {\n    on-bogus "echo"\n}\n')
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn("on-bogus", str(ctx.exception))
+
+    def test_duplicate_hook_key_raises(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(
+                'hooks {\n'
+                '    on-start "echo a"\n'
+                '    on-start "echo b"\n'
+                '}\n'
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn("on-start", str(ctx.exception))
+
+    def test_non_string_hook_value_raises(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text('hooks {\n    on-start 42\n}\n')
+            with self.assertRaises(ConfigError):
+                load_config(cwd=Path(cwd), home=Path(home))
+
+    def test_hook_value_missing_raises(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text('hooks {\n    on-start\n}\n')
+            with self.assertRaises(ConfigError):
+                load_config(cwd=Path(cwd), home=Path(home))
+
+    def test_hooks_extra_args_raises(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text('hooks {\n    on-start "a" "b"\n}\n')
+            with self.assertRaises(ConfigError):
+                load_config(cwd=Path(cwd), home=Path(home))
+
+    def test_hooks_props_raises(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text('hooks {\n    on-start "a" key="v"\n}\n')
+            with self.assertRaises(ConfigError):
+                load_config(cwd=Path(cwd), home=Path(home))
+
+
+class TestLoadConfigHooksPrecedence(unittest.TestCase):
+
+    def _write(self, path: Path, body: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+
+    def test_project_hook_overrides_user_per_key(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'hooks {\n    on-start "user-start"\n    on-run "user-run"\n}\n',
+            )
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'hooks {\n    on-run "project-run"\n}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(cfg.hooks.on_start, "user-start")
+            self.assertEqual(cfg.hooks.on_run, "project-run")
+            self.assertIsNone(cfg.hooks.on_discard)
 
 
 if __name__ == "__main__":
