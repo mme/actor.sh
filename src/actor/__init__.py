@@ -34,6 +34,9 @@ from .types import (
     _sorted_config,
 )
 
+# Config
+from .config import AppConfig, Template, load_config
+
 # Interfaces
 from .interfaces import (
     LogEntryKind,
@@ -101,6 +104,10 @@ __all__ = [
     "Config",
     "validate_name",
     "parse_config",
+    # Config
+    "AppConfig",
+    "Template",
+    "load_config",
     # Interfaces
     "LogEntryKind",
     "LogEntry",
