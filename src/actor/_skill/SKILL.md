@@ -1,7 +1,7 @@
 ---
 name: actor
 description: Manage coding agents running tasks in parallel. Use when the user wants to start, monitor, or finish background coding tasks — e.g. "spin up an actor to fix the auth module", "start three actors", "what are my actors doing", "make a PR for that actor".
-allowed-tools: mcp__actor__list_actors mcp__actor__show_actor mcp__actor__logs_actor mcp__actor__stop_actor mcp__actor__discard_actor mcp__actor__config_actor mcp__actor__new_actor mcp__actor__run_actor Bash(actor *)
+allowed-tools: mcp__actor__list_actors mcp__actor__show_actor mcp__actor__logs_actor mcp__actor__stop_actor mcp__actor__discard_actor mcp__actor__config_actor mcp__actor__new_actor mcp__actor__run_actor mcp__actor__get_configure_questions AskUserQuestion Bash(actor *)
 ---
 
 # Actor — Parallel Coding Agent Orchestrator
@@ -71,6 +71,79 @@ new_actor(name="fix-nav", prompt="...", dir="/path/to/repo")                # wo
 new_actor(name="fix-nav", prompt="...", no_worktree=True)                   # no worktree
 new_actor(name="fix-nav", prompt="...", config=["model=opus"])              # saved defaults
 ```
+
+### Guided setup (configure flow)
+
+When the user explicitly asks to be walked through actor setup — phrases
+like "create an actor with setup", "configure a new actor", "help me pick
+options", or running `actor new foo --configure` — use this flow instead
+of calling `new_actor` directly with ad-hoc values.
+
+**Steps:**
+
+1. Call `mcp__actor__get_configure_questions(agent="claude", model=<hint>)`
+   passing the agent type the actor will use and any model hint the user
+   mentioned. The tool returns `{"questions": [...]}`. Each entry has
+   `{key, kind, optional, question, header, options, multiSelect}`.
+
+2. For each entry, **strip the non-AskUserQuestion fields** (`key`,
+   `kind`, `optional`) and pass the remaining `{question, header, options,
+   multiSelect}` to `AskUserQuestion`. AskUserQuestion accepts up to 4
+   questions per call; split across multiple calls if there are more.
+
+3. AskUserQuestion returns `{answer_text: answer_value}` (keyed by the
+   question text). Map answers back using each question's original `key`
+   field:
+   - If `kind == "text"` AND `answer_value` is the literal string `"Skip"`
+     or `"Enter below"` — the user didn't provide a real answer, **skip it**.
+     (The user is expected to pick "Other" in the AskUserQuestion widget
+     and type the real value; that typed text is what arrives as
+     `answer_value`.)
+   - If `key == "prompt"` → use `answer_value` as the `prompt` parameter
+     on `new_actor`.
+   - Otherwise → append `"{key}={answer_value}"` to the `config` list on
+     `new_actor`.
+
+4. Call `new_actor(name=..., prompt=..., config=[...], agent=...)` with
+   the merged data.
+
+If `get_configure_questions` raises an error saying configure is disabled,
+skip the guided flow and call `new_actor` directly with whatever the user
+already supplied.
+
+**Customizing the question set via settings.kdl:**
+
+```kdl
+agent "claude" {
+    configure "opus" {
+        question "effort" {
+            prompt "How hard should it think?"
+            options "max" "medium" "low"
+        }
+        question "prompt" {
+            prompt "What's the goal?"
+            kind "text"
+        }
+    }
+}
+```
+
+- The block `configure "<model>" { ... }` only applies when that model is
+  the one being picked (model-scoped).
+- An un-argumented `configure { ... }` applies to the agent regardless of
+  model (agent-level).
+- Model-scoped wins over agent-level, which wins over the built-in
+  defaults.
+
+**Disabling the flow globally:**
+
+```kdl
+configure-default "off"
+```
+
+**CLI fallback:** `actor new foo --configure` triggers a stdin-based
+fallback (numbered option picks + raw text input) — no AskUserQuestion
+widget, but the same question set.
 
 ### Templates
 
