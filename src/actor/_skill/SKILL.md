@@ -119,7 +119,33 @@ template "reviewer" {
   numbers; they're all coerced to strings to match the actor config
   pipeline.
 
-Unknown top-level nodes (`hooks`, `agent`, `alias`) parse as no-ops today —
+### Lifecycle hooks
+
+Per-actor shell hooks declared in the same `settings.kdl` file. Each runs
+via `/bin/sh -c`, inheriting the caller's env plus `ACTOR_NAME`,
+`ACTOR_DIR`, `ACTOR_AGENT`, and (when set) `ACTOR_SESSION_ID`. Cwd is the
+actor directory.
+
+```kdl
+hooks {
+    on-start "kubectl config use-context dev"
+    on-run "git fetch --quiet"
+    on-discard "git diff --quiet && git diff --quiet --staged"
+}
+```
+
+- `on-start` — fires once during `actor new`, after the actor row is
+  recorded. Non-zero rolls back the new actor (row + worktree).
+- `on-run` — fires before every `actor run`, before the Run row is
+  inserted. Non-zero aborts the run.
+- `on-discard` — fires during `actor discard`, after resource cleanup
+  (running agents stopped) and before the DB row is removed. Non-zero
+  aborts discard unless `actor discard --force` / `-f` is passed.
+
+Project hooks override user hooks per event (same merge rule as
+templates).
+
+Unknown top-level nodes (`agent`, `alias`) still parse as no-ops —
 they're reserved for follow-up tickets. Malformed KDL raises an error
 with the file path.
 
