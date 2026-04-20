@@ -374,5 +374,121 @@ class TestLoadConfigAgentDefaults(unittest.TestCase):
         self.assertEqual(cfg.agent_defaults["claude"], {"model": "opus"})
 
 
+class TestLoadConfigAgentDefaultsStrict(unittest.TestCase):
+    """Parser should reject silently-dropped / ambiguous agent-block input."""
+
+    def _expect_error(self, kdl_text: str, needle: str) -> None:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(kdl_text)
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn(needle, str(ctx.exception))
+
+    def test_unknown_agent_name_raises(self):
+        self._expect_error(
+            'agent "gpt4" {\n    default-config {\n        model "x"\n    }\n}\n',
+            "gpt4",
+        )
+
+    def test_agent_block_without_name_raises(self):
+        self._expect_error(
+            'agent {\n    default-config {\n        model "x"\n    }\n}\n',
+            "name",
+        )
+
+    def test_empty_agent_name_raises(self):
+        self._expect_error(
+            'agent "" {\n    default-config {\n    }\n}\n',
+            "non-empty",
+        )
+
+    def test_non_string_agent_name_raises(self):
+        self._expect_error(
+            'agent 42 {\n    default-config {\n    }\n}\n',
+            "name",
+        )
+
+    def test_extra_positional_on_agent_raises(self):
+        self._expect_error(
+            'agent "claude" "extra" {\n    default-config {\n    }\n}\n',
+            "extra",
+        )
+
+    def test_props_on_agent_node_raises(self):
+        self._expect_error(
+            'agent "claude" flag="x" {\n    default-config {\n    }\n}\n',
+            "claude",
+        )
+
+    def test_duplicate_agent_block_in_file_raises(self):
+        self._expect_error(
+            'agent "claude" {\n    default-config {\n        model "opus"\n    }\n}\n'
+            'agent "claude" {\n    default-config {\n        model "sonnet"\n    }\n}\n',
+            "claude",
+        )
+
+    def test_multiple_default_config_blocks_in_one_agent_raises(self):
+        self._expect_error(
+            'agent "claude" {\n'
+            '    default-config {\n        model "opus"\n    }\n'
+            '    default-config {\n        model "sonnet"\n    }\n'
+            '}\n',
+            "default-config",
+        )
+
+    def test_duplicate_key_in_default_config_raises(self):
+        self._expect_error(
+            'agent "claude" {\n'
+            '    default-config {\n'
+            '        model "opus"\n'
+            '        model "sonnet"\n'
+            '    }\n'
+            '}\n',
+            "model",
+        )
+
+    def test_child_without_value_in_default_config_raises(self):
+        self._expect_error(
+            'agent "claude" {\n'
+            '    default-config {\n'
+            '        model\n'
+            '    }\n'
+            '}\n',
+            "model",
+        )
+
+    def test_extra_args_on_default_config_child_raises(self):
+        self._expect_error(
+            'agent "claude" {\n'
+            '    default-config {\n'
+            '        model "opus" "sonnet"\n'
+            '    }\n'
+            '}\n',
+            "model",
+        )
+
+    def test_props_on_default_config_child_raises(self):
+        self._expect_error(
+            'agent "claude" {\n'
+            '    default-config {\n'
+            '        model name="opus"\n'
+            '    }\n'
+            '}\n',
+            "model",
+        )
+
+    def test_positional_args_on_default_config_block_raises(self):
+        self._expect_error(
+            'agent "claude" {\n'
+            '    default-config "oops" {\n'
+            '        model "opus"\n'
+            '    }\n'
+            '}\n',
+            "default-config",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
