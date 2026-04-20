@@ -6,7 +6,9 @@ templates map and per-agent default-config overrides. Project config
 overrides user config on same-key conflict.
 
 Out of scope (see tickets #30 / #33): hooks, aliases. Their nodes are
-skipped at parse time without error for forward compatibility.
+skipped at parse time without error for forward compatibility. A
+top-level `default-config` block is NOT silently skipped — it raises a
+helpful error pointing users at the correct nesting under `agent`.
 """
 from __future__ import annotations
 
@@ -149,6 +151,17 @@ def _parse_template(node, source: Path) -> Template:
             )
         value_str = _coerce_value(raw)
         if key == "agent":
+            # Validate against AgentKind here (not at cmd_new time) so a
+            # typo in settings.kdl surfaces as a ConfigError with the
+            # offending path — matches the agent-block validator.
+            try:
+                AgentKind.from_str(value_str)
+            except ActorError as e:
+                valid = ", ".join(k.value for k in AgentKind)
+                raise ConfigError(
+                    f"template '{name}' in {source}: unknown agent "
+                    f"'{value_str}' (valid: {valid})"
+                ) from e
             tpl.agent = value_str
         elif key == "prompt":
             tpl.prompt = value_str
@@ -176,12 +189,25 @@ def _parse_default_config(node, agent_name: str, source: Path) -> Dict[str, str]
             f"accept properties"
         )
     out: Dict[str, str] = {}
+    seen_keys: set[str] = set()
     for child in node.nodes:
         key = child.name
-        if key in out:
+        if key in seen_keys:
             raise ConfigError(
                 f"agent '{agent_name}' in {source}: duplicate key '{key}' "
                 f"in default-config"
+            )
+        seen_keys.add(key)
+        # `prompt` and `agent` are the template-level reserved names;
+        # inside default-config they have no well-defined semantics.
+        # Without this check, `prompt "be brief"` would silently become
+        # a `--prompt` CLI flag via ClaudeAgent._config_args — almost
+        # never what the user intended.
+        if key in ("prompt", "agent"):
+            raise ConfigError(
+                f"agent '{agent_name}' in {source}: '{key}' is not a "
+                f"valid default-config key (it's a template-level field, "
+                f"not an agent config key)"
             )
         if not child.args:
             raise ConfigError(
@@ -206,9 +232,12 @@ def _parse_agent_block(node, source: Path) -> Tuple[str, Dict[str, str]]:
 
     Validates the agent name via `AgentKind.from_str` so typos
     (`agent "cluade"`) fail fast with the same canonical allowlist the
-    rest of the codebase uses. Children other than `default-config` are
-    silently ignored so future tickets (hooks etc.) can share the block
-    without breaking today's parser.
+    rest of the codebase uses. Block-style children other than
+    `default-config` (those with no args, e.g. `hooks { … }`) are
+    silently accepted as forward-compat no-ops for follow-up tickets.
+    Key-with-value children directly under `agent` (e.g. `model "opus"`
+    instead of `default-config { model "opus" }`) raise so the user's
+    keys aren't silently dropped.
     """
     if not node.args:
         raise ConfigError(
@@ -326,11 +355,16 @@ def _merge(base: AppConfig, over: AppConfig) -> AppConfig:
 
     # Agent defaults merge per key, not per agent block: a user-wide
     # `model` plus a project-scoped `effort` both survive. Same-key
-    # conflicts resolve project-wins (over beats base).
+    # conflicts resolve project-wins (over beats base). Skip empty
+    # incoming dicts so the parser invariant "presence in agent_defaults
+    # implies at least one declared key" survives programmatic
+    # AppConfig construction too.
     merged_agent_defaults: Dict[str, Dict[str, str]] = {
         agent: dict(keys) for agent, keys in base.agent_defaults.items()
     }
     for agent, keys in over.agent_defaults.items():
+        if not keys:
+            continue
         existing = merged_agent_defaults.setdefault(agent, {})
         existing.update(keys)
 

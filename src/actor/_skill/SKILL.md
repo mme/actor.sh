@@ -148,6 +148,10 @@ agent "codex" {
 
 Valid keys are anything the agent itself accepts — same catalogue as
 [claude-config.md](claude-config.md) and [codex-config.md](codex-config.md).
+Values may be strings, booleans, or numbers; they're all coerced to
+strings to match the actor config pipeline (same rules as templates).
+`prompt` and `agent` are template-level fields and cannot appear inside
+`default-config` — using them there raises a `ConfigError`.
 
 Precedence at actor **creation** (`new_actor` / `actor new`),
 lowest → highest:

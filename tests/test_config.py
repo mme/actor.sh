@@ -17,6 +17,7 @@ class TestLoadConfigEmpty(unittest.TestCase):
             cfg = load_config(cwd=Path(cwd), home=Path(home))
             self.assertIsInstance(cfg, AppConfig)
             self.assertEqual(cfg.templates, {})
+            self.assertEqual(cfg.agent_defaults, {})
 
     def test_missing_user_file_but_project_file_loads_project(self):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
@@ -225,6 +226,15 @@ class TestLoadConfigParseStrict(unittest.TestCase):
         self._expect_error(
             'template "" {\n    agent "claude"\n}\n',
             "non-empty",
+        )
+
+    def test_unknown_agent_in_template_raises(self):
+        # Mirror the agent-block validator: a typo in template `agent`
+        # should also surface as ConfigError with the valid allowlist,
+        # not wait until `cmd_new` raises ActorError later.
+        self._expect_error(
+            'template "qa" {\n    agent "cluade"\n}\n',
+            "unknown agent 'cluade'",
         )
 
 
@@ -556,6 +566,31 @@ class TestLoadConfigAgentDefaultsStrict(unittest.TestCase):
             "nest config keys",
         )
 
+    def test_prompt_key_in_default_config_raises(self):
+        # `prompt` is a template-level field; silently allowing it under
+        # `default-config` would otherwise emit `--prompt <value>` as a
+        # CLI flag on every spawn — almost never the user's intent.
+        self._expect_error(
+            'agent "claude" {\n'
+            '    default-config {\n'
+            '        prompt "be brief"\n'
+            '    }\n'
+            '}\n',
+            "'prompt' is not a valid default-config key",
+        )
+
+    def test_agent_key_in_default_config_raises(self):
+        # Same reasoning: `agent` belongs at template level, not inside
+        # the block whose scope is already one agent.
+        self._expect_error(
+            'agent "claude" {\n'
+            '    default-config {\n'
+            '        agent "codex"\n'
+            '    }\n'
+            '}\n',
+            "'agent' is not a valid default-config key",
+        )
+
     def test_forward_compat_block_children_of_agent_still_silently_parse(self):
         # The key-with-value guard must not break forward-compat: a
         # block-style child (e.g. `hooks { … }` from #30) has no args
@@ -702,6 +737,26 @@ class TestLoadConfigAgentDefaultsMerge(unittest.TestCase):
             cfg = load_config(cwd=Path(cwd), home=Path(home))
             self.assertEqual(cfg.templates["qa"].agent, "claude")
             self.assertEqual(cfg.agent_defaults["claude"], {"model": "opus"})
+
+
+class TestMergeInvariant(unittest.TestCase):
+    """`_merge` must preserve the parser invariant 'presence in
+    agent_defaults implies at least one declared key' even when callers
+    construct AppConfig programmatically."""
+
+    def test_merge_skips_empty_dict_from_over(self):
+        from actor.config import _merge
+        base = AppConfig()
+        over = AppConfig(agent_defaults={"claude": {}})
+        merged = _merge(base, over)
+        self.assertNotIn("claude", merged.agent_defaults)
+
+    def test_merge_skips_empty_dict_without_clobbering_existing(self):
+        from actor.config import _merge
+        base = AppConfig(agent_defaults={"claude": {"model": "opus"}})
+        over = AppConfig(agent_defaults={"claude": {}})
+        merged = _merge(base, over)
+        self.assertEqual(merged.agent_defaults["claude"], {"model": "opus"})
 
 
 if __name__ == "__main__":
