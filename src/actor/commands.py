@@ -16,7 +16,8 @@ from .errors import (
 )
 
 if TYPE_CHECKING:
-    from .config import AppConfig
+    from .config import AppConfig, Hooks
+from .hooks import HookRunner, hook_env, run_hook
 from .interfaces import Agent, GitOps, LogEntry, LogEntryKind, ProcessManager, binary_exists
 from .types import (
     Actor,
@@ -118,6 +119,8 @@ def cmd_new(
     config_pairs: List[str],
     template_name: Optional[str] = None,
     app_config: Optional["AppConfig"] = None,
+    hooks: Optional["Hooks"] = None,
+    hook_runner: Optional[HookRunner] = None,
 ) -> Actor:
     validate_name(name)
 
@@ -197,6 +200,30 @@ def cmd_new(
             except Exception as cleanup_err:
                 print(f"warning: failed to clean up worktree at {wt_path}: {cleanup_err}", file=sys.stderr)
         raise
+
+    on_start = hooks.on_start if hooks is not None else None
+    if on_start is not None:
+        env = hook_env(
+            os.environ,
+            actor_name=name,
+            actor_dir=Path(actor_dir),
+            actor_agent=agent_kind.as_str(),
+            actor_session_id=None,
+        )
+        try:
+            run_hook("on-start", on_start, env, Path(actor_dir), runner=hook_runner)
+        except Exception:
+            try:
+                db.delete_actor(name)
+            except Exception:
+                pass
+            if worktree:
+                wt_path = _worktree_path(name)
+                try:
+                    git.remove_worktree(Path(source_repo), wt_path)  # type: ignore[arg-type]
+                except Exception as cleanup_err:
+                    print(f"warning: failed to clean up worktree at {wt_path}: {cleanup_err}", file=sys.stderr)
+            raise
 
     return actor
 

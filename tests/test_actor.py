@@ -2258,6 +2258,113 @@ class TestCodexAgent(unittest.TestCase):
 
 
 # ──────────────────────────────────────────────────────────────────────
+#  Test: cmd_new on-start hook (issue #30)
+# ──────────────────────────────────────────────────────────────────────
+
+class TestCmdNewOnStartHook(unittest.TestCase):
+
+    def _db(self) -> Database:
+        return Database.open(":memory:")
+
+    def test_on_start_fires_with_env_and_cwd(self):
+        from actor import Hooks
+        seen = []
+
+        def runner(cmd, env, cwd):
+            seen.append({"cmd": cmd, "env": dict(env), "cwd": cwd})
+            return 0
+
+        db = self._db()
+        git = FakeGit()
+        actor = cmd_new(
+            db, git,
+            name="foo",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name="claude",
+            config_pairs=[],
+            hooks=Hooks(on_start="echo start"),
+            hook_runner=runner,
+        )
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["cmd"], "echo start")
+        self.assertEqual(seen[0]["env"]["ACTOR_NAME"], "foo")
+        self.assertEqual(seen[0]["env"]["ACTOR_AGENT"], "claude")
+        self.assertEqual(str(seen[0]["cwd"]), actor.dir)
+
+    def test_on_start_failure_rolls_back_actor(self):
+        from actor import Hooks, HookFailedError
+
+        def runner(cmd, env, cwd):
+            return 7
+
+        db = self._db()
+        git = FakeGit()
+        with self.assertRaises(HookFailedError):
+            cmd_new(
+                db, git,
+                name="foo",
+                dir="/tmp",
+                no_worktree=True,
+                base=None,
+                agent_name="claude",
+                config_pairs=[],
+                hooks=Hooks(on_start="false"),
+                hook_runner=runner,
+            )
+        with self.assertRaises(NotFound):
+            db.get_actor("foo")
+
+    def test_on_start_failure_removes_worktree(self):
+        from actor import Hooks, HookFailedError
+
+        def runner(cmd, env, cwd):
+            return 1
+
+        db = self._db()
+        git = FakeGit()
+        with self.assertRaises(HookFailedError):
+            cmd_new(
+                db, git,
+                name="foo",
+                dir="/tmp",
+                no_worktree=False,
+                base=None,
+                agent_name="claude",
+                config_pairs=[],
+                hooks=Hooks(on_start="false"),
+                hook_runner=runner,
+            )
+        ops = [c.op for c in git.calls]
+        self.assertIn("create_worktree", ops)
+        self.assertIn("remove_worktree", ops)
+
+    def test_no_on_start_hook_no_runner_calls(self):
+        from actor import Hooks
+        seen = []
+
+        def runner(cmd, env, cwd):
+            seen.append(cmd)
+            return 0
+
+        db = self._db()
+        git = FakeGit()
+        cmd_new(
+            db, git,
+            name="foo",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name="claude",
+            config_pairs=[],
+            hooks=Hooks(),
+            hook_runner=runner,
+        )
+        self.assertEqual(seen, [])
+
+
+# ──────────────────────────────────────────────────────────────────────
 #  Test: hooks.py (runner + env builder) — issue #30
 # ──────────────────────────────────────────────────────────────────────
 
