@@ -55,14 +55,14 @@ def run_hook(
         exit_code = result.exit_code
         stdout = result.stdout
         stderr = result.stderr
-    elif isinstance(result, int):
+    elif isinstance(result, int) and not isinstance(result, bool):
         exit_code = result
         stdout = ""
         stderr = ""
     else:
         raise TypeError(
-            f"HookRunner for '{event}' returned {type(result).__name__}, "
-            "expected int or HookResult"
+            f"HookRunner for '{event}' returned {type(result).__name__} "
+            f"({result!r}); expected int or HookResult"
         )
     if exit_code != 0:
         raise HookFailedError(

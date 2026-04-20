@@ -401,12 +401,7 @@ def cmd_interactive(
 
     env = dict(os.environ)
     env["ACTOR_NAME"] = name
-    # Scrub any inherited ACTOR_SESSION_ID so a parent actor's session doesn't
-    # leak into the child; set it explicitly when we know it.
-    if session_id is not None:
-        env["ACTOR_SESSION_ID"] = session_id
-    else:
-        env.pop("ACTOR_SESSION_ID", None)
+    env["ACTOR_SESSION_ID"] = session_id
 
     try:
         exit_code = (runner or _default_interactive_runner)(argv, dir_path, env)
@@ -720,10 +715,14 @@ def cmd_discard(
         )
         try:
             run_hook("on-discard", on_discard, env, hook_cwd, runner=hook_runner)
-        except HookFailedError:
+        except HookFailedError as e:
             if not force:
                 raise
-            # --force: swallow the failure and continue with deletion.
+            print(
+                f"warning: on-discard hook failed for '{name}' ({e}); "
+                "continuing because --force was passed",
+                file=sys.stderr,
+            )
 
     db.delete_actor(name)
     discarded.append(f"{name} discarded")

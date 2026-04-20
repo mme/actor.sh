@@ -119,6 +119,23 @@ template "reviewer" {
   numbers; they're all coerced to strings to match the actor config
   pipeline.
 
+**Applying a template:**
+
+```bash
+actor new fix-auth --template qa                          # apply template
+actor new fix-auth --template qa --config model=haiku     # CLI overrides template
+actor new fix-auth --template qa --agent codex            # CLI agent beats template
+actor new fix-auth --template qa "custom prompt"          # CLI prompt beats template
+```
+
+The MCP `new_actor` tool accepts the same `template` parameter. Explicit
+CLI flags or MCP arguments (`--agent`, `--model`, `--config`, positional
+prompt, stdin) always beat the template's values.
+
+Unknown top-level nodes (`agent`, `alias`) still parse as no-ops —
+they're reserved for follow-up tickets. Malformed KDL raises an error
+with the file path.
+
 ### Lifecycle hooks
 
 Shell hooks declared in the same `settings.kdl` file. They apply to
@@ -150,27 +167,6 @@ hooks {
 
 Project hooks override user hooks per event (same merge rule as
 templates).
-
-Unknown top-level nodes (`agent`, `alias`) still parse as no-ops —
-they're reserved for follow-up tickets. Malformed KDL raises an error
-with the file path.
-
-**Applying a template** (CLI only — see note below):
-
-```bash
-actor new fix-auth --template qa                          # apply template
-actor new fix-auth --template qa --config model=haiku     # CLI overrides template
-actor new fix-auth --template qa --agent codex            # CLI agent beats template
-actor new fix-auth --template qa "custom prompt"          # CLI prompt beats template
-```
-
-Explicit CLI flags (`--agent`, `--model`, `--config`, positional prompt,
-stdin) always beat the template's values.
-
-**MCP note:** the `mcp__actor__new_actor` tool does not yet accept a
-`template` parameter. When the user asks for a templated actor, call
-`actor new … --template …` via the Bash tool instead. This is a known
-gap; a follow-up will add it to the MCP tool.
 
 ### Create without running
 

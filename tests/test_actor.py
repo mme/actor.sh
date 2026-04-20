@@ -1150,7 +1150,7 @@ class TestCmdList(unittest.TestCase):
         for line in lines[1:]:
             self.assertGreater(len(line), status_col, f"line too short: {line!r}")
 
-    def test_running_no_pid_stays_running(self):
+    def test_running_no_pid_resolves_to_error(self):
         db = self._db()
         pm = FakeProcessManager()
         db.insert_actor(make_actor("no-pid"))
@@ -1297,7 +1297,7 @@ class TestCmdShow(unittest.TestCase):
         self.assertEqual(run.id, run_id)
         self.assertEqual(run.status, Status.ERROR)
 
-    def test_show_running_no_pid_stays_running(self):
+    def test_show_running_no_pid_resolves_to_error(self):
         db = self._db()
         pm = FakeProcessManager()
         db.insert_actor(make_actor("no-pid"))
@@ -2659,6 +2659,7 @@ class TestCmdDiscardOnDiscardHook(unittest.TestCase):
 
     def test_on_discard_nonzero_with_force_proceeds(self):
         from actor import Hooks
+        import io, contextlib
 
         def runner(cmd, env, cwd):
             return 1
@@ -2666,14 +2667,18 @@ class TestCmdDiscardOnDiscardHook(unittest.TestCase):
         db = self._db()
         create_actor(db, "test", config=[])
         pm = FakeProcessManager()
-        cmd_discard(
-            db, pm, name="test",
-            hooks=Hooks(on_discard="false"),
-            hook_runner=runner,
-            force=True,
-        )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            cmd_discard(
+                db, pm, name="test",
+                hooks=Hooks(on_discard="false"),
+                hook_runner=runner,
+                force=True,
+            )
         with self.assertRaises(NotFound):
             db.get_actor("test")
+        self.assertIn("on-discard hook failed", stderr.getvalue())
+        self.assertIn("--force", stderr.getvalue())
 
     def test_on_discard_stops_actor_before_hook_runs(self):
         from actor import Hooks
