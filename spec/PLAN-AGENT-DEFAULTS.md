@@ -839,63 +839,56 @@ git commit -m "Apply per-agent default-config as lowest layer in cmd_new (#31)"
 
 - [ ] **Step 1: Update SKILL.md — add a "Per-agent defaults" subsection under Templates**
 
-In `src/actor/_skill/SKILL.md`, locate the paragraph near the top of the Templates section that ends with "Unknown top-level nodes (`hooks`, `agent`, `alias`) parse as no-ops today —" (around line 122) and change it to reflect that `agent` is now implemented. Replace that paragraph with:
+In `src/actor/_skill/SKILL.md`, update the forward-compat paragraph in
+the Templates section so it no longer advertises `agent` as a no-op
+(`agent` is now implemented). Leave the remaining forward-compat nodes
+(`hooks`, `alias`) listed.
 
-```
-Unknown top-level nodes (`hooks`, `alias`) parse as no-ops today —
-they're reserved for follow-up tickets. Malformed KDL raises an error
-with the file path.
-```
+Then, immediately before the "**Applying a template** (CLI only — see
+note below):" line, insert a new "**Per-agent defaults:**" subsection
+that:
 
-Then, immediately before the "**Applying a template** (CLI only — see note below):" line, insert a new subsection:
+1. Shows the `agent "claude" { default-config { … } }` / `agent "codex"
+   { default-config { … } }` block syntax.
+2. Points to `claude-config.md` / `codex-config.md` for valid keys.
+3. Spells out the precedence ladder and merge rule. Treat user and
+   project `settings.kdl` as a single merged layer — NOT as separate
+   ordered steps — to match how `_merge` folds them per key. Recommended
+   phrasing:
 
-```markdown
-**Per-agent defaults:**
+   ```
+   Precedence (lowest → highest):
 
-Alongside templates you can declare default config scoped to a specific
-coding agent. Any Claude actor picks up the `agent "claude"` block; any
-Codex actor picks up the `agent "codex"` block.
+   1. Built-in defaults
+   2. Per-agent defaults from `settings.kdl` (user + project merged per
+      key; project wins on conflicts)
+   3. Template config (`--template X`)
+   4. CLI `--config key=value`
+   5. Per-actor DB config
 
-```kdl
-agent "claude" {
-    default-config {
-        model "opus"
-        effort "max"
-        strip-api-keys true
-    }
-}
-
-agent "codex" {
-    default-config {
-        sandbox "danger-full-access"
-    }
-}
-```
-
-Valid keys are anything the agent itself accepts — same catalogue as
-[claude-config.md](claude-config.md) and [codex-config.md](codex-config.md).
-
-Precedence (lowest → highest): built-in defaults → user `settings.kdl`
-→ project `settings.kdl` → **per-agent defaults for the chosen agent**
-→ template (`--template X`) → CLI `--config key=value` → per-actor DB
-config. Same-key conflicts between user and project blocks are resolved
-per key, with project winning.
-
-```
+   `settings.kdl` is read at actor CREATION time. Editing the file later
+   does not retroactively change existing actors — use
+   `config_actor(name="…", pairs=[…])` / `actor config <name> key=value`
+   to update an actor's stored config.
+   ```
 
 - [ ] **Step 2: Update CLAUDE.md — extend the "Config files & templates" section**
 
-In `CLAUDE.md`, locate the paragraph that begins "Unknown top-level nodes (e.g. `hooks`, `agent`, `alias`) are silently ignored for forward-compat with follow-up tickets." and replace it with:
+In `CLAUDE.md`, replace the forward-compat paragraph that mentions
+`hooks`/`agent`/`alias` with two paragraphs:
 
-```
-Per-agent default config lives in `agent "claude" { default-config { … } }`
-(and the same shape for `codex`). Any actor of that kind picks up those
-keys as the lowest config layer, under templates and under CLI `--config`.
-See ticket #31 for precedence details.
+1. A per-agent-defaults paragraph that describes the block shape,
+   mentions user+project per-key merge, and inlines the precedence
+   ladder (lowest → highest: built-in → per-agent defaults → template →
+   CLI `--config`). Include a sentence about snapshot-at-creation —
+   editing `settings.kdl` later does not retroactively change existing
+   actors.
+2. A short forward-compat paragraph that still mentions `hooks` / `alias`
+   (no longer `agent`) as silently ignored for tickets #30 / #33.
 
-Unknown top-level nodes (e.g. `hooks`, `alias`) are silently ignored for
-forward-compat with follow-up tickets #30 / #33.
-```
+Do NOT reference this plan document (`spec/PLAN-AGENT-DEFAULTS.md`) from
+`CLAUDE.md` — the plan is transient and will be archived after the PR
+merges.
 
 - [ ] **Step 3: Run the full test suite one more time (docs-only changes, but sanity)**
 

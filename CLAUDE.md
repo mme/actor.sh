@@ -149,10 +149,15 @@ coerced to strings).
 
 Per-agent default config lives in `agent "claude" { default-config { … } }`
 (and the same shape for `codex`). Any actor of that kind picks up those
-keys as the lowest config layer — below templates and below CLI
-`--config`. User-wide keys merge per-key with project-level ones
-(project wins on same-key conflicts). See `spec/PLAN-AGENT-DEFAULTS.md`
-for the full precedence ladder.
+keys at creation time. User-wide and project-level blocks merge per key;
+project wins on same-key conflicts.
+
+Precedence for the final per-actor config (lowest → highest): built-in
+agent defaults → per-agent `default-config` (merged user+project) →
+template config (`--template`) → CLI `--config key=value`. The resolved
+merge is snapshotted into the DB at `actor new`; later edits to
+`settings.kdl` don't retroactively change existing actors — use
+`actor config <name> key=value` to mutate an actor's stored config.
 
 Unknown top-level nodes (e.g. `hooks`, `alias`) are silently ignored
 for forward-compat with follow-up tickets #30 / #33.

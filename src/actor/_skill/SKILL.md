@@ -149,12 +149,24 @@ agent "codex" {
 Valid keys are anything the agent itself accepts — same catalogue as
 [claude-config.md](claude-config.md) and [codex-config.md](codex-config.md).
 
-Precedence (lowest → highest): built-in defaults → user `settings.kdl`
-→ project `settings.kdl` → **per-agent defaults for the chosen agent**
-→ template (`--template X`) → CLI `--config key=value` → per-actor DB
-config. Same-key conflicts between the user and project `agent` blocks
-resolve per key, with project winning; keys the project doesn't
-restate are kept from the user block.
+Precedence (lowest → highest):
+
+1. Built-in defaults (hard-coded per agent)
+2. **Per-agent defaults from `settings.kdl`** (user + project merged per
+   key; project wins on same-key conflicts)
+3. Template config (`--template X`)
+4. CLI `--config key=value`
+5. Per-actor DB config (persisted by `config_actor` / `actor config`)
+
+User and project `settings.kdl` are not separate layers in the precedence
+chain — they merge per key into a single per-agent map before precedence
+is applied, so a user-wide `model "opus"` plus a project-scoped
+`effort "max"` both survive.
+
+`settings.kdl` is read when the actor is **created**. Editing the file
+later does not retroactively change existing actors — use
+`config_actor(name="…", pairs=[…])` (MCP) or `actor config <name> key=value`
+(CLI) to update an actor's stored config.
 
 **Applying a template** (CLI only — see note below):
 

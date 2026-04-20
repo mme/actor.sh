@@ -6,6 +6,7 @@ import asyncio
 import sys
 import threading
 import traceback
+from pathlib import Path
 from typing import Any, List, Literal
 
 from . import __version__
@@ -15,6 +16,7 @@ from mcp.server.stdio import stdio_server
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage, JSONRPCNotification
 
+from .config import load_config
 from .db import Database
 from .errors import ActorError
 from .git import RealGit
@@ -237,6 +239,11 @@ def new_actor(
     """
     db = _db()
     git = RealGit()
+    # Project-scoped settings.kdl is discovered by walking up from `dir`
+    # when given, otherwise from the server's cwd. User-wide settings
+    # always load from $HOME.
+    config_cwd = Path(dir) if dir else None
+    app_config = load_config(cwd=config_cwd)
     actor = cmd_new(
         db, git,
         name=name,
@@ -245,6 +252,7 @@ def new_actor(
         base=base,
         agent_name=agent,
         config_pairs=config or [],
+        app_config=app_config,
     )
 
     if prompt is not None:

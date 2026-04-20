@@ -846,6 +846,26 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
         self.assertEqual(actor.agent, AgentKind.CLAUDE)
         self.assertEqual(actor.config["model"], "opus")
 
+    def test_agent_defaults_are_persisted_in_db(self):
+        # Snapshot-at-creation: later settings.kdl edits do NOT retroactively
+        # affect the actor. The resolved merge is written to the DB and
+        # retrievable via get_actor.
+        db = self._db()
+        git = FakeGit()
+        cfg = self._cfg(agent_defaults={
+            "claude": {"model": "opus", "effort": "max"},
+        })
+        cmd_new(
+            db, git,
+            name="a", dir="/tmp", no_worktree=True, base=None,
+            agent_name="claude", config_pairs=["strip-api-keys=true"],
+            app_config=cfg,
+        )
+        reloaded = db.get_actor("a")
+        self.assertEqual(reloaded.config, {
+            "model": "opus", "effort": "max", "strip-api-keys": "true",
+        })
+
 
 # ──────────────────────────────────────────────────────────────────────
 #  Test: cmd_run  (8 tests from run.rs)

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from actor.config import AppConfig, Template, load_config
+from actor.config import AppConfig, load_config
 from actor.errors import ConfigError
 
 
@@ -145,7 +145,7 @@ class TestLoadConfigParseShapes(unittest.TestCase):
             self.assertEqual(cfg.templates["x"].config["max-budget-usd"], "5")
 
     def test_unknown_top_level_nodes_are_ignored(self):
-        # Forward-compat: hooks/agent/alias exist in follow-up tickets but
+        # Forward-compat: hooks/alias belong to tickets #30 / #33 and
         # should parse as no-ops today rather than erroring.
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             p = Path(cwd) / ".actor" / "settings.kdl"
@@ -340,7 +340,7 @@ class TestLoadConfigAgentDefaults(unittest.TestCase):
         self.assertEqual(cfg.agent_defaults["claude"], {"model": "opus"})
         self.assertEqual(cfg.agent_defaults["codex"], {"sandbox": "danger-full-access"})
 
-    def test_empty_default_config_block_yields_empty_dict(self):
+    def test_empty_default_config_block_omits_agent_from_defaults(self):
         cfg = self._load(
             'agent "claude" {\n'
             '    default-config {\n'
@@ -483,6 +483,27 @@ class TestLoadConfigAgentDefaultsStrict(unittest.TestCase):
         self._expect_error(
             'agent "claude" {\n'
             '    default-config "oops" {\n'
+            '        model "opus"\n'
+            '    }\n'
+            '}\n',
+            "default-config",
+        )
+
+    def test_props_on_default_config_block_raises(self):
+        self._expect_error(
+            'agent "claude" {\n'
+            '    default-config flag="x" {\n'
+            '        model "opus"\n'
+            '    }\n'
+            '}\n',
+            "default-config",
+        )
+
+    def test_default_config_as_template_child_raises_helpful_error(self):
+        self._expect_error(
+            'template "qa" {\n'
+            '    agent "claude"\n'
+            '    default-config {\n'
             '        model "opus"\n'
             '    }\n'
             '}\n',

@@ -17,7 +17,7 @@ from typing import Dict, Optional, Tuple
 
 import kdl
 
-from .errors import ConfigError
+from .errors import ActorError, ConfigError
 from .types import AgentKind
 
 
@@ -119,6 +119,16 @@ def _parse_template(node, source: Path) -> Template:
                 f"template '{name}' in {source}: duplicate key '{key}'"
             )
         seen_keys.add(key)
+        # Catch a common mix-up: `default-config {}` belongs under an
+        # `agent "..."` block, not under a template. Without this check
+        # the user gets "'default-config' needs a value" because the
+        # node has only children, no args — which hides the real fix.
+        if key == "default-config":
+            raise ConfigError(
+                f"template '{name}' in {source}: `default-config` blocks "
+                f"belong under `agent \"claude\" {{ … }}` / "
+                f"`agent \"codex\" {{ … }}`, not inside a template"
+            )
         if not child.args:
             raise ConfigError(
                 f"template '{name}' in {source}: '{key}' needs a value"
@@ -194,15 +204,21 @@ def _parse_default_config(node, agent_name: str, source: Path) -> Dict[str, str]
 def _parse_agent_block(node, source: Path) -> Tuple[str, Dict[str, str]]:
     """Parse an `agent "name" { … }` block. Returns (agent_name, defaults).
 
-    Validates the agent name against AgentKind so typos (`agent "cluade"`)
-    fail fast. Children other than `default-config` are silently ignored
-    so future tickets (hooks etc.) can share the block without breaking
-    today's parser.
+    Validates the agent name via `AgentKind.from_str` so typos
+    (`agent "cluade"`) fail fast with the same canonical allowlist the
+    rest of the codebase uses. Children other than `default-config` are
+    silently ignored so future tickets (hooks etc.) can share the block
+    without breaking today's parser.
     """
-    if not node.args or not isinstance(node.args[0], str):
+    if not node.args:
         raise ConfigError(
             f"agent block in {source} must have a name "
             f"(e.g. `agent \"claude\" {{ … }}`)"
+        )
+    if not isinstance(node.args[0], str):
+        raise ConfigError(
+            f"agent block in {source}: name must be a string, "
+            f"got {type(node.args[0]).__name__}"
         )
     if not node.args[0]:
         raise ConfigError(
@@ -217,12 +233,14 @@ def _parse_agent_block(node, source: Path) -> Tuple[str, Dict[str, str]]:
             f"agent '{node.args[0]}' in {source} does not accept properties"
         )
     name = node.args[0]
-    valid = [k.value for k in AgentKind]
-    if name not in valid:
+    try:
+        AgentKind.from_str(name)
+    except ActorError as e:
+        valid = ", ".join(k.value for k in AgentKind)
         raise ConfigError(
             f"agent block in {source}: unknown agent '{name}' "
-            f"(valid: {', '.join(valid)})"
-        )
+            f"(valid: {valid})"
+        ) from e
 
     defaults: Dict[str, str] = {}
     seen_default_config = False
