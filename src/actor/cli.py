@@ -70,6 +70,7 @@ Examples:
   actor new my-feature --dir /path/to/repo          Worktree from another repo
   actor new my-feature --base develop               Branch off develop
   actor new my-feature --config effort=max          Set agent config at creation
+  actor new my-feature --template qa                Apply the 'qa' template from settings.kdl
   echo "fix it" | actor new my-feature              Create and run with piped prompt""",
     )
     p_new.add_argument("name", help="Actor name")
@@ -80,10 +81,11 @@ Examples:
     p_new.add_argument("--agent", default=None, help="Coding agent to use (defaults to template's agent or 'claude')")
     p_new.add_argument("--template", default=None, help="Apply a template from settings.kdl")
     p_new.add_argument("--model", default=None, help="Model for the agent to use")
-    # Tri-state: default None means "no override" so a template's
-    # strip-api-keys value wins. Explicit --strip-api-keys / --no-strip-api-keys
-    # set True/False and beat the template (agents default to strip=true if
-    # neither CLI nor template sets it).
+    # Tri-state: default None = "no override" so a template's strip-api-keys
+    # value wins. Explicit --strip-api-keys / --no-strip-api-keys set True/
+    # False and beat the template. When neither CLI nor template sets the
+    # key, it's omitted from config and the agent's own default applies
+    # (ClaudeAgent / CodexAgent both treat a missing key as "strip").
     p_new.add_argument("--strip-api-keys", action="store_const", const=True, default=None, dest="strip_api_keys", help="Strip API keys from environment (default)")
     p_new.add_argument("--no-strip-api-keys", action="store_const", const=False, dest="strip_api_keys", help="Pass API keys through to the agent")
     p_new.add_argument("--config", dest="config", action="append", default=[], metavar="KEY=VALUE", help="Config key=value pair (repeat for multiple)")

@@ -59,10 +59,13 @@ def _find_project_config(
             continue
         if resolved_user is not None:
             try:
-                if p.resolve(strict=False) == resolved_user:
-                    continue
+                resolved_p = p.resolve(strict=False)
             except OSError:
-                pass
+                # Can't tell if this is the user file — skip rather than
+                # risk double-loading it.
+                continue
+            if resolved_p == resolved_user:
+                continue
         return p
     return None
 

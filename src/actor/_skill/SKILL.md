@@ -72,6 +72,19 @@ new_actor(name="fix-nav", prompt="...", no_worktree=True)                   # no
 new_actor(name="fix-nav", prompt="...", config=["model=opus"])              # saved defaults
 ```
 
+### Templates
+
+If the user has templates defined in `~/.actor/settings.kdl` (user-wide)
+or `<project>/.actor/settings.kdl` (project-local), apply one via the CLI:
+
+```bash
+actor new fix-auth --template qa                          # apply template
+actor new fix-auth --template qa --config model=haiku     # template + CLI override
+```
+
+The MCP `new_actor` tool does not yet accept a template parameter — use
+the CLI (Bash tool) when the user asks for a templated actor.
+
 ### Create without running
 
 ```
