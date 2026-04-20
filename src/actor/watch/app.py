@@ -110,9 +110,10 @@ class ActorWatchApp(App):
         Binding("down,ctrl+n", "navigate_down", show=False),
         Binding("a", "focus_actors", "Actors"),
         Binding("p", "command_palette", "Palette"),
+        Binding("i", "enter_interactive", "Interactive"),
         Binding("l", "show_tab('logs')", "Logs"),
         Binding("d", "show_tab('diff')", "Diff"),
-        Binding("i", "show_tab('info')", "Info"),
+        Binding("question_mark", "show_tab('info')", "Info"),
         # Enter is handled by the Tree's NodeSelected message, not an app
         # binding — a priority binding here would steal Enter from the
         # embedded terminal widget.
@@ -147,17 +148,11 @@ class ActorWatchApp(App):
                 yield ActorTree()
             with Vertical(id="detail-panel"):
                 with TabbedContent(id="tabs"):
+                    # Interactive tab is added dynamically via
+                    # _sync_detail_view when the selected actor has a
+                    # live session; removed again when the session ends.
                     with TabPane("Logs", id="logs"):
-                        # The Logs tab holds either the RichLog (when
-                        # the selected actor has no live interactive
-                        # session) or the actor's TerminalWidget (when
-                        # it does). _sync_detail_view flips the content
-                        # inside this container; Diff and Info stay
-                        # accessible via their tabs either way.
-                        yield Vertical(
-                            RichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False),
-                            id="logs-pane",
-                        )
+                        yield RichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False)
                     with TabPane("Diff", id="diff"):
                         yield VerticalScroll(id="diff-scroll")
                     with TabPane("Info", id="info"):
@@ -302,20 +297,14 @@ class ActorWatchApp(App):
         self._refresh_logs(actor)
 
     def _clear_detail(self) -> None:
-        from textual.css.query import NoMatches
-
         info = self.query_one("#info-content", Static)
         info.update("Select an actor")
 
         table = self.query_one("#runs-table", DataTable)
         table.clear(columns=True)
 
-        try:
-            log = self.query_one("#logs-content", RichLog)
-            log.clear()
-        except NoMatches:
-            # Logs tab currently holds an interactive TerminalWidget.
-            pass
+        log = self.query_one("#logs-content", RichLog)
+        log.clear()
         self._last_log_actor = None
         self._last_log_count = 0
         self._last_log_entries = []
@@ -338,21 +327,13 @@ class ActorWatchApp(App):
     _last_log_entries: list = []
 
     def on_resize(self) -> None:
-        from textual.css.query import NoMatches
-        try:
-            log = self.query_one("#logs-content", RichLog)
-        except NoMatches:
-            return  # Logs tab holds a TerminalWidget; it handles its own resize.
+        log = self.query_one("#logs-content", RichLog)
         if log.size.width != self._last_log_width and self._last_log_entries:
             self._last_log_count = 0
             self._set_logs(self._last_log_actor, self._last_log_entries)
 
     def _set_logs(self, actor_name: str, entries: list) -> None:
-        from textual.css.query import NoMatches
-        try:
-            log = self.query_one("#logs-content", RichLog)
-        except NoMatches:
-            return  # Logs tab is currently hosting a TerminalWidget.
+        log = self.query_one("#logs-content", RichLog)
 
         actor_changed = actor_name != self._last_log_actor
         if not actor_changed and len(entries) == self._last_log_count and log.size.width == self._last_log_width:
@@ -419,18 +400,6 @@ class ActorWatchApp(App):
         except Exception as e:
             self.call_from_thread(self._set_diff_text, f"Diff error: {e}")
 
-    def _set_logs_tab_label(self, label: str) -> None:
-        """Swap the Logs tab label between 'Logs' and 'Interactive'
-        without changing the tab id (the `l` shortcut still targets it)."""
-        from textual.css.query import NoMatches
-        try:
-            tabs = self.query_one("#tabs", TabbedContent)
-            tab = tabs.get_tab("logs")
-        except NoMatches:
-            return
-        if str(tab.label) != label:
-            tab.label = label
-
     def _update_diff_tab_label(self, added: int = 0, removed: int = 0) -> None:
         tabs = self.query_one("#tabs", TabbedContent)
         tab = tabs.get_tab("diff")
@@ -492,18 +461,13 @@ class ActorWatchApp(App):
     # -- Interactive mode ----------------------------------------------------
 
     def _sync_detail_view(self) -> None:
-        """Populate the Logs tab with either the RichLog or the actor's
-        interactive TerminalWidget, based on whether the selected actor
-        has a live session. Diff / Info tabs are unaffected.
-
-        NoMatches is silently tolerated because this runs from on_ready,
-        on_tree_node_highlighted, and keybindings — the detail layout
-        may not yet be mounted on the first tick.
-        """
+        """Add/remove the Interactive tab based on whether the selected
+        actor has a live session. Does NOT activate the tab; use
+        action_enter_interactive for that."""
         from textual.css.query import NoMatches
 
         try:
-            logs_pane = self.query_one("#logs-pane", Vertical)
+            tabs = self.query_one("#tabs", TabbedContent)
         except NoMatches:
             return
         actor = self.query_one(ActorTree).selected_actor
@@ -511,92 +475,93 @@ class ActorWatchApp(App):
             self._interactive.get(actor.name) if actor is not None else None
         )
 
+        existing: TabPane | None = None
+        try:
+            existing = tabs.get_pane("interactive")
+        except Exception:
+            existing = None
+
         if info is None:
-            # No live session — show the standard RichLog. If the pane
-            # currently holds a terminal (from a previously-selected
-            # actor), unmount it and remount the RichLog.
-            current_children = list(logs_pane.children)
-            has_richlog = any(
-                isinstance(c, RichLog) and c.id == "logs-content"
-                for c in current_children
-            )
-            if not has_richlog:
-                for child in current_children:
-                    child.remove()
-                logs_pane.mount(
-                    RichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False)
-                )
-            self._set_logs_tab_label("Logs")
+            if existing is not None:
+                tabs.remove_pane("interactive")
             self._interactive_active = None
             return
 
-        # Live session — put the actor's TerminalWidget in the Logs tab.
-        current_children = list(logs_pane.children)
-        if info.widget not in current_children:
-            for child in current_children:
-                child.remove()
-            logs_pane.mount(info.widget)
-        self._set_logs_tab_label("Interactive")
-        # Activate the Logs tab if we're elsewhere, so the user actually
-        # sees the terminal they just opened.
-        try:
-            tabs = self.query_one("#tabs", TabbedContent)
-            if tabs.active != "logs":
-                tabs.active = "logs"
-        except Exception:
-            pass
+        # Actor has a live session. Rebuild the Interactive pane so its
+        # child widget matches the currently-selected actor's terminal
+        # (each actor owns a distinct TerminalWidget).
+        if existing is not None:
+            # If the existing pane already holds this actor's widget, leave it.
+            if info.widget in list(existing.children):
+                self._interactive_active = actor.name
+                return
+            tabs.remove_pane("interactive")
+
+        # add_pane is async — it schedules the mount but we can proceed.
+        new_pane = TabPane("Interactive", info.widget, id="interactive")
+        tabs.add_pane(new_pane, before="logs")
         self._interactive_active = actor.name
-        # Defer the focus call so it lands after Textual finishes
-        # processing the event that triggered the sync (e.g. the
-        # Enter key on the tree). Without this, competing focus
-        # changes during the same event loop iteration can leave the
-        # tree focused and keys stop reaching the terminal.
-        target_widget = info.widget
-        self.call_after_refresh(lambda: target_widget.focus())
 
     def action_enter_interactive(self) -> None:
-        """Enter key on the tree: start an interactive session for the
-        selected actor (or show its existing one)."""
-        # Only trigger if the tree has focus — otherwise leave Enter alone
-        # for the other widgets that may consume it.
-        if not self._tree_has_focus():
-            return
-
+        """Bound to `i` (app-wide) and Tree.NodeSelected (Enter on tree):
+        take the user to the Interactive tab for the selected actor,
+        creating the session if needed. Always scrolls to the bottom
+        and focuses the terminal so the user is ready to type."""
         actor = self.query_one(ActorTree).selected_actor
         if actor is None:
+            self.notify("no actor selected", severity="warning")
             return
 
-        if self._interactive.has(actor.name):
-            self._sync_detail_view()
-            return
-
-        status = self._prev_statuses.get(actor.name, Status.IDLE)
-        if status == Status.RUNNING:
-            self.notify(f"{actor.name} is currently running — stop it first",
-                        severity="error")
-            return
-        if actor.agent_session is None:
-            self.notify(f"{actor.name} has no session yet — run it first",
-                        severity="error")
-            return
-        if not binary_exists(actor.agent.binary_name):
-            self.notify(f"agent binary '{actor.agent.binary_name}' not on PATH",
-                        severity="error")
-            return
-
-        try:
-            self._interactive.create(
-                actor_name=actor.name,
-                agent=_create_agent(actor.agent),
-                session_id=actor.agent_session,
-                cwd=Path(actor.dir),
-                config=dict(actor.config),
-            )
-        except Exception as e:
-            self.notify(f"failed to start interactive session: {e}", severity="error")
-            return
+        if not self._interactive.has(actor.name):
+            status = self._prev_statuses.get(actor.name, Status.IDLE)
+            if status == Status.RUNNING:
+                self.notify(f"{actor.name} is currently running — stop it first",
+                            severity="error")
+                return
+            if actor.agent_session is None:
+                self.notify(f"{actor.name} has no session yet — run it first",
+                            severity="error")
+                return
+            if not binary_exists(actor.agent.binary_name):
+                self.notify(f"agent binary '{actor.agent.binary_name}' not on PATH",
+                            severity="error")
+                return
+            try:
+                self._interactive.create(
+                    actor_name=actor.name,
+                    agent=_create_agent(actor.agent),
+                    session_id=actor.agent_session,
+                    cwd=Path(actor.dir),
+                    config=dict(actor.config),
+                )
+            except Exception as e:
+                self.notify(f"failed to start interactive session: {e}", severity="error")
+                return
 
         self._sync_detail_view()
+
+        # Activate the Interactive tab, focus the terminal, and scroll
+        # to the bottom — intentionally different from tab-nav, which
+        # preserves scroll position.
+        info = self._interactive.get(actor.name)
+        if info is None:
+            return
+        try:
+            tabs = self.query_one("#tabs", TabbedContent)
+        except Exception:
+            return
+        tabs.active = "interactive"
+
+        target_widget = info.widget
+
+        def _activate() -> None:
+            target_widget.focus()
+            try:
+                target_widget.scroll_end(animate=False, force=True)
+            except Exception:
+                pass
+
+        self.call_after_refresh(_activate)
 
     def on_terminal_widget_exit_requested(self, message: TerminalWidget.ExitRequested) -> None:
         """Ctrl+Z from the embedded terminal: move focus to the actor tree.
