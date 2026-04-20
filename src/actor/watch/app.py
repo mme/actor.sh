@@ -12,7 +12,6 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
-    ContentSwitcher,
     DataTable,
     Footer,
     RichLog,
@@ -147,19 +146,25 @@ class ActorWatchApp(App):
                 yield Static(" ★ ACTOR.SH", id="actor-title")
                 yield ActorTree()
             with Vertical(id="detail-panel"):
-                with ContentSwitcher(id="detail-switcher", initial="tabs-view"):
-                    with Vertical(id="tabs-view"):
-                        with TabbedContent(id="tabs"):
-                            with TabPane("Logs", id="logs"):
-                                yield RichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False)
-                            with TabPane("Diff", id="diff"):
-                                yield VerticalScroll(id="diff-scroll")
-                            with TabPane("Info", id="info"):
-                                yield VerticalScroll(
-                                    Static("Select an actor", id="info-content"),
-                                    DataTable(id="runs-table"),
-                                )
-                    yield Vertical(id="interactive-view")
+                with TabbedContent(id="tabs"):
+                    with TabPane("Logs", id="logs"):
+                        # The Logs tab holds either the RichLog (when
+                        # the selected actor has no live interactive
+                        # session) or the actor's TerminalWidget (when
+                        # it does). _sync_detail_view flips the content
+                        # inside this container; Diff and Info stay
+                        # accessible via their tabs either way.
+                        yield Vertical(
+                            RichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False),
+                            id="logs-pane",
+                        )
+                    with TabPane("Diff", id="diff"):
+                        yield VerticalScroll(id="diff-scroll")
+                    with TabPane("Info", id="info"):
+                        yield VerticalScroll(
+                            Static("Select an actor", id="info-content"),
+                            DataTable(id="runs-table"),
+                        )
         yield Splash(id="splash", animate=self._animate)
         yield Static("Loading...", id="status-bar")
         yield Footer(show_command_palette=False)
@@ -297,14 +302,20 @@ class ActorWatchApp(App):
         self._refresh_logs(actor)
 
     def _clear_detail(self) -> None:
+        from textual.css.query import NoMatches
+
         info = self.query_one("#info-content", Static)
         info.update("Select an actor")
 
         table = self.query_one("#runs-table", DataTable)
         table.clear(columns=True)
 
-        log = self.query_one("#logs-content", RichLog)
-        log.clear()
+        try:
+            log = self.query_one("#logs-content", RichLog)
+            log.clear()
+        except NoMatches:
+            # Logs tab currently holds an interactive TerminalWidget.
+            pass
         self._last_log_actor = None
         self._last_log_count = 0
         self._last_log_entries = []
@@ -327,13 +338,21 @@ class ActorWatchApp(App):
     _last_log_entries: list = []
 
     def on_resize(self) -> None:
-        log = self.query_one("#logs-content", RichLog)
+        from textual.css.query import NoMatches
+        try:
+            log = self.query_one("#logs-content", RichLog)
+        except NoMatches:
+            return  # Logs tab holds a TerminalWidget; it handles its own resize.
         if log.size.width != self._last_log_width and self._last_log_entries:
             self._last_log_count = 0
             self._set_logs(self._last_log_actor, self._last_log_entries)
 
     def _set_logs(self, actor_name: str, entries: list) -> None:
-        log = self.query_one("#logs-content", RichLog)
+        from textual.css.query import NoMatches
+        try:
+            log = self.query_one("#logs-content", RichLog)
+        except NoMatches:
+            return  # Logs tab is currently hosting a TerminalWidget.
 
         actor_changed = actor_name != self._last_log_actor
         if not actor_changed and len(entries) == self._last_log_count and log.size.width == self._last_log_width:
@@ -461,8 +480,9 @@ class ActorWatchApp(App):
     # -- Interactive mode ----------------------------------------------------
 
     def _sync_detail_view(self) -> None:
-        """Switch the detail panel between tabs and an interactive terminal
-        based on whether the currently-selected actor has a live session.
+        """Populate the Logs tab with either the RichLog or the actor's
+        interactive TerminalWidget, based on whether the selected actor
+        has a live session. Diff / Info tabs are unaffected.
 
         NoMatches is silently tolerated because this runs from on_ready,
         on_tree_node_highlighted, and keybindings — the detail layout
@@ -471,8 +491,7 @@ class ActorWatchApp(App):
         from textual.css.query import NoMatches
 
         try:
-            switcher = self.query_one("#detail-switcher", ContentSwitcher)
-            view = self.query_one("#interactive-view", Vertical)
+            logs_pane = self.query_one("#logs-pane", Vertical)
         except NoMatches:
             return
         actor = self.query_one(ActorTree).selected_actor
@@ -481,27 +500,37 @@ class ActorWatchApp(App):
         )
 
         if info is None:
-            # No live session for the selected actor — swap to the tabs
-            # pane and unmount any lingering terminal widget so a future
-            # re-mount doesn't compete with a stale one. Widget.remove()
-            # is fire-and-forget (returns an AwaitRemove we don't await);
-            # the switcher already hides the view so a one-frame overlap
-            # during teardown is invisible.
-            if switcher.current != "tabs-view":
-                switcher.current = "tabs-view"
-            for child in list(view.children):
-                child.remove()
+            # No live session — show the standard RichLog. If the pane
+            # currently holds a terminal (from a previously-selected
+            # actor), unmount it and remount the RichLog.
+            current_children = list(logs_pane.children)
+            has_richlog = any(
+                isinstance(c, RichLog) and c.id == "logs-content"
+                for c in current_children
+            )
+            if not has_richlog:
+                for child in current_children:
+                    child.remove()
+                logs_pane.mount(
+                    RichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False)
+                )
             self._interactive_active = None
             return
 
-        # Actor has a live session — mount its terminal (unmounting any
-        # previously-shown one first).
-        for child in list(view.children):
-            if child is not info.widget:
+        # Live session — put the actor's TerminalWidget in the Logs tab.
+        current_children = list(logs_pane.children)
+        if info.widget not in current_children:
+            for child in current_children:
                 child.remove()
-        if info.widget not in view.children:
-            view.mount(info.widget)
-        switcher.current = "interactive-view"
+            logs_pane.mount(info.widget)
+        # Activate the Logs tab if we're elsewhere, so the user actually
+        # sees the terminal they just opened.
+        try:
+            tabs = self.query_one("#tabs", TabbedContent)
+            if tabs.active != "logs":
+                tabs.active = "logs"
+        except Exception:
+            pass
         self._interactive_active = actor.name
         # Defer the focus call so it lands after Textual finishes
         # processing the event that triggered the sync (e.g. the
@@ -556,12 +585,9 @@ class ActorWatchApp(App):
         self._sync_detail_view()
 
     def on_terminal_widget_exit_requested(self, message: TerminalWidget.ExitRequested) -> None:
-        """Ctrl+Z from the embedded terminal: only shift focus to the
-        actor tree. The terminal view stays visible — while an
-        interactive session is live for the selected actor, that actor's
-        terminal is always shown in the detail pane."""
-        # Drop the terminal's focus so the tree's .focus() takes effect
-        # cleanly, then defer to let the key event settle.
+        """Ctrl+Z from the embedded terminal: move focus to the actor tree.
+        The Logs tab keeps the live terminal mounted; Diff / Info tabs
+        are still reachable via the tab bar."""
         self.set_focus(None)
         self.call_after_refresh(lambda: self.query_one(ActorTree).focus())
 
@@ -575,17 +601,12 @@ class ActorWatchApp(App):
         if target is None:
             return
         self._interactive.close(target)
-        # Status-change notification ("✓ actor done" / "✗ actor error") is
-        # produced by the next _update_ui poll; no need to double up with a
-        # per-session toast here.
-        # _sync_detail_view handles the ContentSwitcher swap AND unmounts
-        # the dead terminal widget from #interactive-view — the session
-        # is no longer in the registry so the "no session" branch fires.
+        # _sync_detail_view swaps the Logs-tab content back to RichLog
+        # now that the session is gone from the registry.
         self._refresh_detail()
         self._sync_detail_view()
-        # The terminal widget just unmounted — focus would otherwise
-        # land on nothing. Drop it back onto the tree so the user can
-        # immediately navigate to another actor.
+        # The terminal widget just unmounted — drop focus onto the tree
+        # so the user can immediately navigate to another actor.
         self.set_focus(None)
         self.call_after_refresh(lambda: self.query_one(ActorTree).focus())
 
