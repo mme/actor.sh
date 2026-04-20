@@ -234,7 +234,7 @@ def _spawn_background_run(
 def new_actor(
     name: str,
     prompt: str | None = None,
-    agent: Literal["claude", "codex"] = "claude",
+    agent: Literal["claude", "codex"] | None = None,
     dir: str | None = None,
     base: str | None = None,
     no_worktree: bool = False,
@@ -247,7 +247,8 @@ def new_actor(
     Args:
         name: Actor name (becomes the git branch). Use lowercase with hyphens.
         prompt: Optional prompt to run immediately after creation.
-        agent: Coding agent — "claude" or "codex".
+        agent: Coding agent — "claude" or "codex". Omit to let the template
+            choose (falls back to "claude" if no template).
         dir: Base directory for the worktree (defaults to current working directory).
         base: Branch to create the worktree from (defaults to current branch).
         no_worktree: If True, skip worktree creation.

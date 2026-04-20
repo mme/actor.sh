@@ -636,6 +636,31 @@ class McpToolTests(unittest.TestCase):
         self.assertEqual(kwargs["template_name"], "qa")
         self.assertIs(kwargs["app_config"], app_config)
 
+    def test_new_actor_without_agent_passes_none_so_template_wins(self):
+        """When MCP caller omits `agent`, new_actor must forward
+        agent_name=None so a template's agent selection takes effect.
+        Passing the MCP default "claude" would silently override a
+        template declaring `agent "codex"`."""
+        from actor import server
+        with patch("actor.server._load_app_config"), \
+             patch("actor.server.cmd_new") as cmd_new:
+            fake_actor = MagicMock()
+            fake_actor.dir = "/tmp/foo"
+            cmd_new.return_value = fake_actor
+            server.new_actor(name="foo", template="qa")
+        self.assertIsNone(cmd_new.call_args.kwargs["agent_name"])
+
+    def test_new_actor_explicit_agent_is_forwarded(self):
+        """An explicit `agent` arg must still reach cmd_new unchanged."""
+        from actor import server
+        with patch("actor.server._load_app_config"), \
+             patch("actor.server.cmd_new") as cmd_new:
+            fake_actor = MagicMock()
+            fake_actor.dir = "/tmp/foo"
+            cmd_new.return_value = fake_actor
+            server.new_actor(name="foo", agent="codex")
+        self.assertEqual(cmd_new.call_args.kwargs["agent_name"], "codex")
+
     def test_discard_actor_forwards_hooks_and_force(self):
         from actor import server, AppConfig, Hooks
         app_config = AppConfig(hooks=Hooks(on_discard="echo bye"))
