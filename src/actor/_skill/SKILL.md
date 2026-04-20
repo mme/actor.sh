@@ -74,16 +74,71 @@ new_actor(name="fix-nav", prompt="...", config=["model=opus"])              # sa
 
 ### Templates
 
-If the user has templates defined in `~/.actor/settings.kdl` (user-wide)
-or `<project>/.actor/settings.kdl` (project-local), apply one via the CLI:
+Templates are named bundles of actor defaults. They live in KDL files that
+the user edits directly — there is no `actor init` command, so use the
+Read / Write / Edit tools when the user asks to view, add, or change a
+template.
+
+**File locations** (both optional; create whichever fits the user's ask):
+
+- `~/.actor/settings.kdl` — user-wide. Applies to every repo.
+- `<project>/.actor/settings.kdl` — project-scoped. Found by walking up
+  from the current directory (git-style), so any cwd inside the repo sees
+  it.
+
+**Precedence:** when the same template name appears in both files, the
+project file wins. Users can set a baseline template in `~/.actor/` and
+override it per-repo.
+
+**Template block syntax:**
+
+```kdl
+template "qa" {
+    agent "claude"
+    model "opus"
+    effort "max"
+    strip-api-keys true
+    prompt "You're a QA engineer. Run the tests, report what fails."
+}
+
+template "reviewer" {
+    agent "claude"
+    model "sonnet"
+    prompt "You're a code reviewer. Be concise."
+}
+```
+
+**Valid keys inside a template:**
+
+- `agent` (string) — `"claude"` or `"codex"`. Sets which CLI the actor runs.
+- `prompt` (string) — default prompt used when the user doesn't pass one
+  on the CLI.
+- Any key from the agent's config reference ([claude-config.md](claude-config.md),
+  [codex-config.md](codex-config.md)) — e.g. `model`, `effort`,
+  `strip-api-keys`, `max-budget-usd`. Values may be strings, booleans, or
+  numbers; they're all coerced to strings to match the actor config
+  pipeline.
+
+Unknown top-level nodes (`hooks`, `agent`, `alias`) parse as no-ops today —
+they're reserved for follow-up tickets. Malformed KDL raises an error
+with the file path.
+
+**Applying a template** (CLI only — see note below):
 
 ```bash
 actor new fix-auth --template qa                          # apply template
-actor new fix-auth --template qa --config model=haiku     # template + CLI override
+actor new fix-auth --template qa --config model=haiku     # CLI overrides template
+actor new fix-auth --template qa --agent codex            # CLI agent beats template
+actor new fix-auth --template qa "custom prompt"          # CLI prompt beats template
 ```
 
-The MCP `new_actor` tool does not yet accept a template parameter — use
-the CLI (Bash tool) when the user asks for a templated actor.
+Explicit CLI flags (`--agent`, `--model`, `--config`, positional prompt,
+stdin) always beat the template's values.
+
+**MCP note:** the `mcp__actor__new_actor` tool does not yet accept a
+`template` parameter. When the user asks for a templated actor, call
+`actor new … --template …` via the Bash tool instead. This is a known
+gap; a follow-up will add it to the MCP tool.
 
 ### Create without running
 
