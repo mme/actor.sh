@@ -54,7 +54,7 @@ class ActorMCP(FastMCP):
             )
 
 
-def _build_instructions(for_host: str | None = None) -> str:
+def _build_instructions() -> str:
     base = (
         "Events from the actor channel arrive as <channel source=\"actor\" ...>. "
         "They notify you when an actor finishes. Read the event and report the result to the user."

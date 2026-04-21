@@ -366,7 +366,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             )
             print(f"{actor.name} created ({actor.dir})")
 
-            prompt = args.prompt
+            prompt = args.prompt.strip() if args.prompt else args.prompt
             stdin_consumed = False
             if prompt is None and not sys.stdin.isatty():
                 prompt = sys.stdin.read().strip()
@@ -403,7 +403,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                     db, agent, proc_mgr, name=args.name,
                     hooks=app_config.hooks,
                 )
-                print(msg, file=sys.stderr)
+                print(msg, file=sys.stderr if exit_code != 0 else sys.stdout)
                 # POSIX convention for signal termination: 128 + signum.
                 # cmd_interactive returns -signum in that case.
                 if exit_code < 0:
@@ -411,7 +411,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 sys.exit(exit_code)
 
             # Resolve prompt: argument, stdin, or error
-            prompt = args.prompt
+            prompt = args.prompt.strip() if args.prompt else args.prompt
             if prompt is None and not sys.stdin.isatty():
                 prompt = sys.stdin.read().strip()
             if not prompt:
