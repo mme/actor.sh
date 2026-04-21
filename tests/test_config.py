@@ -526,6 +526,9 @@ class TestLoadConfigAgentDefaultsStrict(unittest.TestCase):
         )
 
     def test_default_config_as_template_child_raises_helpful_error(self):
+        # Needle is the redirect phrase, not just "default-config" — so
+        # a regression that swaps in "'default-config' needs a value"
+        # (the generic block-shape error) still fails this test.
         self._expect_error(
             'template "qa" {\n'
             '    agent "claude"\n'
@@ -533,7 +536,7 @@ class TestLoadConfigAgentDefaultsStrict(unittest.TestCase):
             '        model "opus"\n'
             '    }\n'
             '}\n',
-            "default-config",
+            "belong under",
         )
 
     def test_duplicate_agent_block_detected_even_if_first_is_empty(self):

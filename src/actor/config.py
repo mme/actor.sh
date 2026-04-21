@@ -132,21 +132,23 @@ def _parse_template(node, source: Path) -> Template:
     seen_keys: set[str] = set()
     for child in node.nodes:
         key = child.name
-        if key in seen_keys:
-            raise ConfigError(
-                f"template '{name}' in {source}: duplicate key '{key}'"
-            )
-        seen_keys.add(key)
         # Catch a common mix-up: `default-config {}` belongs under an
-        # `agent "..."` block, not under a template. Without this check
-        # the user gets "'default-config' needs a value" because the
-        # node has only children, no args — which hides the real fix.
+        # `agent "..."` block, not under a template. Check BEFORE the
+        # duplicate-key check so a repeated misplacement still surfaces
+        # the helpful redirect, and before the args check so that the
+        # block shape (no args, only children) doesn't get reported as
+        # "needs a value" — which hides the real fix.
         if key == "default-config":
             raise ConfigError(
                 f"template '{name}' in {source}: `default-config` blocks "
                 f"belong under `agent \"claude\" {{ … }}` / "
                 f"`agent \"codex\" {{ … }}`, not inside a template"
             )
+        if key in seen_keys:
+            raise ConfigError(
+                f"template '{name}' in {source}: duplicate key '{key}'"
+            )
+        seen_keys.add(key)
         if not child.args:
             raise ConfigError(
                 f"template '{name}' in {source}: '{key}' needs a value"
