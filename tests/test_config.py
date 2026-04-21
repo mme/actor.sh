@@ -246,6 +246,20 @@ class TestLoadConfigParseStrict(unittest.TestCase):
             "defaults",
         )
 
+    def test_actor_key_inside_defaults_block_raises(self):
+        # `use-subscription` is an actor-interpreted flag and must live at
+        # the top of the agent block, not inside `defaults { }` (which is
+        # for agent CLI flags). Let the user fix the shape rather than
+        # silently routing it through the wrong merge lane.
+        self._expect_error(
+            'agent "claude" {\n'
+            '    defaults {\n'
+            '        use-subscription "true"\n'
+            '    }\n'
+            '}\n',
+            "use-subscription",
+        )
+
 
 class TestLoadConfigCoercion(unittest.TestCase):
 
@@ -440,7 +454,7 @@ class TestLoadConfigAgentBlocks(unittest.TestCase):
             )
             with self.assertRaises(ConfigError) as ctx:
                 load_config(cwd=Path(cwd), home=Path(home))
-            self.assertIn("belong under", str(ctx.exception))
+            self.assertIn("reserved", str(ctx.exception))
 
     def test_codex_agent_defaults_parsed(self):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:

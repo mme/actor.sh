@@ -157,9 +157,10 @@ def _parse_template(node, source: Path) -> Template:
         key = child.name
         if key == "defaults":
             raise ConfigError(
-                f"template '{name}' in {source}: `defaults {{ ... }}` "
-                f"blocks belong under `agent \"claude\" {{ ... }}` / "
-                f"`agent \"codex\" {{ ... }}`, not inside a template"
+                f"template '{name}' in {source}: `defaults` is reserved "
+                f"for per-agent defaults; use `agent \"claude\" {{ "
+                f"defaults {{ ... }} }}` / `agent \"codex\" {{ "
+                f"defaults {{ ... }} }}` at the top level"
             )
         if key in seen_keys:
             raise ConfigError(
@@ -266,6 +267,13 @@ def _parse_agent_block(node, source: Path) -> Tuple[str, AgentDefaults]:
                     raise ConfigError(
                         f"agent '{raw_name}' in {source}: "
                         f"nested `defaults` block not allowed"
+                    )
+                if gc.name in whitelist:
+                    raise ConfigError(
+                        f"agent '{raw_name}' in {source}: "
+                        f"'{gc.name}' is an actor-interpreted flag and belongs "
+                        f"at the top of `agent \"{raw_name}\" {{ ... }}`, "
+                        f"not inside `defaults {{ ... }}`"
                     )
                 if gc.name in seen_args:
                     raise ConfigError(

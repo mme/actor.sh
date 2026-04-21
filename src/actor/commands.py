@@ -148,9 +148,10 @@ def cmd_new(
     #   2. kdl `agent "<name>" { ... }` block for this agent_kind
     #   3. Template config
     #   4. CLI --config pairs
-    # A `None` value at layers 2-4 cancels whatever a lower layer set.
-    # Class dicts (layer 1) never contain None — enforced by
-    # test_claude_class_constants / test_codex_class_constants.
+    # Only layer 2 can carry `None` (kdl's `null` cancel marker); layers
+    # 3 and 4 come from `Dict[str, str]` sources, and layer 1's class
+    # dicts never contain `None` (pinned by
+    # test_claude_class_constants / test_codex_class_constants).
     agent_cls = _agent_class(agent_kind)
     merged: Dict[str, Optional[str]] = {}
 

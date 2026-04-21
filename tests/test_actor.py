@@ -2312,13 +2312,6 @@ class TestClaudeAgent(unittest.TestCase):
             ["--verbose"],
         )
 
-    def test_emit_agent_args_skips_none_values(self):
-        from actor.agents.claude import ClaudeAgent
-        self.assertEqual(
-            ClaudeAgent().emit_agent_args({"model": "opus", "effort": None}),
-            ["--model", "opus"],
-        )
-
     def test_apply_actor_keys_strips_anthropic_key_by_default(self):
         from actor.agents.claude import ClaudeAgent
         env = {"PATH": "/bin", "ANTHROPIC_API_KEY": "secret"}
@@ -2555,13 +2548,6 @@ class TestCodexAgent(unittest.TestCase):
         self.assertEqual(CodexAgent().emit_agent_args({"x": ""}), ["-x"])
         self.assertEqual(
             CodexAgent().emit_agent_args({"verbose": ""}), ["--verbose"]
-        )
-
-    def test_emit_agent_args_skips_none_values(self):
-        from actor.agents.codex import CodexAgent
-        self.assertEqual(
-            CodexAgent().emit_agent_args({"m": "o3", "a": None}),
-            ["-m", "o3"],
         )
 
     def test_apply_actor_keys_strips_openai_key_by_default(self):

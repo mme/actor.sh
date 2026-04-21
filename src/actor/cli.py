@@ -12,9 +12,8 @@ from .types import AgentKind, Status
 from .db import Database
 from .git import RealGit
 from .process import RealProcessManager
-from .agents.claude import ClaudeAgent
-from .agents.codex import CodexAgent
 from .commands import (
+    _create_agent as _create_agent_impl,
     cmd_config,
     cmd_discard,
     cmd_interactive,
@@ -28,12 +27,9 @@ from .commands import (
 
 
 def _create_agent(kind: AgentKind) -> Agent:
-    if kind == AgentKind.CLAUDE:
-        return ClaudeAgent()
-    elif kind == AgentKind.CODEX:
-        return CodexAgent()
-    else:
-        raise ActorError(f"unknown agent kind: {kind}")
+    # Thin re-export of commands._create_agent so existing test patches and
+    # sibling modules (server.py, watch.app) can keep importing from `cli`.
+    return _create_agent_impl(kind)
 
 
 def _db_path() -> str:
