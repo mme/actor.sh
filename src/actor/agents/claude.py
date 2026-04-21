@@ -30,10 +30,14 @@ class ClaudeAgent(Agent):
         """Map the resolved `defaults { }` dict to claude CLI flags.
 
         Straight mapping: `key "value"` → `--key value`; empty string becomes
-        a bare `--key`. `defaults` is `Config` (Dict[str, str]) — the kdl-layer
-        `None` cancel markers are stripped in cmd_new before this runs."""
+        a bare `--key`. `None` values are skipped defensively — the resolver
+        in cmd_new is expected to have stripped kdl-layer `None` cancel
+        markers before this runs, but we drop them here too so a misrouted
+        caller can't feed `None` into subprocess.Popen."""
         args: List[str] = []
         for key, value in sorted(defaults.items()):
+            if value is None:
+                continue
             args.append(f"--{key}")
             if value != "":
                 args.append(value)

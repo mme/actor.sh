@@ -42,10 +42,14 @@ class CodexAgent(Agent):
         Users write Codex's native flag names verbatim (e.g. `m`, `a`,
         `sandbox`). One-character keys emit a short flag (`-k value`);
         longer keys emit a long flag (`--key value`). Empty string becomes
-        a bare flag. `defaults` is `Config` (Dict[str, str]) — the kdl-layer
-        `None` cancel markers are stripped in cmd_new before this runs."""
+        a bare flag. `None` values are skipped defensively — the resolver
+        in cmd_new is expected to have stripped kdl-layer `None` cancel
+        markers before this runs, but we drop them here too so a misrouted
+        caller can't feed `None` into subprocess.Popen."""
         args: List[str] = []
         for key, value in sorted(defaults.items()):
+            if value is None:
+                continue
             prefix = "-" if len(key) == 1 else "--"
             args.append(f"{prefix}{key}")
             if value != "":

@@ -401,8 +401,11 @@ def _merge(base: AppConfig, over: AppConfig) -> AppConfig:
             actor_keys=_merge_dict(b.actor_keys, o.actor_keys),
             agent_args=_merge_dict(b.agent_args, o.agent_args),
         )
-    # Drop entries where everything cancelled out so callers can use
-    # `agent not in cfg.agent_defaults` as "no overrides from kdl".
+    # Drop entries that ended up with no keys at all (e.g. an agent block
+    # written as `agent "claude" { }`) so callers can treat
+    # `agent not in cfg.agent_defaults` as "no mention in kdl". Entries
+    # whose only values are `None` cancel markers are retained — cmd_new
+    # needs them to cancel class-level defaults.
     merged_defaults = {
         k: v for k, v in merged_defaults.items()
         if v.actor_keys or v.agent_args

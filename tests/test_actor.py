@@ -2312,6 +2312,16 @@ class TestClaudeAgent(unittest.TestCase):
             ["--verbose"],
         )
 
+    def test_emit_agent_args_skips_none_values(self):
+        """Defensive: the resolver in cmd_new strips `None` cancel markers,
+        but emit_agent_args must also drop them so a misrouted caller can't
+        feed `None` into subprocess.Popen."""
+        from actor.agents.claude import ClaudeAgent
+        args = ClaudeAgent().emit_agent_args(
+            {"model": "sonnet", "permission-mode": None}  # type: ignore[dict-item]
+        )
+        self.assertEqual(args, ["--model", "sonnet"])
+
     def test_apply_actor_keys_strips_anthropic_key_by_default(self):
         from actor.agents.claude import ClaudeAgent
         env = {"PATH": "/bin", "ANTHROPIC_API_KEY": "secret"}
@@ -2549,6 +2559,16 @@ class TestCodexAgent(unittest.TestCase):
         self.assertEqual(
             CodexAgent().emit_agent_args({"verbose": ""}), ["--verbose"]
         )
+
+    def test_emit_agent_args_skips_none_values(self):
+        """Defensive: the resolver in cmd_new strips `None` cancel markers,
+        but emit_agent_args must also drop them so a misrouted caller can't
+        feed `None` into subprocess.Popen."""
+        from actor.agents.codex import CodexAgent
+        args = CodexAgent().emit_agent_args(
+            {"m": "o3", "sandbox": None}  # type: ignore[dict-item]
+        )
+        self.assertEqual(args, ["-m", "o3"])
 
     def test_apply_actor_keys_strips_openai_key_by_default(self):
         from actor.agents.codex import CodexAgent
