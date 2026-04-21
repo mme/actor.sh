@@ -707,6 +707,198 @@ class TestCmdNewTemplate(unittest.TestCase):
         self.assertEqual(actor.agent, AgentKind.CLAUDE)
 
 
+class TestCmdNewAgentDefaults(unittest.TestCase):
+    """Precedence ladder: class defaults -> kdl agent_defaults ->
+    template -> CLI."""
+
+    def _db(self) -> Database:
+        return Database.open(":memory:")
+
+    def test_class_defaults_applied_when_nothing_else_sets_key(self):
+        from actor import AppConfig
+        db = self._db()
+        git = FakeGit()
+        actor = cmd_new(
+            db, git,
+            name="bar",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name="claude",
+            config_pairs=[],
+            template_name=None,
+            app_config=AppConfig(),
+        )
+        self.assertEqual(actor.config.get("permission-mode"), "auto")
+        self.assertEqual(actor.config.get("use-subscription"), "true")
+
+    def test_class_defaults_applied_when_app_config_is_none(self):
+        # Callers that don't pass app_config (e.g. older integration paths)
+        # should still get class-level defaults.
+        db = self._db()
+        git = FakeGit()
+        actor = cmd_new(
+            db, git,
+            name="bar2",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name="claude",
+            config_pairs=[],
+        )
+        self.assertEqual(actor.config.get("permission-mode"), "auto")
+        self.assertEqual(actor.config.get("use-subscription"), "true")
+
+    def test_class_defaults_apply_to_codex(self):
+        from actor import AppConfig
+        db = self._db()
+        git = FakeGit()
+        actor = cmd_new(
+            db, git,
+            name="c",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name="codex",
+            config_pairs=[],
+            app_config=AppConfig(),
+        )
+        self.assertEqual(actor.config.get("sandbox"), "danger-full-access")
+        self.assertEqual(actor.config.get("a"), "never")
+        self.assertEqual(actor.config.get("use-subscription"), "true")
+
+    def test_kdl_agent_defaults_override_class_defaults(self):
+        from actor import AgentDefaults, AppConfig
+        db = self._db()
+        git = FakeGit()
+        app = AppConfig(
+            agent_defaults={
+                "claude": AgentDefaults(
+                    actor_keys={"use-subscription": "false"},
+                    agent_args={"permission-mode": "plan", "model": "opus"},
+                ),
+            },
+        )
+        actor = cmd_new(
+            db, git,
+            name="foo",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name="claude",
+            config_pairs=[],
+            app_config=app,
+        )
+        self.assertEqual(actor.config.get("use-subscription"), "false")
+        self.assertEqual(actor.config.get("permission-mode"), "plan")
+        self.assertEqual(actor.config.get("model"), "opus")
+
+    def test_kdl_null_cancels_class_default(self):
+        from actor import AgentDefaults, AppConfig
+        db = self._db()
+        git = FakeGit()
+        app = AppConfig(
+            agent_defaults={
+                "claude": AgentDefaults(
+                    agent_args={"permission-mode": None},
+                ),
+            },
+        )
+        actor = cmd_new(
+            db, git,
+            name="n",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name="claude",
+            config_pairs=[],
+            app_config=app,
+        )
+        self.assertNotIn("permission-mode", actor.config)
+        # Other class defaults still apply.
+        self.assertEqual(actor.config.get("use-subscription"), "true")
+
+    def test_template_overrides_kdl_agent_defaults(self):
+        from actor import AgentDefaults, AppConfig, Template
+        db = self._db()
+        git = FakeGit()
+        app = AppConfig(
+            templates={
+                "qa": Template(name="qa", config={"permission-mode": "plan"}),
+            },
+            agent_defaults={
+                "claude": AgentDefaults(agent_args={"permission-mode": "auto"}),
+            },
+        )
+        actor = cmd_new(
+            db, git,
+            name="t",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name="claude",
+            config_pairs=[],
+            template_name="qa",
+            app_config=app,
+        )
+        self.assertEqual(actor.config.get("permission-mode"), "plan")
+
+    def test_cli_overrides_template_over_kdl_over_class_defaults(self):
+        from actor import AgentDefaults, AppConfig, Template
+        db = self._db()
+        git = FakeGit()
+        app = AppConfig(
+            templates={
+                "qa": Template(
+                    name="qa",
+                    config={"permission-mode": "plan", "extra": "tpl"},
+                ),
+            },
+            agent_defaults={
+                "claude": AgentDefaults(
+                    actor_keys={"use-subscription": "false"},
+                    agent_args={"model": "opus", "extra": "kdl"},
+                ),
+            },
+        )
+        actor = cmd_new(
+            db, git,
+            name="c1",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name="claude",
+            config_pairs=["model=haiku"],
+            template_name="qa",
+            app_config=app,
+        )
+        self.assertEqual(actor.config.get("model"), "haiku")            # CLI wins
+        self.assertEqual(actor.config.get("extra"), "tpl")              # tpl > kdl
+        self.assertEqual(actor.config.get("permission-mode"), "plan")   # tpl
+        self.assertEqual(actor.config.get("use-subscription"), "false") # kdl > class
+
+    def test_codex_agent_defaults_do_not_leak_into_claude_actor(self):
+        from actor import AgentDefaults, AppConfig
+        db = self._db()
+        git = FakeGit()
+        app = AppConfig(
+            agent_defaults={
+                "codex": AgentDefaults(agent_args={"m": "o3"}),
+            },
+        )
+        actor = cmd_new(
+            db, git,
+            name="iso",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name="claude",
+            config_pairs=[],
+            app_config=app,
+        )
+        self.assertNotIn("m", actor.config)
+
+
 # ──────────────────────────────────────────────────────────────────────
 #  Test: cmd_run  (8 tests from run.rs)
 # ──────────────────────────────────────────────────────────────────────

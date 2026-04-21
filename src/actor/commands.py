@@ -135,10 +135,54 @@ def cmd_new(
     if not binary_exists(agent_kind.binary_name):
         print(f"warning: '{agent_kind.binary_name}' not found on PATH", file=sys.stderr)
 
-    # Config precedence: template's config is the base; CLI pairs overlay on top.
-    config: Dict[str, str] = dict(template.config) if template else {}
+    # Config precedence (lowest → highest):
+    #   1. Agent class defaults (ACTOR_DEFAULTS + AGENT_DEFAULTS baseline)
+    #   2. kdl `agent "<name>" { ... }` block for this agent_kind
+    #   3. Template config
+    #   4. CLI --config pairs
+    # Nones at any layer cancel the key from the merged result (safety net
+    # for bypass paths; normally load_config's _merge has already stripped
+    # Nones from steps 1/2).
+    agent_cls = type(_create_agent(agent_kind))
+    merged: Dict[str, Optional[str]] = {}
+
+    # Layer 1: class baseline — merge actor-keys + agent-args into one flat dict.
+    for k, v in agent_cls.ACTOR_DEFAULTS.items():
+        if v is None:
+            merged.pop(k, None)
+        else:
+            merged[k] = v
+    for k, v in agent_cls.AGENT_DEFAULTS.items():
+        if v is None:
+            merged.pop(k, None)
+        else:
+            merged[k] = v
+
+    # Layer 2: kdl agent_defaults for this agent_kind (if any).
+    if app_config is not None:
+        kdl_defaults = app_config.agent_defaults.get(agent_kind.value)
+        if kdl_defaults is not None:
+            for k, v in kdl_defaults.actor_keys.items():
+                if v is None:
+                    merged.pop(k, None)
+                else:
+                    merged[k] = v
+            for k, v in kdl_defaults.agent_args.items():
+                if v is None:
+                    merged.pop(k, None)
+                else:
+                    merged[k] = v
+
+    # Layer 3: template config.
+    if template is not None:
+        for k, v in template.config.items():
+            merged[k] = v
+
+    # Layer 4: CLI pairs.
     for k, v in parse_config(config_pairs).items():
-        config[k] = v
+        merged[k] = v
+
+    config: Dict[str, str] = {k: v for k, v in merged.items() if v is not None}
     config = _sorted_config(config)
 
     if dir is not None:
