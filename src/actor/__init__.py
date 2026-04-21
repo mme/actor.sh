@@ -35,7 +35,7 @@ from .types import (
 )
 
 # Config
-from .config import AppConfig, Template, load_config
+from .config import AgentDefaults, AppConfig, Template, load_config
 
 # Interfaces
 from .interfaces import (
@@ -103,6 +103,7 @@ __all__ = [
     "validate_name",
     "parse_config",
     # Config
+    "AgentDefaults",
     "AppConfig",
     "Template",
     "load_config",

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from actor.config import AppConfig, Template, load_config
+from actor.config import AgentDefaults, AppConfig, Template, load_config
 from actor.errors import ConfigError
 
 
@@ -289,6 +289,195 @@ class TestLoadConfigCwdUnderHome(unittest.TestCase):
             )
             cfg = load_config(cwd=proj, home=home_p)
             self.assertEqual(cfg.templates["qa"].agent, "codex")
+
+
+class TestLoadConfigAgentBlocks(unittest.TestCase):
+
+    def _write(self, path: Path, body: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+
+    def test_agent_defaults_parsed(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    use-subscription false\n'
+                '    defaults {\n'
+                '        permission-mode "bypassPermissions"\n'
+                '        model "opus"\n'
+                '    }\n'
+                '}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            d = cfg.agent_defaults["claude"]
+            self.assertEqual(d.actor_keys, {"use-subscription": "false"})
+            self.assertEqual(
+                d.agent_args,
+                {"permission-mode": "bypassPermissions", "model": "opus"},
+            )
+
+    def test_null_in_defaults_is_stripped_by_merge(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    defaults {\n'
+                '        permission-mode null\n'
+                '    }\n'
+                '}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            # Null at top level with nothing to cancel leaves an empty
+            # AgentDefaults; the merge step drops empty blocks entirely.
+            self.assertNotIn("claude", cfg.agent_defaults)
+
+    def test_unknown_agent_rejected(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(
+                'agent "bogus" {\n'
+                '    defaults {\n'
+                '        x "1"\n'
+                '    }\n'
+                '}\n'
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn("bogus", str(ctx.exception))
+
+    def test_unknown_flat_key_rejected(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(
+                'agent "claude" {\n'
+                '    not-a-real-flat-key "x"\n'
+                '}\n'
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn("not-a-real-flat-key", str(ctx.exception))
+
+    def test_project_agent_defaults_override_user_per_key(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    defaults {\n'
+                '        model "sonnet"\n'
+                '        permission-mode "auto"\n'
+                '    }\n'
+                '}\n',
+            )
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    defaults {\n'
+                '        permission-mode null\n'
+                '    }\n'
+                '}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            d = cfg.agent_defaults["claude"]
+            self.assertEqual(d.agent_args.get("model"), "sonnet")
+            self.assertNotIn("permission-mode", d.agent_args)
+
+    def test_project_agent_defaults_actor_key_override(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    use-subscription true\n'
+                '}\n',
+            )
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    use-subscription false\n'
+                '}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            d = cfg.agent_defaults["claude"]
+            self.assertEqual(d.actor_keys.get("use-subscription"), "false")
+
+    def test_defaults_block_at_template_level_rejected(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(
+                'template "qa" {\n'
+                '    defaults {\n'
+                '        model "opus"\n'
+                '    }\n'
+                '}\n'
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn("belong under", str(ctx.exception))
+
+    def test_codex_agent_defaults_parsed(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'agent "codex" {\n'
+                '    defaults {\n'
+                '        m "o3"\n'
+                '        sandbox "read-only"\n'
+                '    }\n'
+                '}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            d = cfg.agent_defaults["codex"]
+            self.assertEqual(d.agent_args, {"m": "o3", "sandbox": "read-only"})
+
+    def test_duplicate_agent_block_rejected(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(
+                'agent "claude" {\n'
+                '    use-subscription true\n'
+                '}\n'
+                'agent "claude" {\n'
+                '    use-subscription false\n'
+                '}\n'
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn("claude", str(ctx.exception))
+
+    def test_agent_block_without_name_rejected(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(
+                'agent {\n'
+                '    defaults {\n'
+                '        model "opus"\n'
+                '    }\n'
+                '}\n'
+            )
+            with self.assertRaises(ConfigError):
+                load_config(cwd=Path(cwd), home=Path(home))
+
+    def test_null_flat_key_parses_as_none(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    use-subscription true\n'
+                '}\n',
+            )
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    use-subscription null\n'
+                '}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertNotIn("claude", cfg.agent_defaults)
 
 
 if __name__ == "__main__":

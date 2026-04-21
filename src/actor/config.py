@@ -2,22 +2,41 @@
 
 Loads ~/.actor/settings.kdl (user) and <project>/.actor/settings.kdl
 (project), merges them, and exposes the merged AppConfig with its
-templates map. Project config overrides user config on same-key conflict.
+templates map and per-agent defaults. Project config overrides user
+config per-key.
 
-Out of scope (see tickets #30 / #31 / #33): hooks, per-agent default-config
-blocks, aliases. Their nodes are skipped at parse time without error for
-forward compatibility.
+Out of scope (see tickets #30 / #33): hooks, aliases. Their nodes are
+skipped at parse time without error for forward compatibility.
 """
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, FrozenSet, Optional, Tuple
 
 import kdl
 
 from .errors import ConfigError
+
+
+_VALID_AGENTS: Tuple[str, ...] = ("claude", "codex")
+
+
+def _actor_keys_whitelist(agent_name: str) -> FrozenSet[str]:
+    """Return the set of valid flat (non-defaults) keys for an agent.
+
+    Deferred import so config.py stays importable before agents subpackage
+    finishes loading, and to keep the whitelist in a single source of truth
+    (the agent class's `ACTOR_DEFAULTS` dict)."""
+    from .agents.claude import ClaudeAgent
+    from .agents.codex import CodexAgent
+
+    if agent_name == "claude":
+        return frozenset(ClaudeAgent.ACTOR_DEFAULTS.keys())
+    if agent_name == "codex":
+        return frozenset(CodexAgent.ACTOR_DEFAULTS.keys())
+    return frozenset()
 
 
 @dataclass
@@ -29,8 +48,22 @@ class Template:
 
 
 @dataclass
+class AgentDefaults:
+    """Per-agent baseline from settings.kdl.
+
+    `actor_keys` are flat keys interpreted by actor-sh (e.g. env filtering).
+    `agent_args` come from the `defaults { }` sub-block and map directly to
+    the agent binary's CLI flags. Values of `None` mean "unset" — they cancel
+    a lower-precedence value during merge.
+    """
+    actor_keys: Dict[str, Optional[str]] = field(default_factory=dict)
+    agent_args: Dict[str, Optional[str]] = field(default_factory=dict)
+
+
+@dataclass
 class AppConfig:
     templates: Dict[str, Template] = field(default_factory=dict)
+    agent_defaults: Dict[str, AgentDefaults] = field(default_factory=dict)
 
 
 def _find_project_config(
@@ -89,6 +122,16 @@ def _coerce_value(value: object) -> str:
     raise ConfigError(f"unsupported KDL value type: {type(value).__name__}")
 
 
+def _coerce_value_or_none(value: object) -> Optional[str]:
+    """Like `_coerce_value` but maps KDL `null` (Python `None`) → `None`.
+
+    Only used inside `agent { }` blocks, where null explicitly means "unset"
+    and cancels a lower-precedence value during merge."""
+    if value is None:
+        return None
+    return _coerce_value(value)
+
+
 def _parse_template(node, source: Path) -> Template:
     if not node.args or not isinstance(node.args[0], str):
         raise ConfigError(
@@ -112,6 +155,12 @@ def _parse_template(node, source: Path) -> Template:
     seen_keys: set[str] = set()
     for child in node.nodes:
         key = child.name
+        if key == "defaults":
+            raise ConfigError(
+                f"template '{name}' in {source}: `defaults {{ ... }}` "
+                f"blocks belong under `agent \"claude\" {{ ... }}` / "
+                f"`agent \"codex\" {{ ... }}`, not inside a template"
+            )
         if key in seen_keys:
             raise ConfigError(
                 f"template '{name}' in {source}: duplicate key '{key}'"
@@ -145,6 +194,135 @@ def _parse_template(node, source: Path) -> Template:
     return tpl
 
 
+def _parse_agent_block(node, source: Path) -> Tuple[str, AgentDefaults]:
+    """Parse an `agent "<name>" { ... }` node.
+
+    Shape: flat children are actor-keys (whitelisted against the agent's
+    `ACTOR_DEFAULTS`), a single nested `defaults { ... }` block holds
+    agent-arg keys, and null values survive as Python `None` so the merge
+    step can use them to cancel lower-precedence values."""
+    if not node.args:
+        raise ConfigError(
+            f"agent block in {source} must have a name "
+            f"(e.g. `agent \"claude\" {{ ... }}`)"
+        )
+    if len(node.args) > 1:
+        raise ConfigError(
+            f"agent block in {source} has extra positional args"
+        )
+    raw_name = node.args[0]
+    if not isinstance(raw_name, str) or not raw_name:
+        raise ConfigError(
+            f"agent block in {source} must have a non-empty string name"
+        )
+    if getattr(node, "props", None):
+        raise ConfigError(
+            f"agent '{raw_name}' in {source} does not accept properties"
+        )
+    if raw_name not in _VALID_AGENTS:
+        raise ConfigError(
+            f"unknown agent '{raw_name}' in {source} "
+            f"(valid: {', '.join(_VALID_AGENTS)})"
+        )
+
+    whitelist = _actor_keys_whitelist(raw_name)
+    defaults = AgentDefaults()
+    seen_flat: set[str] = set()
+    seen_defaults_block = False
+    for child in node.nodes:
+        key = child.name
+        if key == "defaults":
+            if seen_defaults_block:
+                raise ConfigError(
+                    f"agent '{raw_name}' in {source}: "
+                    f"duplicate `defaults` block"
+                )
+            seen_defaults_block = True
+            if child.args:
+                raise ConfigError(
+                    f"agent '{raw_name}' in {source}: "
+                    f"`defaults` block must not have positional args"
+                )
+            if getattr(child, "props", None):
+                raise ConfigError(
+                    f"agent '{raw_name}' in {source}: "
+                    f"`defaults` block does not accept properties"
+                )
+            seen_args: set[str] = set()
+            for gc in child.nodes:
+                if gc.name == "defaults":
+                    raise ConfigError(
+                        f"agent '{raw_name}' in {source}: "
+                        f"nested `defaults` block not allowed"
+                    )
+                if gc.name in seen_args:
+                    raise ConfigError(
+                        f"agent '{raw_name}' in {source}: "
+                        f"duplicate defaults key '{gc.name}'"
+                    )
+                seen_args.add(gc.name)
+                if not gc.args:
+                    raise ConfigError(
+                        f"agent '{raw_name}' in {source}: "
+                        f"defaults key '{gc.name}' needs a value "
+                        f"(use `null` to unset)"
+                    )
+                if len(gc.args) > 1:
+                    raise ConfigError(
+                        f"agent '{raw_name}' in {source}: "
+                        f"defaults key '{gc.name}' has extra args"
+                    )
+                if getattr(gc, "props", None):
+                    raise ConfigError(
+                        f"agent '{raw_name}' in {source}: "
+                        f"defaults key '{gc.name}' does not accept properties"
+                    )
+                if gc.nodes:
+                    raise ConfigError(
+                        f"agent '{raw_name}' in {source}: "
+                        f"defaults key '{gc.name}' must be a leaf value, "
+                        f"not a block"
+                    )
+                defaults.agent_args[gc.name] = _coerce_value_or_none(gc.args[0])
+        else:
+            if key in seen_flat:
+                raise ConfigError(
+                    f"agent '{raw_name}' in {source}: "
+                    f"duplicate key '{key}'"
+                )
+            seen_flat.add(key)
+            if key not in whitelist:
+                valid = ", ".join(sorted(whitelist)) if whitelist else "(none)"
+                raise ConfigError(
+                    f"agent '{raw_name}' in {source}: "
+                    f"unknown flat key '{key}' "
+                    f"(valid flat keys: {valid}; agent CLI flags belong "
+                    f"under `defaults {{ ... }}`)"
+                )
+            if not child.args:
+                raise ConfigError(
+                    f"agent '{raw_name}' in {source}: "
+                    f"'{key}' needs a value (use `null` to unset)"
+                )
+            if len(child.args) > 1:
+                raise ConfigError(
+                    f"agent '{raw_name}' in {source}: "
+                    f"'{key}' has extra args"
+                )
+            if getattr(child, "props", None):
+                raise ConfigError(
+                    f"agent '{raw_name}' in {source}: "
+                    f"'{key}' does not accept properties"
+                )
+            if child.nodes:
+                raise ConfigError(
+                    f"agent '{raw_name}' in {source}: "
+                    f"'{key}' must be a leaf value, not a block"
+                )
+            defaults.actor_keys[key] = _coerce_value_or_none(child.args[0])
+    return raw_name, defaults
+
+
 def _parse_kdl_file(path: Path) -> AppConfig:
     try:
         text = path.read_text()
@@ -163,15 +341,61 @@ def _parse_kdl_file(path: Path) -> AppConfig:
                     f"duplicate template '{tpl.name}' in {path}"
                 )
             cfg.templates[tpl.name] = tpl
-        # Silently ignore hooks / agent / alias — those belong to follow-up
-        # tickets #30 / #31 / #33 and are not implemented here.
+        elif node.name == "agent":
+            name, defaults = _parse_agent_block(node, path)
+            if name in cfg.agent_defaults:
+                raise ConfigError(
+                    f"duplicate agent block '{name}' in {path}"
+                )
+            cfg.agent_defaults[name] = defaults
+        # Silently ignore hooks / alias — those belong to follow-up
+        # tickets #30 / #33 and are not implemented here.
     return cfg
+
+
+def _merge_dict(
+    low: Dict[str, Optional[str]],
+    high: Dict[str, Optional[str]],
+) -> Dict[str, Optional[str]]:
+    """Per-key overlay with null-as-cancel semantics.
+
+    Null in `low` is filtered out (it would have cancelled something deeper,
+    but nothing is deeper at this layer). Null in `high` pops the key —
+    covering the case where project config explicitly erases a user-level
+    default."""
+    out: Dict[str, Optional[str]] = {}
+    for k, v in low.items():
+        if v is not None:
+            out[k] = v
+    for k, v in high.items():
+        if v is None:
+            out.pop(k, None)
+        else:
+            out[k] = v
+    return out
 
 
 def _merge(base: AppConfig, over: AppConfig) -> AppConfig:
     merged_templates = dict(base.templates)
     merged_templates.update(over.templates)
-    return AppConfig(templates=merged_templates)
+    merged_defaults: Dict[str, AgentDefaults] = {}
+    for agent in set(base.agent_defaults) | set(over.agent_defaults):
+        b = base.agent_defaults.get(agent, AgentDefaults())
+        o = over.agent_defaults.get(agent, AgentDefaults())
+        merged_defaults[agent] = AgentDefaults(
+            actor_keys=_merge_dict(b.actor_keys, o.actor_keys),
+            agent_args=_merge_dict(b.agent_args, o.agent_args),
+        )
+    # Drop entries where everything cancelled out so callers can use
+    # `agent not in cfg.agent_defaults` as "no overrides from kdl".
+    merged_defaults = {
+        k: v for k, v in merged_defaults.items()
+        if v.actor_keys or v.agent_args
+    }
+    return AppConfig(
+        templates=merged_templates,
+        agent_defaults=merged_defaults,
+    )
 
 
 def load_config(
