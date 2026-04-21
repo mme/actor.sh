@@ -35,7 +35,7 @@ actor new fix-nav --base develop "..."                                      # br
 actor new fix-nav --dir /path/to/repo "..."                                 # worktree from another repo
 actor new fix-nav --no-worktree "..."                                       # no worktree
 actor new fix-nav --config model=opus "..."                                 # saved defaults
-actor new fix-nav --no-strip-api-keys "..."                                 # pass API keys through
+actor new fix-nav --no-use-subscription "..."                               # pass API keys through
 actor new fix-nav --template qa                                             # apply a template from settings.kdl
 echo "fix it" | actor new fix-nav                                           # prompt from stdin
 ```

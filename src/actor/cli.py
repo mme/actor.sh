@@ -65,7 +65,7 @@ Examples:
   actor new my-feature                              Create (worktree from current repo)
   actor new my-feature "fix the nav bar"            Create and run with a prompt
   actor new my-feature --model sonnet               Use a specific model
-  actor new my-feature --no-strip-api-keys          Pass API keys to the agent
+  actor new my-feature --no-use-subscription        Pass API keys to the agent
   actor new my-feature --no-worktree                Use current directory directly
   actor new my-feature --dir /path/to/repo          Worktree from another repo
   actor new my-feature --base develop               Branch off develop
@@ -81,12 +81,12 @@ Examples:
     p_new.add_argument("--agent", default=None, help="Coding agent to use (defaults to template's agent or 'claude')")
     p_new.add_argument("--template", default=None, help="Apply a template from settings.kdl")
     p_new.add_argument("--model", default=None, help="Model for the agent to use")
-    # Tri-state: default None = "no override" so a template's strip-api-keys
-    # value wins. Explicit --strip-api-keys / --no-strip-api-keys set True/
-    # False and beat the template. When neither CLI nor template sets the
-    # key, it's omitted from config and the agent's own default applies.
-    p_new.add_argument("--strip-api-keys", action="store_const", const=True, default=None, dest="strip_api_keys", help="Strip API keys from environment (default)")
-    p_new.add_argument("--no-strip-api-keys", action="store_const", const=False, dest="strip_api_keys", help="Pass API keys through to the agent")
+    # Tri-state: default None = "no override" so a template's use-subscription
+    # value wins. Explicit --use-subscription / --no-use-subscription set
+    # True/False and beat the template. When neither CLI nor template sets
+    # the key, it's omitted from config and the agent's own default applies.
+    p_new.add_argument("--use-subscription", action="store_const", const=True, default=None, dest="use_subscription", help="Use the subscription by stripping API keys from the environment (default)")
+    p_new.add_argument("--no-use-subscription", action="store_const", const=False, dest="use_subscription", help="Pass API keys through to the agent (disables subscription use)")
     p_new.add_argument("--config", dest="config", action="append", default=[], metavar="KEY=VALUE", help="Config key=value pair (repeat for multiple)")
 
     # -- run --
@@ -344,9 +344,9 @@ def main(argv: Optional[List[str]] = None) -> None:
             config_pairs = list(args.config)
             if args.model is not None:
                 config_pairs.append(f"model={args.model}")
-            if args.strip_api_keys is not None:
+            if args.use_subscription is not None:
                 config_pairs.append(
-                    f"strip-api-keys={'true' if args.strip_api_keys else 'false'}"
+                    f"use-subscription={'true' if args.use_subscription else 'false'}"
                 )
             actor = cmd_new(
                 db, git,

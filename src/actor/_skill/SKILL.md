@@ -97,7 +97,7 @@ template "qa" {
     agent "claude"
     model "opus"
     effort "max"
-    strip-api-keys true
+    use-subscription true
     prompt "You're a QA engineer. Run the tests, report what fails."
 }
 
@@ -115,7 +115,7 @@ template "reviewer" {
   on the CLI.
 - Any key from the agent's config reference ([claude-config.md](claude-config.md),
   [codex-config.md](codex-config.md)) — e.g. `model`, `effort`,
-  `strip-api-keys`, `max-budget-usd`. Values may be strings, booleans, or
+  `use-subscription`, `max-budget-usd`. Values may be strings, booleans, or
   numbers; they're all coerced to strings to match the actor config
   pipeline.
 

@@ -132,9 +132,9 @@ class TestLoadConfigParseShapes(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             p = Path(cwd) / ".actor" / "settings.kdl"
             p.parent.mkdir()
-            p.write_text('template "x" {\n    strip-api-keys true\n}\n')
+            p.write_text('template "x" {\n    use-subscription true\n}\n')
             cfg = load_config(cwd=Path(cwd), home=Path(home))
-            self.assertEqual(cfg.templates["x"].config["strip-api-keys"], "true")
+            self.assertEqual(cfg.templates["x"].config["use-subscription"], "true")
 
     def test_int_value_coerced_without_trailing_zero(self):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:

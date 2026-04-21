@@ -29,7 +29,7 @@ class CodexAgent(Agent):
         self._lock = threading.Lock()
 
     # Config keys that are handled specially and not passed as CLI flags
-    _INTERNAL_KEYS = {"strip-api-keys", "sandbox", "approval"}
+    _INTERNAL_KEYS = {"use-subscription", "sandbox", "approval"}
 
     @staticmethod
     def _config_args(config: Config) -> List[str]:
@@ -68,8 +68,8 @@ class CodexAgent(Agent):
     def _spawn_and_capture(
         self, args: List[str], cwd: Optional[Path], config: Config
     ) -> Tuple[int, Optional[str]]:
-        strip = config.get("strip-api-keys", "true") != "false"
-        if strip:
+        use_sub = config.get("use-subscription", "true") != "false"
+        if use_sub:
             env = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
         else:
             env = dict(os.environ)

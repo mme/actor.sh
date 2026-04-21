@@ -105,30 +105,30 @@ class NewCommandTests(unittest.TestCase):
         cmd_run.assert_not_called()
         self.assertEqual(code, 1)
 
-    def test_new_translates_model_and_strip_api_keys_to_config_pairs(self):
+    def test_new_translates_model_and_use_subscription_to_config_pairs(self):
         cmd_new, _cmd_run, _code = self._run([
-            "new", "foo", "--model", "sonnet", "--no-strip-api-keys",
+            "new", "foo", "--model", "sonnet", "--no-use-subscription",
         ])
         pairs = cmd_new.call_args.kwargs["config_pairs"]
         self.assertIn("model=sonnet", pairs)
-        self.assertIn("strip-api-keys=false", pairs)
+        self.assertIn("use-subscription=false", pairs)
 
-    def test_new_without_strip_api_keys_flag_does_not_emit_override(self):
-        """Tri-state check: omitting both --strip-api-keys and --no-strip-api-keys
-        must NOT push a strip-api-keys pair, so a template's value wins."""
+    def test_new_without_use_subscription_flag_does_not_emit_override(self):
+        """Tri-state check: omitting both --use-subscription and --no-use-subscription
+        must NOT push a use-subscription pair, so a template's value wins."""
         cmd_new, _cmd_run, _code = self._run(["new", "foo"])
         pairs = cmd_new.call_args.kwargs["config_pairs"]
         self.assertFalse(
-            any(p.startswith("strip-api-keys=") for p in pairs),
-            f"expected no strip-api-keys override, got {pairs}",
+            any(p.startswith("use-subscription=") for p in pairs),
+            f"expected no use-subscription override, got {pairs}",
         )
 
-    def test_new_explicit_strip_api_keys_flag_emits_true_override(self):
-        """Explicit --strip-api-keys must push strip-api-keys=true so it
-        can override a template's strip-api-keys "false"."""
-        cmd_new, _cmd_run, _code = self._run(["new", "foo", "--strip-api-keys"])
+    def test_new_explicit_use_subscription_flag_emits_true_override(self):
+        """Explicit --use-subscription must push use-subscription=true so it
+        can override a template's use-subscription "false"."""
+        cmd_new, _cmd_run, _code = self._run(["new", "foo", "--use-subscription"])
         pairs = cmd_new.call_args.kwargs["config_pairs"]
-        self.assertIn("strip-api-keys=true", pairs)
+        self.assertIn("use-subscription=true", pairs)
 
     def test_new_passes_template_arg_to_cmd_new_and_uses_template_prompt(self):
         fake_db = MagicMock()

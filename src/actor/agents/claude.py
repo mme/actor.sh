@@ -20,7 +20,7 @@ class ClaudeAgent(Agent):
         self._lock = threading.Lock()
 
     # Config keys that are handled specially and not passed as CLI flags
-    _INTERNAL_KEYS = {"strip-api-keys"}
+    _INTERNAL_KEYS = {"use-subscription"}
 
     @staticmethod
     def _config_args(config: Config) -> List[str]:
@@ -44,8 +44,8 @@ class ClaudeAgent(Agent):
         return ["--permission-mode", mode]
 
     def _spawn_and_track(self, args: List[str], cwd: Path, config: Config) -> int:
-        strip = config.get("strip-api-keys", "true") != "false"
-        if strip:
+        use_sub = config.get("use-subscription", "true") != "false"
+        if use_sub:
             env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
         else:
             env = dict(os.environ)
