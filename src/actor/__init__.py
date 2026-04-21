@@ -77,8 +77,6 @@ from .commands import (
     worktree_path,
     encode_dir,
     claude_session_file_path,
-    claude_config_args,
-    codex_config_args,
     claude_read_logs,
 )
 
@@ -141,8 +139,6 @@ __all__ = [
     "worktree_path",
     "encode_dir",
     "claude_session_file_path",
-    "claude_config_args",
-    "codex_config_args",
     "claude_read_logs",
     # CLI
     "main",

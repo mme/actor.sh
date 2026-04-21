@@ -673,16 +673,6 @@ def claude_session_file_path(dir_path, session_id: str) -> str:
     return str(ClaudeAgent._session_file_path(Path(dir_path), session_id))
 
 
-def claude_config_args(config: Config) -> List[str]:
-    """Public wrapper for ClaudeAgent._config_args."""
-    return ClaudeAgent._config_args(config)
-
-
-def codex_config_args(config: Config) -> List[str]:
-    """Public wrapper for CodexAgent._config_args."""
-    return CodexAgent._config_args(config)
-
-
 def claude_read_logs(path: str) -> List[LogEntry]:
     """Read Claude JSONL logs from a file path, returning LogEntry objects.
 

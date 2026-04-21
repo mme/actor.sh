@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 from ..errors import ActorError
 from ..interfaces import Agent, LogEntry, LogEntryKind
@@ -24,55 +24,50 @@ class _CodexChild:
 
 
 class CodexAgent(Agent):
+    AGENT_DEFAULTS: Dict[str, Optional[str]] = {
+        "sandbox": "danger-full-access",
+        "a": "never",
+    }
+    ACTOR_DEFAULTS: Dict[str, Optional[str]] = {
+        "use-subscription": "true",
+    }
+
     def __init__(self) -> None:
         self._children: Dict[int, _CodexChild] = {}
         self._lock = threading.Lock()
 
-    # Config keys that are handled specially and not passed as CLI flags
-    _INTERNAL_KEYS = {"use-subscription", "sandbox", "approval"}
+    def emit_agent_args(self, defaults: Config) -> List[str]:
+        """Map the resolved `defaults { }` dict to codex CLI flags.
 
-    @staticmethod
-    def _config_args(config: Config) -> List[str]:
-        """Build config flags for Codex.
-        model key becomes -m <value>, internal keys are skipped,
-        empty values become -c key=true (TOML boolean),
-        all others become -c key=value.
-        """
+        Users write Codex's native flag names verbatim (e.g. `m`, `a`,
+        `sandbox`). One-character keys emit a short flag (`-k value`);
+        longer keys emit a long flag (`--key value`). Empty string becomes
+        a bare flag; None is skipped."""
         args: List[str] = []
-        for key, value in sorted(config.items()):
-            if key in CodexAgent._INTERNAL_KEYS:
+        for key, value in sorted(defaults.items()):
+            if value is None:
                 continue
-            if key == "model":
-                args.append("-m")
+            prefix = "-" if len(key) == 1 else "--"
+            args.append(f"{prefix}{key}")
+            if value != "":
                 args.append(value)
-            else:
-                args.append("-c")
-                args.append(f"{key}={value if value else 'true'}")
         return args
 
-    @staticmethod
-    def _permission_args(config: Config) -> List[str]:
-        """Build permission/sandbox flags from config."""
-        sandbox = config.get("sandbox")
-        approval = config.get("approval")
-        # If neither is set, use the dangerous bypass (default)
-        if sandbox is None and approval is None:
-            return ["--dangerously-bypass-approvals-and-sandbox"]
-        args: List[str] = []
-        if sandbox is not None:
-            args.extend(["--sandbox", sandbox])
-        if approval is not None:
-            args.extend(["-a", approval])
-        return args
+    def apply_actor_keys(
+        self, flat: Config, env: Mapping[str, str]
+    ) -> Dict[str, str]:
+        """Strip OPENAI_API_KEY from the env when use-subscription is on
+        (default true) so Codex falls back to the logged-in subscription."""
+        out = dict(env)
+        if flat.get("use-subscription", "true") != "false":
+            out.pop("OPENAI_API_KEY", None)
+        return out
 
     def _spawn_and_capture(
         self, args: List[str], cwd: Optional[Path], config: Config
     ) -> Tuple[int, Optional[str]]:
-        use_sub = config.get("use-subscription", "true") != "false"
-        if use_sub:
-            env = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
-        else:
-            env = dict(os.environ)
+        actor_keys, _ = self._split_config(config)
+        env = self.apply_actor_keys(actor_keys, os.environ)
         kwargs: dict = dict(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -167,27 +162,27 @@ class CodexAgent(Agent):
             raise ActorError(f"codex DB query failed: {e}")
 
     def start(self, dir: Path, prompt: str, config: Config) -> Tuple[int, Optional[str]]:
+        _, agent_args = self._split_config(config)
         args = [
             "codex",
             "exec",
-            *self._permission_args(config),
             "--json",
             "-C",
             str(dir),
-            *self._config_args(config),
+            *self.emit_agent_args(agent_args),
             prompt,
         ]
         return self._spawn_and_capture(args, cwd=None, config=config)
 
     def resume(self, dir: Path, session_id: str, prompt: str, config: Config) -> int:
+        _, agent_args = self._split_config(config)
         args = [
             "codex",
             "exec",
             "resume",
             session_id,
-            *self._permission_args(config),
             "--json",
-            *self._config_args(config),
+            *self.emit_agent_args(agent_args),
             prompt,
         ]
         pid, _ = self._spawn_and_capture(args, cwd=dir, config=config)
@@ -274,12 +269,12 @@ class CodexAgent(Agent):
         return entries
 
     def interactive_argv(self, session_id: str, config: Config) -> List[str]:
-        # Propagate permission + config flags so interactive sessions honor
-        # the same defaults as non-interactive runs (parity with Claude).
+        # Propagate agent flags so interactive sessions honor the same
+        # defaults as non-interactive runs (parity with Claude).
+        _, agent_args = self._split_config(config)
         return [
             "codex", "resume", session_id,
-            *self._permission_args(config),
-            *self._config_args(config),
+            *self.emit_agent_args(agent_args),
         ]
 
     def stop(self, pid: int) -> None:

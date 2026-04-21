@@ -5,7 +5,7 @@ import shutil
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 from .types import Config
 
@@ -29,6 +29,32 @@ class LogEntry:
 
 
 class Agent(abc.ABC):
+    # Per-agent defaults split. Subclasses fill these in.
+    #
+    # Keys in ACTOR_DEFAULTS are interpreted by actor-sh (e.g. env filtering)
+    # and are NEVER passed to the agent binary. Keys in AGENT_DEFAULTS live
+    # under `defaults { }` in settings.kdl and map straight to CLI flags.
+    AGENT_DEFAULTS: Dict[str, Optional[str]] = {}
+    ACTOR_DEFAULTS: Dict[str, Optional[str]] = {}
+
+    @abc.abstractmethod
+    def emit_agent_args(self, defaults: Config) -> List[str]:
+        """Turn the resolved `defaults { }` dict into CLI flags."""
+
+    @abc.abstractmethod
+    def apply_actor_keys(
+        self, flat: Config, env: Mapping[str, str]
+    ) -> Dict[str, str]:
+        """Return a NEW env dict with actor-key side effects applied
+        (e.g. stripping API keys)."""
+
+    def _split_config(self, config: Config) -> Tuple[Config, Config]:
+        """Partition a flat config dict into (actor_keys, agent_args)
+        using this agent's ACTOR_DEFAULTS whitelist."""
+        actor_keys = {k: v for k, v in config.items() if k in self.ACTOR_DEFAULTS}
+        agent_args = {k: v for k, v in config.items() if k not in self.ACTOR_DEFAULTS}
+        return actor_keys, agent_args
+
     @abc.abstractmethod
     def start(self, dir: Path, prompt: str, config: Config) -> Tuple[int, Optional[str]]:
         """Start a new agent session. Returns (pid, optional session_id)."""

@@ -106,6 +106,19 @@ class FakeAgent(Agent):
     def interactive_argv(self, session_id, config):
         return ["fake-agent", "--resume", session_id]
 
+    def emit_agent_args(self, defaults):
+        args: list[str] = []
+        for key, value in sorted(defaults.items()):
+            if value is None:
+                continue
+            args.append(f"--{key}")
+            if value != "":
+                args.append(value)
+        return args
+
+    def apply_actor_keys(self, flat, env):
+        return dict(env)
+
 
 class FakeGitCall:
     def __init__(self, op: str, **kwargs):
@@ -2056,14 +2069,69 @@ class TestClaudeAgent(unittest.TestCase):
                                 "-Users-mme-Projects-mysite", "abc-123.jsonl")
         self.assertEqual(path, expected)
 
-    # -- config_args test (1) --
+    # -- emit_agent_args / apply_actor_keys tests --
 
-    def test_config_args_builds_flags(self):
-        from actor import claude_config_args
-        config = {"model": "sonnet", "max-budget-usd": "5"}
-        args = claude_config_args(config)
+    def test_emit_agent_args_builds_sorted_flags(self):
+        from actor.agents.claude import ClaudeAgent
+        args = ClaudeAgent().emit_agent_args(
+            {"model": "sonnet", "max-budget-usd": "5"}
+        )
         # Sorted keys: max-budget-usd before model
         self.assertEqual(args, ["--max-budget-usd", "5", "--model", "sonnet"])
+
+    def test_emit_agent_args_empty_string_is_bare_flag(self):
+        from actor.agents.claude import ClaudeAgent
+        self.assertEqual(
+            ClaudeAgent().emit_agent_args({"verbose": ""}),
+            ["--verbose"],
+        )
+
+    def test_emit_agent_args_skips_none_values(self):
+        from actor.agents.claude import ClaudeAgent
+        self.assertEqual(
+            ClaudeAgent().emit_agent_args({"model": "opus", "effort": None}),
+            ["--model", "opus"],
+        )
+
+    def test_apply_actor_keys_strips_anthropic_key_by_default(self):
+        from actor.agents.claude import ClaudeAgent
+        env = {"PATH": "/bin", "ANTHROPIC_API_KEY": "secret"}
+        out = ClaudeAgent().apply_actor_keys({}, env)
+        self.assertNotIn("ANTHROPIC_API_KEY", out)
+        self.assertEqual(out["PATH"], "/bin")
+
+    def test_apply_actor_keys_strips_anthropic_key_when_true(self):
+        from actor.agents.claude import ClaudeAgent
+        env = {"PATH": "/bin", "ANTHROPIC_API_KEY": "secret"}
+        out = ClaudeAgent().apply_actor_keys({"use-subscription": "true"}, env)
+        self.assertNotIn("ANTHROPIC_API_KEY", out)
+
+    def test_apply_actor_keys_keeps_anthropic_key_when_false(self):
+        from actor.agents.claude import ClaudeAgent
+        env = {"PATH": "/bin", "ANTHROPIC_API_KEY": "secret"}
+        out = ClaudeAgent().apply_actor_keys({"use-subscription": "false"}, env)
+        self.assertEqual(out["ANTHROPIC_API_KEY"], "secret")
+
+    def test_apply_actor_keys_returns_new_dict(self):
+        from actor.agents.claude import ClaudeAgent
+        env = {"PATH": "/bin", "ANTHROPIC_API_KEY": "secret"}
+        out = ClaudeAgent().apply_actor_keys({}, env)
+        # Mutating the result must not touch the original.
+        out["ANTHROPIC_API_KEY"] = "restored"
+        self.assertNotIn("ANTHROPIC_API_KEY", {k: v for k, v in env.items() if k != "ANTHROPIC_API_KEY"})
+
+    def test_claude_class_constants(self):
+        from actor.agents.claude import ClaudeAgent
+        self.assertEqual(ClaudeAgent.ACTOR_DEFAULTS, {"use-subscription": "true"})
+        self.assertEqual(ClaudeAgent.AGENT_DEFAULTS, {"permission-mode": "auto"})
+
+    def test_bypass_permissions_emits_straight(self):
+        """The old --dangerously-skip-permissions rewrite is gone; users who
+        want bypassPermissions now write it literally and it flows through
+        as --permission-mode bypassPermissions."""
+        from actor.agents.claude import ClaudeAgent
+        args = ClaudeAgent().emit_agent_args({"permission-mode": "bypassPermissions"})
+        self.assertEqual(args, ["--permission-mode", "bypassPermissions"])
 
     # -- read_logs tests (12) --
 
@@ -2231,24 +2299,63 @@ class TestClaudeAgent(unittest.TestCase):
 
 class TestCodexAgent(unittest.TestCase):
 
-    def test_config_args_model_becomes_m_flag(self):
-        from actor import codex_config_args
-        config = {"model": "o3"}
-        args = codex_config_args(config)
+    def test_emit_agent_args_short_flag_for_one_char_keys(self):
+        from actor.agents.codex import CodexAgent
+        args = CodexAgent().emit_agent_args({"m": "o3"})
         self.assertEqual(args, ["-m", "o3"])
 
-    def test_config_args_other_keys_become_c_flags(self):
-        from actor import codex_config_args
-        config = {"instructions": "be helpful"}
-        args = codex_config_args(config)
-        self.assertEqual(args, ["-c", "instructions=be helpful"])
+    def test_emit_agent_args_long_flag_for_multi_char_keys(self):
+        from actor.agents.codex import CodexAgent
+        args = CodexAgent().emit_agent_args({"sandbox": "danger-full-access"})
+        self.assertEqual(args, ["--sandbox", "danger-full-access"])
 
-    def test_config_args_mixed(self):
-        from actor import codex_config_args
-        config = {"model": "o3", "sandbox_mode": "workspace-write"}
-        args = codex_config_args(config)
-        # Sorted keys: model < sandbox_mode
-        self.assertEqual(args, ["-m", "o3", "-c", "sandbox_mode=workspace-write"])
+    def test_emit_agent_args_mixed_and_sorted(self):
+        from actor.agents.codex import CodexAgent
+        args = CodexAgent().emit_agent_args({
+            "m": "o3",
+            "sandbox": "danger-full-access",
+            "a": "never",
+        })
+        # Sorted: a < m < sandbox
+        self.assertEqual(
+            args,
+            ["-a", "never", "-m", "o3", "--sandbox", "danger-full-access"],
+        )
+
+    def test_emit_agent_args_empty_string_is_bare_flag(self):
+        from actor.agents.codex import CodexAgent
+        self.assertEqual(CodexAgent().emit_agent_args({"x": ""}), ["-x"])
+        self.assertEqual(
+            CodexAgent().emit_agent_args({"verbose": ""}), ["--verbose"]
+        )
+
+    def test_emit_agent_args_skips_none_values(self):
+        from actor.agents.codex import CodexAgent
+        self.assertEqual(
+            CodexAgent().emit_agent_args({"m": "o3", "a": None}),
+            ["-m", "o3"],
+        )
+
+    def test_apply_actor_keys_strips_openai_key_by_default(self):
+        from actor.agents.codex import CodexAgent
+        env = {"OPENAI_API_KEY": "x", "PATH": "/bin"}
+        out = CodexAgent().apply_actor_keys({}, env)
+        self.assertNotIn("OPENAI_API_KEY", out)
+        self.assertEqual(out["PATH"], "/bin")
+
+    def test_apply_actor_keys_keeps_openai_key_when_false(self):
+        from actor.agents.codex import CodexAgent
+        env = {"OPENAI_API_KEY": "x"}
+        out = CodexAgent().apply_actor_keys({"use-subscription": "false"}, env)
+        self.assertEqual(out["OPENAI_API_KEY"], "x")
+
+    def test_codex_class_constants(self):
+        from actor.agents.codex import CodexAgent
+        self.assertEqual(CodexAgent.ACTOR_DEFAULTS, {"use-subscription": "true"})
+        self.assertEqual(
+            CodexAgent.AGENT_DEFAULTS,
+            {"sandbox": "danger-full-access", "a": "never"},
+        )
 
     def test_parse_thread_started(self):
         line = '{"type":"thread.started","thread_id":"019d685b-6ed6-7f72-bdaa-19533aad1f43"}'
