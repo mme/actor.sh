@@ -34,8 +34,10 @@ class Agent(abc.ABC):
     # Keys in ACTOR_DEFAULTS are interpreted by actor-sh (e.g. env filtering)
     # and are NEVER passed to the agent binary. Keys in AGENT_DEFAULTS live
     # under `defaults { }` in settings.kdl and map straight to CLI flags.
-    AGENT_DEFAULTS: Dict[str, Optional[str]] = {}
-    ACTOR_DEFAULTS: Dict[str, Optional[str]] = {}
+    # Values are always concrete strings — `None` is a kdl-layer-only cancel
+    # marker and never appears in class-level defaults.
+    AGENT_DEFAULTS: Dict[str, str] = {}
+    ACTOR_DEFAULTS: Dict[str, str] = {}
 
     @abc.abstractmethod
     def emit_agent_args(self, defaults: Config) -> List[str]:

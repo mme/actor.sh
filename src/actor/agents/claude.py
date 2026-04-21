@@ -15,10 +15,10 @@ from ..types import Config
 
 
 class ClaudeAgent(Agent):
-    AGENT_DEFAULTS: Dict[str, Optional[str]] = {
+    AGENT_DEFAULTS: Dict[str, str] = {
         "permission-mode": "auto",
     }
-    ACTOR_DEFAULTS: Dict[str, Optional[str]] = {
+    ACTOR_DEFAULTS: Dict[str, str] = {
         "use-subscription": "true",
     }
 

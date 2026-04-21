@@ -24,11 +24,11 @@ class _CodexChild:
 
 
 class CodexAgent(Agent):
-    AGENT_DEFAULTS: Dict[str, Optional[str]] = {
+    AGENT_DEFAULTS: Dict[str, str] = {
         "sandbox": "danger-full-access",
         "a": "never",
     }
-    ACTOR_DEFAULTS: Dict[str, Optional[str]] = {
+    ACTOR_DEFAULTS: Dict[str, str] = {
         "use-subscription": "true",
     }
 

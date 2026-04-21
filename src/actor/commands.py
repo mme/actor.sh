@@ -148,10 +148,9 @@ def cmd_new(
     #   2. kdl `agent "<name>" { ... }` block for this agent_kind
     #   3. Template config
     #   4. CLI --config pairs
-    # Only layer 2 can carry `None` (kdl's `null` cancel marker); layers
-    # 3 and 4 come from `Dict[str, str]` sources, and layer 1's class
-    # dicts never contain `None` (pinned by
-    # test_claude_class_constants / test_codex_class_constants).
+    # Only layer 2 can carry `None` (kdl's `null` cancel marker). Layers 1,
+    # 3, and 4 are typed `Dict[str, str]` so the type system enforces that
+    # they never contribute a `None` to the merge.
     agent_cls = _agent_class(agent_kind)
     merged: Dict[str, Optional[str]] = {}
 
