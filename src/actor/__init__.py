@@ -84,6 +84,8 @@ from .commands import (
 from .cli import main, _build_parser, _db_path, _create_agent
 
 __all__ = [
+    # Version
+    "__version__",
     # Errors
     "ActorError",
     "AlreadyExistsError",

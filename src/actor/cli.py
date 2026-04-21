@@ -81,12 +81,12 @@ Examples:
     p_new.add_argument("--agent", default=None, help="Coding agent to use (defaults to template's agent or 'claude')")
     p_new.add_argument("--template", default=None, help="Apply a template from settings.kdl")
     p_new.add_argument("--model", default=None, help="Model for the agent to use")
-    # Tri-state: default None = "no override" so a template's use-subscription
-    # value wins. Explicit --use-subscription / --no-use-subscription set
-    # True/False and beat the template. When neither CLI nor template sets
-    # the key, it's omitted from config and the agent's own default applies.
-    p_new.add_argument("--use-subscription", action="store_const", const=True, default=None, dest="use_subscription", help="Use the subscription by stripping API keys from the environment (default)")
-    p_new.add_argument("--no-use-subscription", action="store_const", const=False, dest="use_subscription", help="Pass API keys through to the agent (disables subscription use)")
+    # Tri-state: default None = "no CLI override" so lower precedence layers
+    # (template, kdl agent-block, class default) supply the value. Explicit
+    # --use-subscription / --no-use-subscription force True/False as the
+    # highest-precedence (CLI) layer.
+    p_new.add_argument("--use-subscription", action="store_const", const=True, default=None, dest="use_subscription", help="Use the subscription by stripping API keys from the environment (overrides lower layers)")
+    p_new.add_argument("--no-use-subscription", action="store_const", const=False, dest="use_subscription", help="Pass API keys through to the agent (overrides lower layers)")
     p_new.add_argument("--config", dest="config", action="append", default=[], metavar="KEY=VALUE", help="Config key=value pair (repeat for multiple)")
 
     # -- run --

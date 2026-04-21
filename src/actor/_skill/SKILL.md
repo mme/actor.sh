@@ -288,7 +288,7 @@ Choose based on context.
 
 ## Important Notes
 
-- Actors run with full permissions by default (Claude: `permission-mode "auto"`; Codex: `sandbox "danger-full-access"` + `a "never"`). Change via config — see the agent config reference.
+- Actors run autonomous-leaning by default — Claude uses `permission-mode "auto"` (agent decides when to ask; effectively autonomous inside a worktree), Codex uses `sandbox "danger-full-access"` + `a "never"` (truly unrestricted). To fully bypass Claude's permission checks, set `permission-mode "bypassPermissions"`. See the agent config reference for other options.
 - Each actor gets its own git worktree by default so parallel actors don't conflict.
 - Actor sessions persist — multiple runs against the same actor keep context.
 - If an actor errors, check verbose logs (`logs_actor(name=..., verbose=True)`) and retry with `run_actor`.

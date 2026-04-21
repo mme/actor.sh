@@ -898,6 +898,39 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
         )
         self.assertNotIn("m", actor.config)
 
+    def test_single_kdl_layer_null_cancels_class_default_end_to_end(self):
+        """Regression: a settings.kdl that only contains null-as-cancel must
+        cancel a class-level default, even without a peer value in another
+        kdl layer to overwrite."""
+        import tempfile
+        from actor.config import load_config
+        db = self._db()
+        git = FakeGit()
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            kdl = Path(cwd) / ".actor" / "settings.kdl"
+            kdl.parent.mkdir()
+            kdl.write_text(
+                'agent "claude" {\n'
+                '    defaults {\n'
+                '        permission-mode null\n'
+                '    }\n'
+                '}\n'
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            actor = cmd_new(
+                db, git,
+                name="n",
+                dir="/tmp",
+                no_worktree=True,
+                base=None,
+                agent_name="claude",
+                config_pairs=[],
+                app_config=cfg,
+            )
+        self.assertNotIn("permission-mode", actor.config)
+        # Other class defaults stay in place.
+        self.assertEqual(actor.config.get("use-subscription"), "true")
+
 
 # ──────────────────────────────────────────────────────────────────────
 #  Test: cmd_run  (8 tests from run.rs)
@@ -2236,7 +2269,8 @@ class TestCmdDiscard(unittest.TestCase):
 
 class TestClaudeAgent(unittest.TestCase):
     """Tests for Claude-specific logic: encode_dir, session_file_path,
-    config_args, and JSONL read_logs parsing."""
+    argv emission via emit_agent_args / apply_actor_keys, and JSONL
+    read_logs parsing."""
 
     # -- encode_dir tests (2) --
 
@@ -2308,9 +2342,11 @@ class TestClaudeAgent(unittest.TestCase):
         from actor.agents.claude import ClaudeAgent
         env = {"PATH": "/bin", "ANTHROPIC_API_KEY": "secret"}
         out = ClaudeAgent().apply_actor_keys({}, env)
-        # Mutating the result must not touch the original.
+        # Mutating the returned dict must not touch the caller's env.
         out["ANTHROPIC_API_KEY"] = "restored"
-        self.assertNotIn("ANTHROPIC_API_KEY", {k: v for k, v in env.items() if k != "ANTHROPIC_API_KEY"})
+        out["NEW_KEY"] = "added"
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "secret")
+        self.assertNotIn("NEW_KEY", env)
 
     def test_claude_class_constants(self):
         from actor.agents.claude import ClaudeAgent

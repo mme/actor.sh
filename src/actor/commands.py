@@ -76,13 +76,21 @@ def _format_duration(started_at: str, finished_at: Optional[str]) -> str:
     return f"{remainder}s"
 
 
-def _create_agent(kind: AgentKind) -> Agent:
-    if kind == AgentKind.CLAUDE:
-        return ClaudeAgent()
-    elif kind == AgentKind.CODEX:
-        return CodexAgent()
-    else:
+_AGENT_CLASS_BY_KIND = {
+    AgentKind.CLAUDE: ClaudeAgent,
+    AgentKind.CODEX: CodexAgent,
+}
+
+
+def _agent_class(kind: AgentKind):
+    try:
+        return _AGENT_CLASS_BY_KIND[kind]
+    except KeyError:
         raise ActorError(f"unknown agent kind: {kind}")
+
+
+def _create_agent(kind: AgentKind) -> Agent:
+    return _agent_class(kind)()
 
 
 
@@ -140,23 +148,15 @@ def cmd_new(
     #   2. kdl `agent "<name>" { ... }` block for this agent_kind
     #   3. Template config
     #   4. CLI --config pairs
-    # Nones at any layer cancel the key from the merged result (safety net
-    # for bypass paths; normally load_config's _merge has already stripped
-    # Nones from steps 1/2).
-    agent_cls = type(_create_agent(agent_kind))
+    # A `None` value at layers 2-4 cancels whatever a lower layer set.
+    # Class dicts (layer 1) never contain None — enforced by
+    # test_claude_class_constants / test_codex_class_constants.
+    agent_cls = _agent_class(agent_kind)
     merged: Dict[str, Optional[str]] = {}
 
     # Layer 1: class baseline — merge actor-keys + agent-args into one flat dict.
-    for k, v in agent_cls.ACTOR_DEFAULTS.items():
-        if v is None:
-            merged.pop(k, None)
-        else:
-            merged[k] = v
-    for k, v in agent_cls.AGENT_DEFAULTS.items():
-        if v is None:
-            merged.pop(k, None)
-        else:
-            merged[k] = v
+    merged.update(agent_cls.ACTOR_DEFAULTS)
+    merged.update(agent_cls.AGENT_DEFAULTS)
 
     # Layer 2: kdl agent_defaults for this agent_kind (if any).
     if app_config is not None:

@@ -180,6 +180,12 @@ def _parse_template(node, source: Path) -> Template:
                 f"template '{name}' in {source}: '{key}' does not accept properties"
             )
         raw = child.args[0]
+        if raw is None:
+            raise ConfigError(
+                f"template '{name}' in {source}: '{key}' cannot be null "
+                f"(templates set values; `null` only makes sense inside "
+                f"`agent \"...\" {{ ... }}` blocks as a cancel marker)"
+            )
         if key in ("agent", "prompt") and not isinstance(raw, str):
             raise ConfigError(
                 f"template '{name}' in {source}: '{key}' must be a string"
@@ -247,6 +253,12 @@ def _parse_agent_block(node, source: Path) -> Tuple[str, AgentDefaults]:
                 raise ConfigError(
                     f"agent '{raw_name}' in {source}: "
                     f"`defaults` block does not accept properties"
+                )
+            if not child.nodes:
+                raise ConfigError(
+                    f"agent '{raw_name}' in {source}: "
+                    f"`defaults` block must have at least one key "
+                    f"(remove the block if you meant to unset nothing)"
                 )
             seen_args: set[str] = set()
             for gc in child.nodes:
@@ -357,21 +369,16 @@ def _merge_dict(
     low: Dict[str, Optional[str]],
     high: Dict[str, Optional[str]],
 ) -> Dict[str, Optional[str]]:
-    """Per-key overlay with null-as-cancel semantics.
+    """Per-key overlay that preserves `None` as a cancel marker.
 
-    Null in `low` is filtered out (it would have cancelled something deeper,
-    but nothing is deeper at this layer). Null in `high` pops the key —
-    covering the case where project config explicitly erases a user-level
-    default."""
-    out: Dict[str, Optional[str]] = {}
-    for k, v in low.items():
-        if v is not None:
-            out[k] = v
+    Higher-layer values overwrite lower-layer values. `None` is kept in the
+    result so the kdl layer can cancel values set further down the precedence
+    ladder (specifically the class-level `AGENT_DEFAULTS` / `ACTOR_DEFAULTS`
+    baked into `cmd_new`). The actual cancel happens when `cmd_new` walks the
+    merged dict and pops any key whose value is `None`."""
+    out: Dict[str, Optional[str]] = dict(low)
     for k, v in high.items():
-        if v is None:
-            out.pop(k, None)
-        else:
-            out[k] = v
+        out[k] = v
     return out
 
 

@@ -145,8 +145,9 @@ class TestLoadConfigParseShapes(unittest.TestCase):
             self.assertEqual(cfg.templates["x"].config["max-budget-usd"], "5")
 
     def test_unknown_top_level_nodes_are_ignored(self):
-        # Forward-compat: hooks/agent/alias exist in follow-up tickets but
-        # should parse as no-ops today rather than erroring.
+        # Forward-compat: hooks / alias are reserved for follow-up tickets
+        # #30 / #33 and should parse as no-ops today rather than erroring.
+        # (`agent` is now a first-class node — see TestLoadConfigAgentBlocks.)
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             p = Path(cwd) / ".actor" / "settings.kdl"
             p.parent.mkdir()
@@ -225,6 +226,24 @@ class TestLoadConfigParseStrict(unittest.TestCase):
         self._expect_error(
             'template "" {\n    agent "claude"\n}\n',
             "non-empty",
+        )
+
+    def test_null_in_template_raises_friendly_error(self):
+        # Null is only meaningful inside `agent { }` blocks (as a cancel
+        # marker). Inside templates it would silently stringify to "None"
+        # or crash with an ugly type error. Reject loudly.
+        self._expect_error(
+            'template "qa" {\n    model null\n}\n',
+            "null",
+        )
+
+    def test_bare_defaults_block_in_agent_raises(self):
+        # A `defaults` block with no children is ambiguous (did the user
+        # mean to unset something? forget to fill it in?). Reject rather
+        # than silently accept a no-op.
+        self._expect_error(
+            'agent "claude" {\n    defaults {\n    }\n}\n',
+            "defaults",
         )
 
 
@@ -317,7 +336,7 @@ class TestLoadConfigAgentBlocks(unittest.TestCase):
                 {"permission-mode": "bypassPermissions", "model": "opus"},
             )
 
-    def test_null_in_defaults_is_stripped_by_merge(self):
+    def test_null_in_defaults_survives_merge_as_cancel_marker(self):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             self._write(
                 Path(cwd) / ".actor" / "settings.kdl",
@@ -328,9 +347,12 @@ class TestLoadConfigAgentBlocks(unittest.TestCase):
                 '}\n',
             )
             cfg = load_config(cwd=Path(cwd), home=Path(home))
-            # Null at top level with nothing to cancel leaves an empty
-            # AgentDefaults; the merge step drops empty blocks entirely.
-            self.assertNotIn("claude", cfg.agent_defaults)
+            # Null must survive all the way to cmd_new so it can cancel a
+            # lower-precedence class default.
+            self.assertIn("claude", cfg.agent_defaults)
+            self.assertIsNone(
+                cfg.agent_defaults["claude"].agent_args["permission-mode"]
+            )
 
     def test_unknown_agent_rejected(self):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
@@ -382,7 +404,10 @@ class TestLoadConfigAgentBlocks(unittest.TestCase):
             cfg = load_config(cwd=Path(cwd), home=Path(home))
             d = cfg.agent_defaults["claude"]
             self.assertEqual(d.agent_args.get("model"), "sonnet")
-            self.assertNotIn("permission-mode", d.agent_args)
+            # project layer null wins over user layer "auto" and is preserved
+            # as a cancel marker for cmd_new's class-default merge.
+            self.assertIn("permission-mode", d.agent_args)
+            self.assertIsNone(d.agent_args["permission-mode"])
 
     def test_project_agent_defaults_actor_key_override(self):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
@@ -462,7 +487,7 @@ class TestLoadConfigAgentBlocks(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 load_config(cwd=Path(cwd), home=Path(home))
 
-    def test_null_flat_key_parses_as_none(self):
+    def test_null_flat_key_survives_merge(self):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             self._write(
                 Path(home) / ".actor" / "settings.kdl",
@@ -477,7 +502,12 @@ class TestLoadConfigAgentBlocks(unittest.TestCase):
                 '}\n',
             )
             cfg = load_config(cwd=Path(cwd), home=Path(home))
-            self.assertNotIn("claude", cfg.agent_defaults)
+            # Project layer null wins over user layer "true" and is preserved
+            # so cmd_new can cancel the class ACTOR_DEFAULTS entry.
+            self.assertIn("claude", cfg.agent_defaults)
+            self.assertIsNone(
+                cfg.agent_defaults["claude"].actor_keys["use-subscription"]
+            )
 
 
 if __name__ == "__main__":
