@@ -147,8 +147,76 @@ prompt / stdin) override the template. `agent` and `prompt` are promoted to
 top-level fields; every other child is stored as a config key (values
 coerced to strings).
 
-Unknown top-level nodes (e.g. `hooks`, `agent`, `alias`) are silently
-ignored for forward-compat with follow-up tickets.
+### Per-agent defaults
+
+`agent "claude" { … }` / `agent "codex" { … }` blocks set defaults that
+apply to every actor of that kind:
+
+```kdl
+agent "claude" {
+    use-subscription true
+    defaults {
+        permission-mode "auto"
+        model "opus"
+    }
+}
+
+agent "codex" {
+    defaults {
+        m "o3"
+        sandbox "workspace-write"
+    }
+}
+```
+
+Two shapes live inside an `agent` block:
+
+- **Flat keys** (e.g. `use-subscription`) are actor-sh interpreted —
+  they're never forwarded to the agent binary. The whitelist of allowed
+  flat keys per agent is `ACTOR_DEFAULTS` on the Agent subclass (currently
+  just `use-subscription` for both agents). Unknown flat keys raise
+  `ConfigError`.
+- **`defaults { }` children** become CLI flags on the agent binary.
+  Claude uses semantic long flags: `permission-mode "auto"` →
+  `--permission-mode auto`. Codex uses native flag names verbatim:
+  1-character keys become short flags (`m "o3"` → `-m o3`, `a "never"`
+  → `-a never`), longer keys become long flags (`sandbox
+  "workspace-write"` → `--sandbox workspace-write`).
+
+A `null` value cancels a lower-precedence default:
+
+```kdl
+agent "claude" {
+    defaults {
+        permission-mode null   # drop the built-in "auto" default
+    }
+}
+```
+
+Merge precedence at actor creation (`actor new`), lowest → highest:
+class `AGENT_DEFAULTS` + `ACTOR_DEFAULTS` (hardcoded on the Agent
+subclass) → user kdl `agent` block → project kdl `agent` block →
+template config (`--template`) → CLI `--config key=value`. The resolved
+merge is snapshotted into the DB at creation; later edits to
+`settings.kdl` don't retroactively change existing actors — use `actor
+config <name> key=value` to mutate an actor's stored config. At run
+time (`actor run`), the stored config is the base and per-run
+`--config` arguments layer on top for that run only. `null` at a higher
+layer cancels lower defaults; the emitter drops keys whose final value
+is `None`.
+
+Built-in class defaults today:
+
+- `ClaudeAgent.AGENT_DEFAULTS = {"permission-mode": "auto"}` and
+  `ClaudeAgent.ACTOR_DEFAULTS = {"use-subscription": "true"}`.
+- `CodexAgent.AGENT_DEFAULTS = {"sandbox": "danger-full-access", "a":
+  "never"}` and `CodexAgent.ACTOR_DEFAULTS = {"use-subscription":
+  "true"}`.
+
+Unknown top-level nodes (e.g. `hooks`, `alias`) are silently ignored
+for forward-compat with follow-up tickets. A `defaults { ... }` block
+inside a template is rejected with a helpful error pointing users at
+the per-agent `agent "..." { defaults { ... } }` shape.
 
 Load programmatically via `actor.config.load_config(cwd=..., home=...)` —
 both args default to `Path.cwd()` / `$HOME` so tests can inject temp dirs.

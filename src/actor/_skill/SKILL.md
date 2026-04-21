@@ -119,9 +119,53 @@ template "reviewer" {
   numbers; they're all coerced to strings to match the actor config
   pipeline.
 
-Unknown top-level nodes (`hooks`, `agent`, `alias`) parse as no-ops today —
+Unknown top-level nodes (`hooks`, `alias`) parse as no-ops today —
 they're reserved for follow-up tickets. Malformed KDL raises an error
 with the file path.
+
+**Per-agent defaults** live alongside templates and apply automatically
+to every new actor of that agent kind:
+
+```kdl
+agent "claude" {
+    use-subscription true
+    defaults {
+        permission-mode "auto"
+        model "opus"
+    }
+}
+
+agent "codex" {
+    defaults {
+        m "o3"
+        sandbox "workspace-write"
+    }
+}
+```
+
+- **Flat keys** (outside `defaults { }`) are actor-sh controls. Today
+  only `use-subscription` is valid (strips `ANTHROPIC_API_KEY` /
+  `OPENAI_API_KEY` from the child env so the subscription login is
+  used instead of the API key).
+- **Keys inside `defaults { }`** map directly to the agent binary's
+  CLI flags. Claude uses semantic long flags (`model`, `permission-mode`).
+  Codex uses whatever flag names `codex` itself accepts — `-m` / `-a`
+  (short), `--sandbox` / `--config` (long). No translation layer on
+  either side.
+- **`null` cancels a lower-precedence value.** For example, a project
+  file can set `permission-mode null` under `agent "claude"` to erase
+  a user-level default without forcing a replacement.
+
+Precedence at `actor new` (low → high): class-level hardcoded defaults →
+user kdl → project kdl → template → CLI `--config`. The resolved merge
+is snapshotted onto the actor at creation time; later kdl edits don't
+retroactively mutate existing actors (use `actor config <name>` for
+that).
+
+Built-in class defaults (no kdl file needed):
+- Claude: `use-subscription "true"`, `permission-mode "auto"`.
+- Codex: `use-subscription "true"`, `sandbox "danger-full-access"`,
+  `a "never"`.
 
 **Applying a template** (CLI only — see note below):
 
@@ -244,7 +288,7 @@ Choose based on context.
 
 ## Important Notes
 
-- Actors run with full permissions by default (`--dangerously-skip-permissions` for Claude, `--dangerously-bypass-approvals-and-sandbox` for Codex). Change via config — see the agent config reference.
+- Actors run with full permissions by default (Claude: `permission-mode "auto"`; Codex: `sandbox "danger-full-access"` + `a "never"`). Change via config — see the agent config reference.
 - Each actor gets its own git worktree by default so parallel actors don't conflict.
 - Actor sessions persist — multiple runs against the same actor keep context.
 - If an actor errors, check verbose logs (`logs_actor(name=..., verbose=True)`) and retry with `run_actor`.
