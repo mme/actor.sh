@@ -16,6 +16,7 @@ from textual.widgets import (
     Footer,
     Header,
     RichLog,
+    Rule,
     Static,
     TabbedContent,
     TabPane,
@@ -56,16 +57,31 @@ class ActorWatchApp(App):
     }
     #actor-panel {
         width: 33;
-        /* Dim separator when unfocused so the two panels are visually
-           distinct even when focus is outside the app (modal open,
-           command palette, OS-level blur). Same round shape as the
-           focused state so there's no layout jitter on transition. */
-        border: round $foreground 30%;
-        padding: 0 1;
+        /* No horizontal padding on the panel itself so #actors-underline
+           can span edge-to-edge and visually continue the tab underline
+           from the detail panel. Bottom padding keeps the tree off the
+           bottom edge; the ACTORS label and the tree carry their own
+           horizontal insets. */
+        padding: 0 0 1 0;
         background: ansi_default;
     }
     #actor-panel:focus-within {
-        border: round $primary;
+        /* intentionally empty for now */
+    }
+    #actors-label {
+        color: $foreground 60%;
+        text-style: bold;
+        padding: 0 1;
+    }
+    #actors-underline {
+        /* Match the tab underline: heavy horizontal (━), 30%-fg color,
+           no margin so it sits flush between label and tree. */
+        height: 1;
+        margin: 0;
+        color: $foreground 30%;
+    }
+    ActorTree {
+        padding-left: 1;
     }
     #app-header {
         display: none;
@@ -85,10 +101,12 @@ class ActorWatchApp(App):
     }
     #detail-panel {
         width: 1fr;
-        border: round $foreground 30%;
+        /* Experimental: no border; separator lives on #actor-panel's
+           border-right. :focus-within kept as a scaffold (see note
+           on #actor-panel). */
     }
     #detail-panel:focus-within {
-        border: round $primary;
+        /* intentionally empty for now */
     }
     .underline--bar {
         background: $foreground 30%;
@@ -168,9 +186,10 @@ class ActorWatchApp(App):
         return True
 
     def compose(self) -> ComposeResult:
-        yield Header(id="app-header")
         with Horizontal(id="main-layout"):
             with Vertical(id="actor-panel"):
+                yield Static("ACTORS", id="actors-label")
+                yield Rule(line_style="heavy", id="actors-underline")
                 yield ActorTree()
             with Vertical(id="detail-panel"):
                 with TabbedContent(id="tabs"):
@@ -368,17 +387,14 @@ class ActorWatchApp(App):
 
         main = self.query_one("#main-layout")
         splash = self.query_one("#splash")
-        header = self.query_one("#app-header")
         was_splash = self._splash_active
         self._splash_active = not actors
         if self._splash_active:
             main.set_class(False, "-active")
             splash.set_class(True, "-active")
-            header.set_class(False, "-active")
         else:
             main.set_class(True, "-active")
             splash.set_class(False, "-active")
-            header.set_class(True, "-active")
         if was_splash != self._splash_active:
             self.refresh_bindings()
 

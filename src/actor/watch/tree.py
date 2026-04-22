@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from rich.style import Style
+from rich.text import Text
+
 from textual.widgets import Tree
+from textual.widgets.tree import TreeNode
 
 from ..types import Actor, Status
 from .helpers import STATUS_ICON, group_by_parent
@@ -35,6 +39,19 @@ class ActorTree(Tree[Actor]):
 
     def on_mount(self) -> None:
         self.set_interval(0.5, self._tick_animation)
+
+    def render_label(
+        self, node: TreeNode, base_style: Style, style: Style
+    ) -> Text:
+        """Add a `→` prefix to the currently-selected actor row so
+        the user always knows which actor is active in the detail
+        pane. Non-selected actor rows get a space of the same width
+        so row alignment doesn't shift when the cursor moves."""
+        label = super().render_label(node, base_style, style)
+        if node.data is None:
+            return label  # group / root nodes — no indicator
+        arrow = "→" if node is self.cursor_node else " "
+        return Text(arrow, style=style) + label
 
     def _make_label(self, name: str, status: Status) -> str:
         """Generate display label for an actor."""
