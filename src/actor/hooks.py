@@ -5,7 +5,7 @@ Hooks are single shell commands declared in settings.kdl under the
 ACTOR_* variables, and their exit code decides whether the surrounding
 operation (create / run / discard) proceeds.
 
-Kept as a tiny module so tests can inject a fake runner via the
+Kept as a separate module so tests can inject a fake runner via the
 HookRunner type without touching subprocess.
 """
 from __future__ import annotations
@@ -24,14 +24,24 @@ def merge_env_extra(
 ) -> None:
     """Merge ``env_extra`` into ``env`` in place. A value of ``None`` means
     "unset this key" so callers can scrub stale parent-env vars without
-    mutating ``os.environ`` (thread-safe for concurrent Agent calls)."""
+    mutating ``os.environ`` (thread-safe for concurrent Agent calls).
+
+    Non-string values are rejected at the API boundary so callers get a
+    clear error instead of a confusing ``TypeError`` from deep inside
+    ``subprocess.Popen``. ``bool`` is also rejected (it's a subclass of
+    ``int``) to avoid ``"True"``/``"False"`` leaking into hook scripts."""
     if env_extra is None:
         return
     for key, value in env_extra.items():
         if value is None:
             env.pop(key, None)
-        else:
+        elif isinstance(value, str) and not isinstance(value, bool):
             env[key] = value
+        else:
+            raise TypeError(
+                f"env_extra[{key!r}] must be str or None, got "
+                f"{type(value).__name__} ({value!r})"
+            )
 
 
 @dataclass(frozen=True)
@@ -39,8 +49,7 @@ class HookResult:
     """Outcome of a single hook invocation.
 
     The default runner captures stdio so inherited stdout/stderr can't
-    corrupt the parent (MCP server's JSON, TUI redraws, etc.). Fakes in
-    tests can keep returning a bare int — ``run_hook`` normalizes both.
+    corrupt the parent (MCP server's JSON, TUI redraws, etc.).
     """
 
     exit_code: int
@@ -49,8 +58,10 @@ class HookResult:
 
 
 # Signature: (command, env, cwd) -> int | HookResult. Test fakes
-# typically return int; the default runner returns HookResult so
-# captured stdio can flow into HookFailedError on failure.
+# typically return a bare int; the default runner returns HookResult so
+# captured stdio can flow into HookFailedError on failure. ``run_hook``
+# normalizes both. Note: ``bool`` is rejected at runtime even though it
+# is a subclass of ``int`` — return 0/1, not False/True.
 HookRunner = Callable[[str, Mapping[str, str], Path], Union[int, HookResult]]
 
 

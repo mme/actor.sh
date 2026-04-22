@@ -3414,6 +3414,20 @@ class TestMergeEnvExtra(unittest.TestCase):
         merge_env_extra(env, {"STALE": None, "FRESH": "f"})
         self.assertEqual(env, {"KEEP": "k", "FRESH": "f"})
 
+    def test_non_string_value_raises_type_error(self):
+        from actor.hooks import merge_env_extra
+        env: dict = {}
+        with self.assertRaises(TypeError) as ctx:
+            merge_env_extra(env, {"ACTOR_RUN_ID": 1})
+        self.assertIn("ACTOR_RUN_ID", str(ctx.exception))
+        self.assertEqual(env, {})
+
+    def test_bool_value_raises_type_error(self):
+        from actor.hooks import merge_env_extra
+        env: dict = {}
+        with self.assertRaises(TypeError):
+            merge_env_extra(env, {"FLAG": True})
+
 
 class TestRunHook(unittest.TestCase):
 

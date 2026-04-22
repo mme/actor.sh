@@ -568,7 +568,8 @@ class McpToolTests(unittest.TestCase):
 
     def test_new_actor_without_prompt_does_not_spawn(self):
         from actor import server
-        with patch("actor.server.cmd_new") as cmd_new, \
+        with patch("actor.server._load_app_config"), \
+             patch("actor.server.cmd_new") as cmd_new, \
              patch("actor.server._spawn_background_run") as spawn:
             fake_actor = MagicMock()
             fake_actor.dir = "/tmp/foo"
@@ -580,7 +581,8 @@ class McpToolTests(unittest.TestCase):
 
     def test_new_actor_with_whitespace_prompt_does_not_spawn(self):
         from actor import server
-        with patch("actor.server.cmd_new") as cmd_new, \
+        with patch("actor.server._load_app_config"), \
+             patch("actor.server.cmd_new") as cmd_new, \
              patch("actor.server._spawn_background_run") as spawn:
             fake_actor = MagicMock()
             fake_actor.dir = "/tmp/foo"
@@ -592,7 +594,8 @@ class McpToolTests(unittest.TestCase):
 
     def test_new_actor_with_prompt_spawns_and_reports(self):
         from actor import server
-        with patch("actor.server.cmd_new") as cmd_new, \
+        with patch("actor.server._load_app_config"), \
+             patch("actor.server.cmd_new") as cmd_new, \
              patch("actor.server._spawn_background_run") as spawn:
             fake_actor = MagicMock()
             fake_actor.dir = "/tmp/foo"
@@ -603,7 +606,8 @@ class McpToolTests(unittest.TestCase):
 
     def test_new_actor_spawn_failure_reports_partial_success(self):
         from actor import server
-        with patch("actor.server.cmd_new") as cmd_new, \
+        with patch("actor.server._load_app_config"), \
+             patch("actor.server.cmd_new") as cmd_new, \
              patch("actor.server._spawn_background_run", side_effect=RuntimeError("boom")):
             fake_actor = MagicMock()
             fake_actor.dir = "/tmp/foo"
@@ -615,7 +619,8 @@ class McpToolTests(unittest.TestCase):
 
     def test_run_actor_forwards_config(self):
         from actor import server
-        with patch("actor.server._spawn_background_run") as spawn:
+        with patch("actor.server._load_app_config"), \
+             patch("actor.server._spawn_background_run") as spawn:
             server.run_actor(name="foo", prompt="do x", config=["model=opus"])
         args, kwargs = spawn.call_args
         self.assertEqual(kwargs["config_pairs"], ["model=opus"])
