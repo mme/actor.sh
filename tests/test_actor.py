@@ -957,8 +957,8 @@ class TestCmdInteractive(unittest.TestCase):
         latest = db.latest_run("test")
         self.assertEqual(latest.status, Status.STOPPED)
 
-    def test_interactive_fires_on_run_hook_before_run_insert(self):
-        # Hook parity: `actor run -i` is still a run, so on-run fires
+    def test_interactive_fires_before_run_hook_before_run_insert(self):
+        # Hook parity: `actor run -i` is still a run, so before-run fires
         # with the same env and ordering as `actor run`.
         from actor import Hooks
         db = self._db()
@@ -970,21 +970,21 @@ class TestCmdInteractive(unittest.TestCase):
         def hook_runner(cmd, env, cwd):
             captured["cmd"] = cmd
             captured["env"] = dict(env)
-            # Run row must not exist yet — on-run fires BEFORE insert.
+            # Run row must not exist yet — before-run fires BEFORE insert.
             self.assertIsNone(db.latest_run("test"))
             return 0
 
         cmd_interactive(
             db, agent, pm, name="test",
             runner=lambda argv, cwd, env: 0,
-            hooks=Hooks(on_run="echo run"),
+            hooks=Hooks(before_run="echo before"),
             hook_runner=hook_runner,
         )
-        self.assertEqual(captured["cmd"], "echo run")
+        self.assertEqual(captured["cmd"], "echo before")
         self.assertEqual(captured["env"]["ACTOR_NAME"], "test")
         self.assertEqual(captured["env"]["ACTOR_SESSION_ID"], "S1")
 
-    def test_interactive_on_run_failure_aborts_without_run(self):
+    def test_interactive_before_run_failure_aborts_without_run(self):
         from actor import Hooks, HookFailedError
         db = self._db()
         self._actor_with_session(db)
@@ -1004,7 +1004,7 @@ class TestCmdInteractive(unittest.TestCase):
             cmd_interactive(
                 db, agent, pm, name="test",
                 runner=interactive_runner,
-                hooks=Hooks(on_run="false"),
+                hooks=Hooks(before_run="false"),
                 hook_runner=hook_runner,
             )
         self.assertEqual(agent_called["count"], 0)
@@ -2508,15 +2508,15 @@ class TestCmdNewOnStartHook(unittest.TestCase):
 
 
 # ──────────────────────────────────────────────────────────────────────
-#  Test: cmd_run on-run hook (issue #30)
+#  Test: cmd_run before-run hook (issue #30)
 # ──────────────────────────────────────────────────────────────────────
 
-class TestCmdRunOnRunHook(unittest.TestCase):
+class TestCmdRunBeforeRunHook(unittest.TestCase):
 
     def _db(self) -> Database:
         return Database.open(":memory:")
 
-    def test_on_run_fires_with_env(self):
+    def test_before_run_fires_with_env(self):
         from actor import Hooks
         seen = []
 
@@ -2533,14 +2533,14 @@ class TestCmdRunOnRunHook(unittest.TestCase):
             name="test",
             prompt="do the thing",
             config_pairs=[],
-            hooks=Hooks(on_run="echo run"),
+            hooks=Hooks(before_run="echo before"),
             hook_runner=runner,
         )
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0]["ACTOR_NAME"], "test")
         self.assertEqual(seen[0]["ACTOR_AGENT"], "claude")
 
-    def test_on_run_failure_aborts_without_run_row(self):
+    def test_before_run_failure_aborts_without_run_row(self):
         from actor import Hooks, HookFailedError
 
         def runner(cmd, env, cwd):
@@ -2556,13 +2556,13 @@ class TestCmdRunOnRunHook(unittest.TestCase):
                 name="test",
                 prompt="go",
                 config_pairs=[],
-                hooks=Hooks(on_run="false"),
+                hooks=Hooks(before_run="false"),
                 hook_runner=runner,
             )
         self.assertEqual(agent.calls, [])
         self.assertIsNone(db.latest_run("test"))
 
-    def test_on_run_sees_session_id_when_resuming(self):
+    def test_before_run_sees_session_id_when_resuming(self):
         from actor import Hooks
         seen = []
 
@@ -2580,12 +2580,12 @@ class TestCmdRunOnRunHook(unittest.TestCase):
             name="test",
             prompt="continue",
             config_pairs=[],
-            hooks=Hooks(on_run="echo"),
+            hooks=Hooks(before_run="echo"),
             hook_runner=runner,
         )
         self.assertEqual(seen[0]["ACTOR_SESSION_ID"], "sess-42")
 
-    def test_no_on_run_hook_no_runner_calls(self):
+    def test_no_before_run_hook_no_runner_calls(self):
         from actor import Hooks
         seen = []
 
@@ -2606,6 +2606,231 @@ class TestCmdRunOnRunHook(unittest.TestCase):
             hook_runner=runner,
         )
         self.assertEqual(seen, [])
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  Test: cmd_run / cmd_interactive after-run hook (issue #30)
+# ──────────────────────────────────────────────────────────────────────
+
+class TestCmdRunAfterRunHook(unittest.TestCase):
+
+    def _db(self) -> Database:
+        return Database.open(":memory:")
+
+    def _actor_with_session(self, db: Database, name: str = "test", session: str = "S1"):
+        create_actor(db, name)
+        db.update_actor_session(name, session)
+
+    def test_after_run_fires_with_env_and_exit_zero(self):
+        from actor import Hooks
+        seen: list[dict] = []
+
+        def runner(cmd, env, cwd):
+            seen.append(dict(env))
+            return 0
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+        agent = FakeAgent()
+        pm = FakeProcessManager()
+        cmd_run(
+            db, agent, pm,
+            name="test",
+            prompt="do the thing",
+            config_pairs=[],
+            hooks=Hooks(after_run="echo after"),
+            hook_runner=runner,
+        )
+        self.assertEqual(len(seen), 1)
+        env = seen[0]
+        self.assertEqual(env["ACTOR_NAME"], "test")
+        self.assertEqual(env["ACTOR_AGENT"], "claude")
+        self.assertEqual(env["ACTOR_EXIT_CODE"], "0")
+        # Run id is the newly inserted row; first insert → id 1.
+        self.assertEqual(env["ACTOR_RUN_ID"], "1")
+        self.assertIn("ACTOR_DURATION_MS", env)
+        # Duration must be a non-negative integer string.
+        self.assertGreaterEqual(int(env["ACTOR_DURATION_MS"]), 0)
+
+    def test_after_run_receives_nonzero_exit_code(self):
+        from actor import Hooks
+        seen: list[dict] = []
+
+        def runner(cmd, env, cwd):
+            seen.append(dict(env))
+            return 0
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+        agent = FakeAgent()
+        agent.set_exit_code(7)
+        pm = FakeProcessManager()
+        cmd_run(
+            db, agent, pm,
+            name="test",
+            prompt="fail",
+            config_pairs=[],
+            hooks=Hooks(after_run="echo after"),
+            hook_runner=runner,
+        )
+        self.assertEqual(seen[0]["ACTOR_EXIT_CODE"], "7")
+
+    def test_after_run_does_not_fire_when_unset(self):
+        from actor import Hooks
+        calls: list[str] = []
+
+        def runner(cmd, env, cwd):
+            calls.append(cmd)
+            return 0
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+        agent = FakeAgent()
+        pm = FakeProcessManager()
+        cmd_run(
+            db, agent, pm,
+            name="test",
+            prompt="go",
+            config_pairs=[],
+            hooks=Hooks(),
+            hook_runner=runner,
+        )
+        self.assertEqual(calls, [])
+
+    def test_after_run_does_not_fire_when_before_run_vetoes(self):
+        from actor import Hooks, HookFailedError
+        events: list[str] = []
+
+        def runner(cmd, env, cwd):
+            events.append(cmd)
+            # First invocation is before-run; make it veto.
+            if len(events) == 1:
+                return 2
+            return 0
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+        agent = FakeAgent()
+        pm = FakeProcessManager()
+        with self.assertRaises(HookFailedError):
+            cmd_run(
+                db, agent, pm,
+                name="test",
+                prompt="go",
+                config_pairs=[],
+                hooks=Hooks(before_run="veto", after_run="echo after"),
+                hook_runner=runner,
+            )
+        # Only before-run ran; after-run was never invoked.
+        self.assertEqual(events, ["veto"])
+
+    def test_after_run_does_not_fire_when_agent_start_fails(self):
+        # A run that couldn't start never produced a real run → after-run
+        # is skipped per the contract, same as before-run vetoing.
+        from actor import Hooks
+        calls: list[str] = []
+
+        def runner(cmd, env, cwd):
+            calls.append(cmd)
+            return 0
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+        agent = FakeAgent()
+        agent.set_start_error(ActorError("start failed"))
+        pm = FakeProcessManager()
+        with self.assertRaises(ActorError):
+            cmd_run(
+                db, agent, pm,
+                name="test",
+                prompt="go",
+                config_pairs=[],
+                hooks=Hooks(after_run="echo after"),
+                hook_runner=runner,
+            )
+        self.assertEqual(calls, [])
+
+    def test_after_run_sees_db_as_done_before_firing(self):
+        from actor import Hooks
+        observed_status: list[Status] = []
+
+        def runner(cmd, env, cwd):
+            # At hook time, the DB must already reflect the run's final
+            # status so scripts that `actor show` see the run as done.
+            latest = db.latest_run("test")
+            observed_status.append(latest.status)
+            self.assertIsNotNone(latest.finished_at)
+            self.assertEqual(latest.exit_code, 0)
+            return 0
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+        agent = FakeAgent()
+        pm = FakeProcessManager()
+        cmd_run(
+            db, agent, pm,
+            name="test",
+            prompt="go",
+            config_pairs=[],
+            hooks=Hooks(after_run="echo after"),
+            hook_runner=runner,
+        )
+        self.assertEqual(observed_status, [Status.DONE])
+
+    def test_after_run_nonzero_exit_logged_and_swallowed(self):
+        import io
+        import contextlib
+        from actor import Hooks
+
+        def runner(cmd, env, cwd):
+            return 13  # hook fails
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+        agent = FakeAgent()
+        pm = FakeProcessManager()
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            # Must NOT raise — after-run is a non-vetoing observer.
+            cmd_run(
+                db, agent, pm,
+                name="test",
+                prompt="go",
+                config_pairs=[],
+                hooks=Hooks(after_run="fails"),
+                hook_runner=runner,
+            )
+        msg = stderr.getvalue()
+        self.assertIn("after-run", msg)
+        self.assertIn("test", msg)
+        # Run should be marked DONE regardless of hook failure.
+        self.assertEqual(db.latest_run("test").status, Status.DONE)
+
+    def test_after_run_fires_from_interactive(self):
+        from actor import Hooks
+        seen: list[dict] = []
+
+        def hook_runner(cmd, env, cwd):
+            seen.append(dict(env))
+            return 0
+
+        db = self._db()
+        self._actor_with_session(db)
+        pm = FakeProcessManager()
+        agent = FakeAgent()
+        cmd_interactive(
+            db, agent, pm, name="test",
+            runner=lambda argv, cwd, env: 0,
+            hooks=Hooks(after_run="echo after"),
+            hook_runner=hook_runner,
+        )
+        self.assertEqual(len(seen), 1)
+        env = seen[0]
+        self.assertEqual(env["ACTOR_NAME"], "test")
+        self.assertEqual(env["ACTOR_EXIT_CODE"], "0")
+        self.assertEqual(env["ACTOR_SESSION_ID"], "S1")
+        self.assertIn("ACTOR_RUN_ID", env)
+        self.assertIn("ACTOR_DURATION_MS", env)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -2859,6 +3084,39 @@ class TestHookEnv(unittest.TestCase):
         )
         self.assertNotIn("ACTOR_SESSION_ID", env)
 
+    def test_hook_env_includes_run_specific_vars_when_set(self):
+        from pathlib import Path
+        from actor.hooks import hook_env
+        env = hook_env(
+            {},
+            actor_name="foo",
+            actor_dir=Path("/tmp"),
+            actor_agent="claude",
+            actor_session_id="sess",
+            actor_run_id=42,
+            actor_exit_code=0,
+            actor_duration_ms=1234,
+        )
+        self.assertEqual(env["ACTOR_RUN_ID"], "42")
+        self.assertEqual(env["ACTOR_EXIT_CODE"], "0")
+        self.assertEqual(env["ACTOR_DURATION_MS"], "1234")
+
+    def test_hook_env_omits_run_specific_vars_when_none(self):
+        from pathlib import Path
+        from actor.hooks import hook_env
+        env = hook_env(
+            {"ACTOR_RUN_ID": "stale", "ACTOR_EXIT_CODE": "1", "ACTOR_DURATION_MS": "5"},
+            actor_name="foo",
+            actor_dir=Path("/tmp"),
+            actor_agent="claude",
+            actor_session_id=None,
+        )
+        # Parent env values must be cleared so a before-run hook
+        # doesn't inherit stale run data from a previous run.
+        self.assertNotIn("ACTOR_RUN_ID", env)
+        self.assertNotIn("ACTOR_EXIT_CODE", env)
+        self.assertNotIn("ACTOR_DURATION_MS", env)
+
 
 class TestRunHook(unittest.TestCase):
 
@@ -2893,8 +3151,8 @@ class TestRunHook(unittest.TestCase):
             return 3
 
         with self.assertRaises(HookFailedError) as ctx:
-            run_hook("on-run", "false", {}, Path("/tmp"), runner=runner)
-        self.assertEqual(ctx.exception.event, "on-run")
+            run_hook("before-run", "false", {}, Path("/tmp"), runner=runner)
+        self.assertEqual(ctx.exception.event, "before-run")
         self.assertEqual(ctx.exception.exit_code, 3)
         self.assertEqual(ctx.exception.command, "false")
 
@@ -2989,14 +3247,14 @@ class TestHookFailedErrorOutput(unittest.TestCase):
     def test_error_message_includes_stderr_tail(self):
         from actor.errors import HookFailedError
         err = HookFailedError(
-            event="on-run",
+            event="before-run",
             command="false",
             exit_code=1,
             stdout="",
             stderr="boom: something went wrong\n",
         )
         msg = str(err)
-        self.assertIn("on-run", msg)
+        self.assertIn("before-run", msg)
         self.assertIn("boom", msg)
 
     def test_error_without_output_omits_tail(self):
@@ -3015,7 +3273,7 @@ class TestHookFailedErrorOutput(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(HookFailedError) as ctx:
                 run_hook(
-                    "on-run",
+                    "before-run",
                     'echo out; echo err-from-hook 1>&2; exit 7',
                     dict(os.environ),
                     Path(d),

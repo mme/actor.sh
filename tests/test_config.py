@@ -305,13 +305,15 @@ class TestLoadConfigHooks(unittest.TestCase):
             p.write_text(
                 'hooks {\n'
                 '    on-start "echo start"\n'
-                '    on-run "echo run"\n'
+                '    before-run "echo before"\n'
+                '    after-run "echo after"\n'
                 '    on-discard "echo discard"\n'
                 '}\n'
             )
             cfg = load_config(cwd=Path(cwd), home=Path(home))
             self.assertEqual(cfg.hooks.on_start, "echo start")
-            self.assertEqual(cfg.hooks.on_run, "echo run")
+            self.assertEqual(cfg.hooks.before_run, "echo before")
+            self.assertEqual(cfg.hooks.after_run, "echo after")
             self.assertEqual(cfg.hooks.on_discard, "echo discard")
 
     def test_hooks_partial_block(self):
@@ -321,14 +323,16 @@ class TestLoadConfigHooks(unittest.TestCase):
             p.write_text('hooks {\n    on-start "echo start"\n}\n')
             cfg = load_config(cwd=Path(cwd), home=Path(home))
             self.assertEqual(cfg.hooks.on_start, "echo start")
-            self.assertIsNone(cfg.hooks.on_run)
+            self.assertIsNone(cfg.hooks.before_run)
+            self.assertIsNone(cfg.hooks.after_run)
             self.assertIsNone(cfg.hooks.on_discard)
 
     def test_missing_hooks_block_is_empty(self):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             cfg = load_config(cwd=Path(cwd), home=Path(home))
             self.assertIsNone(cfg.hooks.on_start)
-            self.assertIsNone(cfg.hooks.on_run)
+            self.assertIsNone(cfg.hooks.before_run)
+            self.assertIsNone(cfg.hooks.after_run)
             self.assertIsNone(cfg.hooks.on_discard)
 
     def test_unknown_hook_key_raises(self):
@@ -396,7 +400,7 @@ class TestLoadConfigHooks(unittest.TestCase):
             p.parent.mkdir()
             p.write_text(
                 'hooks {\n    on-start "echo a"\n}\n'
-                'hooks {\n    on-run "echo b"\n}\n'
+                'hooks {\n    before-run "echo b"\n}\n'
             )
             with self.assertRaises(ConfigError) as ctx:
                 load_config(cwd=Path(cwd), home=Path(home))
@@ -413,15 +417,16 @@ class TestLoadConfigHooksPrecedence(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             self._write(
                 Path(home) / ".actor" / "settings.kdl",
-                'hooks {\n    on-start "user-start"\n    on-run "user-run"\n}\n',
+                'hooks {\n    on-start "user-start"\n    before-run "user-before"\n}\n',
             )
             self._write(
                 Path(cwd) / ".actor" / "settings.kdl",
-                'hooks {\n    on-run "project-run"\n}\n',
+                'hooks {\n    before-run "project-before"\n}\n',
             )
             cfg = load_config(cwd=Path(cwd), home=Path(home))
             self.assertEqual(cfg.hooks.on_start, "user-start")
-            self.assertEqual(cfg.hooks.on_run, "project-run")
+            self.assertEqual(cfg.hooks.before_run, "project-before")
+            self.assertIsNone(cfg.hooks.after_run)
             self.assertIsNone(cfg.hooks.on_discard)
 
 

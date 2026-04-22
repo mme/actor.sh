@@ -147,15 +147,23 @@ directory.
 ```kdl
 hooks {
     on-start "kubectl config use-context dev"
-    on-run "git fetch --quiet"
+    before-run "git fetch --quiet"
+    after-run "notify-send \"$ACTOR_NAME done: exit $ACTOR_EXIT_CODE\""
     on-discard "git diff --quiet && git diff --quiet --staged"
 }
 ```
 
 - `on-start` — fires once during `actor new`, after the actor row is
   recorded. Non-zero rolls back the new actor (row + worktree).
-- `on-run` — fires before every `actor run` (including `actor run -i`
+- `before-run` — fires before every `actor run` (including `actor run -i`
   interactive), before the Run row is inserted. Non-zero aborts the run.
+- `after-run` — fires after every `actor run` (including `actor run -i`)
+  completes, once the Run row has been updated to its final status. Gets
+  three extra env vars: `ACTOR_RUN_ID`, `ACTOR_EXIT_CODE`, and
+  `ACTOR_DURATION_MS` (wall-clock milliseconds from agent start to
+  finish). Observer-only — a non-zero exit is logged to stderr but does
+  not fail the run. Does not fire if `before-run` vetoed the run or if
+  the agent failed to start.
 - `on-discard` — fires during `actor discard`, after resource cleanup
   (running agents stopped) and before the DB row is removed. Non-zero
   aborts discard unless `actor discard --force` / `-f` is passed. If the

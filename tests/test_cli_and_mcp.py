@@ -335,7 +335,7 @@ class RunCommandTests(unittest.TestCase):
     def test_run_dash_i_forwards_hooks_to_cmd_interactive(self):
         """`actor run foo -i` must forward hooks= from loaded config."""
         from actor import AppConfig, Hooks
-        hooks = Hooks(on_run="echo run-i")
+        hooks = Hooks(before_run="echo before-i")
         app_config = AppConfig(hooks=hooks)
         cmd_interactive = MagicMock(return_value=(0, "ok"))
         fake_db = MagicMock()
@@ -463,14 +463,14 @@ class TestHookWiring(unittest.TestCase):
     def test_new_auto_run_receives_hooks(self):
         """When `actor new foo "prompt"` auto-runs, cmd_run also gets hooks."""
         from actor import AppConfig, Hooks
-        cfg = AppConfig(hooks=Hooks(on_start="s", on_run="r"))
+        cfg = AppConfig(hooks=Hooks(on_start="s", before_run="r"))
         _, cmd_run = self._run_new(["new", "foo", "do x"], cfg)
         cmd_run.assert_called_once()
         self.assertIs(cmd_run.call_args.kwargs["hooks"], cfg.hooks)
 
     def test_run_receives_hooks(self):
         from actor import AppConfig, Hooks
-        cfg = AppConfig(hooks=Hooks(on_run="echo run"))
+        cfg = AppConfig(hooks=Hooks(before_run="echo before"))
         cmd_run = self._run_run(["run", "foo", "do x"], cfg)
         cmd_run.assert_called_once()
         self.assertIs(cmd_run.call_args.kwargs["hooks"], cfg.hooks)
@@ -673,9 +673,14 @@ class McpToolTests(unittest.TestCase):
 
     def test_spawn_background_run_forwards_hooks_to_cmd_run(self):
         """The thread body inside _spawn_background_run must call cmd_run
-        with hooks= from the loaded config."""
+        with hooks= from the loaded config. cmd_run itself fires
+        before-run and after-run, so forwarding is the wiring the MCP
+        path needs — there's no separate after-run invocation in the
+        server layer."""
         from actor import server, AppConfig, Hooks
-        app_config = AppConfig(hooks=Hooks(on_run="echo run"))
+        app_config = AppConfig(hooks=Hooks(
+            before_run="echo before", after_run="echo after",
+        ))
         captured: dict = {}
 
         def fake_thread(target, daemon=False):
@@ -699,7 +704,10 @@ class McpToolTests(unittest.TestCase):
             Db_cls.open.return_value = fake_db
             server._spawn_background_run("foo", "do x", config_pairs=[], ctx=None)
             captured["kwargs"] = cmd_run.call_args.kwargs
-        self.assertIs(captured["kwargs"]["hooks"], app_config.hooks)
+        forwarded_hooks = captured["kwargs"]["hooks"]
+        self.assertIs(forwarded_hooks, app_config.hooks)
+        self.assertEqual(forwarded_hooks.before_run, "echo before")
+        self.assertEqual(forwarded_hooks.after_run, "echo after")
 
 
 if __name__ == "__main__":

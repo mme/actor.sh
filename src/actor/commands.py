@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
@@ -91,6 +92,47 @@ def _truncate_input(input_str: str, max_len: int) -> str:
     if len(input_str) <= max_len:
         return input_str
     return input_str[:max_len] + "..."
+
+
+def _fire_after_run(
+    *,
+    hooks: Optional["Hooks"],
+    hook_runner: Optional[HookRunner],
+    name: str,
+    actor_dir: Path,
+    actor_agent: str,
+    session_id: Optional[str],
+    run_id: int,
+    exit_code: int,
+    duration_ms: int,
+) -> None:
+    """Run the after-run hook as a non-vetoing observer.
+
+    Callers must update the DB with the run's final status before calling
+    this — the hook contract guarantees `actor show` / `actor logs` see
+    the run as finished. A non-zero exit is logged to stderr and
+    swallowed; the surrounding run has already happened and cannot be
+    rolled back."""
+    after_run = hooks.after_run if hooks is not None else None
+    if after_run is None:
+        return
+    env = hook_env(
+        os.environ,
+        actor_name=name,
+        actor_dir=actor_dir,
+        actor_agent=actor_agent,
+        actor_session_id=session_id,
+        actor_run_id=run_id,
+        actor_exit_code=exit_code,
+        actor_duration_ms=duration_ms,
+    )
+    try:
+        run_hook("after-run", after_run, env, actor_dir, runner=hook_runner)
+    except HookFailedError as e:
+        print(
+            f"warning: after-run hook failed for '{name}' ({e})",
+            file=sys.stderr,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -257,10 +299,10 @@ def cmd_run(
             f"actor directory '{actor.dir}' does not exist \u2014 use 'actor discard {name}' to clean up"
         )
 
-    # on-run hook fires before the Run row is inserted so a failing
+    # before-run hook fires before the Run row is inserted so a failing
     # pre-flight check doesn't leave a phantom run behind.
-    on_run = hooks.on_run if hooks is not None else None
-    if on_run is not None:
+    before_run = hooks.before_run if hooks is not None else None
+    if before_run is not None:
         env = hook_env(
             os.environ,
             actor_name=name,
@@ -268,7 +310,7 @@ def cmd_run(
             actor_agent=actor.agent.as_str(),
             actor_session_id=actor.agent_session,
         )
-        run_hook("on-run", on_run, env, dir_path, runner=hook_runner)
+        run_hook("before-run", before_run, env, dir_path, runner=hook_runner)
 
     # Merge config: actor defaults + run overrides
     run_overrides = parse_config(config_pairs)
@@ -309,8 +351,10 @@ def cmd_run(
             pid, new_session = agent.start(
                 dir_path, prompt, effective_config, env_extra=env_extra,
             )
+        run_start_mono = time.monotonic()
     except Exception:
-        # Agent failed to start — mark run as error
+        # Agent failed to start — mark run as error. after-run does not
+        # fire: per the contract it only runs for a run that actually ran.
         db.update_run_status(run_id, Status.ERROR, -1)
         raise
 
@@ -323,14 +367,34 @@ def cmd_run(
 
     # Block until agent exits
     exit_code, output = agent.wait(pid)
+    duration_ms = int((time.monotonic() - run_start_mono) * 1000)
 
-    # Check if stop command already updated this run (race condition)
+    # Check if stop command already updated this run (race condition).
+    # Stop already wrote the final status; don't overwrite it.
     current_run = db.latest_run(name)
-    if current_run is not None and current_run.id == run_id and current_run.status == Status.STOPPED:
-        return output
+    stopped_by_race = (
+        current_run is not None
+        and current_run.id == run_id
+        and current_run.status == Status.STOPPED
+    )
+    if not stopped_by_race:
+        status = Status.DONE if exit_code == 0 else Status.ERROR
+        db.update_run_status(run_id, status, exit_code)
 
-    status = Status.DONE if exit_code == 0 else Status.ERROR
-    db.update_run_status(run_id, status, exit_code)
+    # after-run is an observer — DB is already authoritative above, so
+    # a hook script running `actor show` sees the run as done. Non-zero
+    # exits are logged but don't propagate.
+    _fire_after_run(
+        hooks=hooks,
+        hook_runner=hook_runner,
+        name=name,
+        actor_dir=dir_path,
+        actor_agent=actor.agent.as_str(),
+        session_id=new_session if new_session is not None else actor.agent_session,
+        run_id=run_id,
+        exit_code=exit_code,
+        duration_ms=duration_ms,
+    )
     return output
 
 
@@ -371,9 +435,9 @@ def cmd_interactive(
             f"actor directory '{actor.dir}' does not exist \u2014 use 'actor discard {name}' to clean up"
         )
 
-    # on-run hook fires before the Run row is inserted, mirroring cmd_run.
-    on_run = hooks.on_run if hooks is not None else None
-    if on_run is not None:
+    # before-run hook fires before the Run row is inserted, mirroring cmd_run.
+    before_run = hooks.before_run if hooks is not None else None
+    if before_run is not None:
         hook_env_vars = hook_env(
             os.environ,
             actor_name=name,
@@ -381,7 +445,7 @@ def cmd_interactive(
             actor_agent=actor.agent.as_str(),
             actor_session_id=actor.agent_session,
         )
-        run_hook("on-run", on_run, hook_env_vars, dir_path, runner=hook_runner)
+        run_hook("before-run", before_run, hook_env_vars, dir_path, runner=hook_runner)
 
     argv = agent.interactive_argv(session_id, actor.config)
 
@@ -403,18 +467,39 @@ def cmd_interactive(
     env["ACTOR_NAME"] = name
     env["ACTOR_SESSION_ID"] = session_id
 
+    run_start_mono = time.monotonic()
     try:
         exit_code = (runner or _default_interactive_runner)(argv, dir_path, env)
     except Exception:
+        # Session didn't actually run — no after-run, matching cmd_run.
         db.update_run_status(run_id, Status.ERROR, -1)
         raise
+    duration_ms = int((time.monotonic() - run_start_mono) * 1000)
 
     current = db.latest_run(name)
-    if current is not None and current.id == run_id and current.status == Status.STOPPED:
-        return exit_code, f"Interactive session for '{name}' stopped."
+    stopped_by_race = (
+        current is not None
+        and current.id == run_id
+        and current.status == Status.STOPPED
+    )
+    if not stopped_by_race:
+        final = Status.DONE if exit_code == 0 else Status.ERROR
+        db.update_run_status(run_id, final, exit_code)
 
-    final = Status.DONE if exit_code == 0 else Status.ERROR
-    db.update_run_status(run_id, final, exit_code)
+    _fire_after_run(
+        hooks=hooks,
+        hook_runner=hook_runner,
+        name=name,
+        actor_dir=dir_path,
+        actor_agent=actor.agent.as_str(),
+        session_id=session_id,
+        run_id=run_id,
+        exit_code=exit_code,
+        duration_ms=duration_ms,
+    )
+
+    if stopped_by_race:
+        return exit_code, f"Interactive session for '{name}' stopped."
     return exit_code, f"Interactive session for '{name}' ended (exit {exit_code})."
 
 

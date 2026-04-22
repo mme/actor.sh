@@ -94,8 +94,15 @@ def hook_env(
     actor_dir: Path,
     actor_agent: str,
     actor_session_id: Optional[str],
+    actor_run_id: Optional[int] = None,
+    actor_exit_code: Optional[int] = None,
+    actor_duration_ms: Optional[int] = None,
 ) -> Dict[str, str]:
-    """Return a fresh dict combining base_env with ACTOR_* variables."""
+    """Return a fresh dict combining base_env with ACTOR_* variables.
+
+    ``actor_run_id``, ``actor_exit_code``, and ``actor_duration_ms`` are
+    run-specific and only populated for hooks that fire around a
+    completed run (currently only ``after-run``)."""
     env = dict(base_env)
     env["ACTOR_NAME"] = actor_name
     env["ACTOR_DIR"] = str(actor_dir)
@@ -104,4 +111,13 @@ def hook_env(
         env["ACTOR_SESSION_ID"] = actor_session_id
     else:
         env.pop("ACTOR_SESSION_ID", None)
+    for key, value in (
+        ("ACTOR_RUN_ID", actor_run_id),
+        ("ACTOR_EXIT_CODE", actor_exit_code),
+        ("ACTOR_DURATION_MS", actor_duration_ms),
+    ):
+        if value is not None:
+            env[key] = str(value)
+        else:
+            env.pop(key, None)
     return env

@@ -32,7 +32,8 @@ class Template:
 @dataclass
 class Hooks:
     on_start: Optional[str] = None
-    on_run: Optional[str] = None
+    before_run: Optional[str] = None
+    after_run: Optional[str] = None
     on_discard: Optional[str] = None
 
 
@@ -170,7 +171,8 @@ def _parse_template(node, source: Path) -> Template:
 
 _HOOK_KEYS = {
     "on-start": "on_start",
-    "on-run": "on_run",
+    "before-run": "before_run",
+    "after-run": "after_run",
     "on-discard": "on_discard",
 }
 
@@ -192,7 +194,7 @@ def _parse_hooks(node, source: Path) -> Hooks:
         if attr is None:
             raise ConfigError(
                 f"hooks block in {source}: unknown hook '{key}' "
-                f"(valid: on-start, on-run, on-discard)"
+                f"(valid: on-start, before-run, after-run, on-discard)"
             )
         if key in seen:
             raise ConfigError(
@@ -257,7 +259,8 @@ def _merge(base: AppConfig, over: AppConfig) -> AppConfig:
     merged_templates.update(over.templates)
     merged_hooks = Hooks(
         on_start=over.hooks.on_start if over.hooks.on_start is not None else base.hooks.on_start,
-        on_run=over.hooks.on_run if over.hooks.on_run is not None else base.hooks.on_run,
+        before_run=over.hooks.before_run if over.hooks.before_run is not None else base.hooks.before_run,
+        after_run=over.hooks.after_run if over.hooks.after_run is not None else base.hooks.after_run,
         on_discard=over.hooks.on_discard if over.hooks.on_discard is not None else base.hooks.on_discard,
     )
     return AppConfig(templates=merged_templates, hooks=merged_hooks)
