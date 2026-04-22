@@ -2832,6 +2832,139 @@ class TestCmdRunAfterRunHook(unittest.TestCase):
         self.assertIn("ACTOR_RUN_ID", env)
         self.assertIn("ACTOR_DURATION_MS", env)
 
+    def test_after_run_swallows_unexpected_hook_runner_exception(self):
+        # The observer contract says after-run must never disturb the
+        # surrounding run. Besides HookFailedError (non-zero exit), the
+        # hook_runner or run_hook itself can raise other things —
+        # FileNotFoundError if cwd vanished, TypeError on bad return —
+        # and none of those should propagate out of cmd_run.
+        import io
+        import contextlib
+        from actor import Hooks
+
+        def runner(cmd, env, cwd):
+            raise FileNotFoundError("worktree disappeared mid-run")
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+        agent = FakeAgent()
+        pm = FakeProcessManager()
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            output = cmd_run(
+                db, agent, pm,
+                name="test",
+                prompt="go",
+                config_pairs=[],
+                hooks=Hooks(after_run="oops"),
+                hook_runner=runner,
+            )
+        # cmd_run completed normally — run is DONE, hook error logged.
+        self.assertEqual(db.latest_run("test").status, Status.DONE)
+        self.assertIn("after-run", stderr.getvalue())
+
+    def test_after_run_does_not_fire_when_stopped_by_race(self):
+        # When cmd_stop flips the run to STOPPED before agent.wait returns,
+        # cmd_run must not overwrite the status and must not fire after-run
+        # (the DB row's exit_code is None but our wait() exit would be
+        # non-null — firing would pass env data that disagrees with DB).
+        from actor import Hooks
+        calls: list = []
+
+        def hook_runner(cmd, env, cwd):
+            calls.append(cmd)
+            return 0
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+
+        class _StopDuringWait(FakeAgent):
+            def wait(self, pid):
+                # Simulate cmd_stop flipping the run to STOPPED while we
+                # were blocked in wait().
+                latest = db.latest_run("test")
+                db.update_run_status(latest.id, Status.STOPPED, None)
+                return super().wait(pid)
+
+        pm = FakeProcessManager()
+        cmd_run(
+            db, _StopDuringWait(), pm,
+            name="test",
+            prompt="go",
+            config_pairs=[],
+            hooks=Hooks(after_run="echo never"),
+            hook_runner=hook_runner,
+        )
+        latest = db.latest_run("test")
+        self.assertEqual(latest.status, Status.STOPPED)
+        self.assertEqual(calls, [])
+
+    def test_after_run_does_not_fire_when_stopped_by_race_interactive(self):
+        from actor import Hooks
+        calls: list = []
+
+        def hook_runner(cmd, env, cwd):
+            calls.append(cmd)
+            return 0
+
+        db = self._db()
+        self._actor_with_session(db)
+        pm = FakeProcessManager()
+        agent = FakeAgent()
+
+        def runner(argv, cwd, env):
+            latest = db.latest_run("test")
+            db.update_run_status(latest.id, Status.STOPPED, None)
+            return 0
+
+        cmd_interactive(
+            db, agent, pm, name="test",
+            runner=runner,
+            hooks=Hooks(after_run="echo never"),
+            hook_runner=hook_runner,
+        )
+        latest = db.latest_run("test")
+        self.assertEqual(latest.status, Status.STOPPED)
+        self.assertEqual(calls, [])
+
+    def test_interactive_scrubs_stale_run_env_before_subprocess(self):
+        # cmd_interactive copies the parent os.environ and passes it to
+        # the interactive runner. If the parent carries stale
+        # ACTOR_RUN_ID / ACTOR_EXIT_CODE / ACTOR_DURATION_MS (e.g. because
+        # this invocation was started from a hook of a previous run),
+        # those values must not leak to the child agent process.
+        from actor import Hooks
+        seen_envs: list[dict] = []
+
+        def runner(argv, cwd, env):
+            seen_envs.append(dict(env))
+            return 0
+
+        db = self._db()
+        self._actor_with_session(db)
+        pm = FakeProcessManager()
+        agent = FakeAgent()
+        stale = {
+            "ACTOR_RUN_ID": "99",
+            "ACTOR_EXIT_CODE": "7",
+            "ACTOR_DURATION_MS": "42000",
+        }
+        old = {k: os.environ.get(k) for k in stale}
+        try:
+            os.environ.update(stale)
+            cmd_interactive(db, agent, pm, name="test", runner=runner)
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.assertEqual(len(seen_envs), 1)
+        env = seen_envs[0]
+        self.assertNotIn("ACTOR_RUN_ID", env)
+        self.assertNotIn("ACTOR_EXIT_CODE", env)
+        self.assertNotIn("ACTOR_DURATION_MS", env)
+
 
 # ──────────────────────────────────────────────────────────────────────
 #  Test: cmd_discard on-discard hook (issue #30)
@@ -3116,6 +3249,23 @@ class TestHookEnv(unittest.TestCase):
         self.assertNotIn("ACTOR_RUN_ID", env)
         self.assertNotIn("ACTOR_EXIT_CODE", env)
         self.assertNotIn("ACTOR_DURATION_MS", env)
+
+    def test_hook_env_rejects_bool_for_int_fields(self):
+        # bool is a subclass of int in Python, so True/False would
+        # stringify to "True"/"False" in the env and confuse hook scripts
+        # that expect a numeric ACTOR_EXIT_CODE. Reject at the API.
+        from pathlib import Path
+        from actor.hooks import hook_env
+        for kwarg in ("actor_run_id", "actor_exit_code", "actor_duration_ms"):
+            with self.assertRaises(TypeError):
+                hook_env(
+                    {},
+                    actor_name="foo",
+                    actor_dir=Path("/tmp"),
+                    actor_agent="claude",
+                    actor_session_id=None,
+                    **{kwarg: True},
+                )
 
 
 class TestRunHook(unittest.TestCase):

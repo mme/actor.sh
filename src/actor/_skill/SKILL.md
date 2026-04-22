@@ -142,7 +142,8 @@ Shell hooks declared in the same `settings.kdl` file. They apply to
 every actor (merged across user + project `settings.kdl`). Each runs via
 `/bin/sh -c`, inheriting the caller's env plus `ACTOR_NAME`, `ACTOR_DIR`,
 `ACTOR_AGENT`, and (when set) `ACTOR_SESSION_ID`. Cwd is the actor
-directory.
+directory, except for on-discard on an actor whose worktree is gone
+(see below).
 
 ```kdl
 hooks {
@@ -161,9 +162,11 @@ hooks {
   completes, once the Run row has been updated to its final status. Gets
   three extra env vars: `ACTOR_RUN_ID`, `ACTOR_EXIT_CODE`, and
   `ACTOR_DURATION_MS` (wall-clock milliseconds from agent start to
-  finish). Observer-only — a non-zero exit is logged to stderr but does
-  not fail the run. Does not fire if `before-run` vetoed the run or if
-  the agent failed to start.
+  finish). Observer-only — any exit code and any unexpected exception
+  from the hook are logged to stderr and swallowed; the run itself is
+  never affected. Does not fire if `before-run` vetoed the run, if the
+  agent failed to start, or if `actor stop` won the race against the
+  agent's own exit (in the last case the run is recorded as `stopped`).
 - `on-discard` — fires during `actor discard`, after resource cleanup
   (running agents stopped) and before the DB row is removed. Non-zero
   aborts discard unless `actor discard --force` / `-f` is passed. If the

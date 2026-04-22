@@ -116,8 +116,14 @@ def hook_env(
         ("ACTOR_EXIT_CODE", actor_exit_code),
         ("ACTOR_DURATION_MS", actor_duration_ms),
     ):
-        if value is not None:
-            env[key] = str(value)
-        else:
+        if value is None:
             env.pop(key, None)
+            continue
+        # bool is a subclass of int; str(True) == "True", which would
+        # confuse hook scripts expecting a number. Reject at the API.
+        if isinstance(value, bool):
+            raise TypeError(
+                f"{key} expects int, got bool ({value!r})"
+            )
+        env[key] = str(value)
     return env

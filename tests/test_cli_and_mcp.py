@@ -661,6 +661,66 @@ class McpToolTests(unittest.TestCase):
             server.new_actor(name="foo", agent="codex")
         self.assertEqual(cmd_new.call_args.kwargs["agent_name"], "codex")
 
+    def test_new_actor_template_prompt_fallback_spawns_run(self):
+        """Mirror CLI parity: when MCP caller passes a template with a
+        prompt but no explicit prompt argument, new_actor must spawn the
+        background run using the template's prompt — otherwise the CLI
+        and MCP entrypoints silently diverge on `actor new foo
+        --template qa` vs. `new_actor(name="foo", template="qa")`."""
+        from actor import server, AppConfig, Template
+        app_config = AppConfig(
+            templates={
+                "qa": Template(name="qa", agent="claude", prompt="run the QA checks"),
+            }
+        )
+        with patch("actor.server._load_app_config", return_value=app_config), \
+             patch("actor.server.cmd_new") as cmd_new, \
+             patch("actor.server._spawn_background_run") as spawn:
+            fake_actor = MagicMock()
+            fake_actor.dir = "/tmp/foo"
+            cmd_new.return_value = fake_actor
+            msg = server.new_actor(name="foo", template="qa")
+        spawn.assert_called_once()
+        args, kwargs = spawn.call_args
+        self.assertEqual(args[1], "run the QA checks")
+        self.assertIn("running", msg)
+
+    def test_new_actor_explicit_prompt_beats_template_prompt(self):
+        """Explicit prompt arg wins over template's prompt — matches CLI."""
+        from actor import server, AppConfig, Template
+        app_config = AppConfig(
+            templates={
+                "qa": Template(name="qa", agent="claude", prompt="template default"),
+            }
+        )
+        with patch("actor.server._load_app_config", return_value=app_config), \
+             patch("actor.server.cmd_new") as cmd_new, \
+             patch("actor.server._spawn_background_run") as spawn:
+            fake_actor = MagicMock()
+            fake_actor.dir = "/tmp/foo"
+            cmd_new.return_value = fake_actor
+            server.new_actor(name="foo", template="qa", prompt="explicit")
+        args, _ = spawn.call_args
+        self.assertEqual(args[1], "explicit")
+
+    def test_new_actor_template_without_prompt_does_not_spawn(self):
+        """Template with no prompt and no explicit prompt: don't spawn."""
+        from actor import server, AppConfig, Template
+        app_config = AppConfig(
+            templates={
+                "qa": Template(name="qa", agent="claude", prompt=None),
+            }
+        )
+        with patch("actor.server._load_app_config", return_value=app_config), \
+             patch("actor.server.cmd_new") as cmd_new, \
+             patch("actor.server._spawn_background_run") as spawn:
+            fake_actor = MagicMock()
+            fake_actor.dir = "/tmp/foo"
+            cmd_new.return_value = fake_actor
+            msg = server.new_actor(name="foo", template="qa")
+        spawn.assert_not_called()
+        self.assertNotIn("running", msg)
+
     def test_discard_actor_forwards_hooks_and_force(self):
         from actor import server, AppConfig, Hooks
         app_config = AppConfig(hooks=Hooks(on_discard="echo bye"))

@@ -110,9 +110,10 @@ def _fire_after_run(
 
     Callers must update the DB with the run's final status before calling
     this — the hook contract guarantees `actor show` / `actor logs` see
-    the run as finished. A non-zero exit is logged to stderr and
-    swallowed; the surrounding run has already happened and cannot be
-    rolled back."""
+    the run as finished. Any exception from the hook is logged to stderr
+    and swallowed: the surrounding run has already happened and cannot
+    be rolled back, so a malformed hook runner or a vanished cwd must
+    not disturb cmd_run's return path."""
     after_run = hooks.after_run if hooks is not None else None
     if after_run is None:
         return
@@ -131,6 +132,12 @@ def _fire_after_run(
     except HookFailedError as e:
         print(
             f"warning: after-run hook failed for '{name}' ({e})",
+            file=sys.stderr,
+        )
+    except Exception as e:
+        print(
+            f"warning: after-run hook for '{name}' raised "
+            f"{type(e).__name__}: {e}",
             file=sys.stderr,
         )
 
@@ -381,20 +388,22 @@ def cmd_run(
         status = Status.DONE if exit_code == 0 else Status.ERROR
         db.update_run_status(run_id, status, exit_code)
 
-    # after-run is an observer — DB is already authoritative above, so
-    # a hook script running `actor show` sees the run as done. Non-zero
-    # exits are logged but don't propagate.
-    _fire_after_run(
-        hooks=hooks,
-        hook_runner=hook_runner,
-        name=name,
-        actor_dir=dir_path,
-        actor_agent=actor.agent.as_str(),
-        session_id=new_session if new_session is not None else actor.agent_session,
-        run_id=run_id,
-        exit_code=exit_code,
-        duration_ms=duration_ms,
-    )
+        # after-run is an observer. It fires only on the "run completed
+        # under our control" path — when cmd_stop won the race, the DB
+        # already shows STOPPED with a null exit_code, and firing here
+        # would feed the hook an ACTOR_EXIT_CODE that disagrees with
+        # `actor show`.
+        _fire_after_run(
+            hooks=hooks,
+            hook_runner=hook_runner,
+            name=name,
+            actor_dir=dir_path,
+            actor_agent=actor.agent.as_str(),
+            session_id=new_session if new_session is not None else actor.agent_session,
+            run_id=run_id,
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+        )
     return output
 
 
@@ -466,6 +475,11 @@ def cmd_interactive(
     env = dict(os.environ)
     env["ACTOR_NAME"] = name
     env["ACTOR_SESSION_ID"] = session_id
+    # Scrub run-specific keys the parent env may carry from a prior
+    # after-run hook firing, so the interactive child never inherits
+    # another run's ACTOR_RUN_ID/ACTOR_EXIT_CODE/ACTOR_DURATION_MS.
+    for stale_key in ("ACTOR_RUN_ID", "ACTOR_EXIT_CODE", "ACTOR_DURATION_MS"):
+        env.pop(stale_key, None)
 
     run_start_mono = time.monotonic()
     try:
@@ -486,17 +500,19 @@ def cmd_interactive(
         final = Status.DONE if exit_code == 0 else Status.ERROR
         db.update_run_status(run_id, final, exit_code)
 
-    _fire_after_run(
-        hooks=hooks,
-        hook_runner=hook_runner,
-        name=name,
-        actor_dir=dir_path,
-        actor_agent=actor.agent.as_str(),
-        session_id=session_id,
-        run_id=run_id,
-        exit_code=exit_code,
-        duration_ms=duration_ms,
-    )
+        # See cmd_run — after-run must not fire when cmd_stop already
+        # owns the final status, or the hook env and DB would disagree.
+        _fire_after_run(
+            hooks=hooks,
+            hook_runner=hook_runner,
+            name=name,
+            actor_dir=dir_path,
+            actor_agent=actor.agent.as_str(),
+            session_id=session_id,
+            run_id=run_id,
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+        )
 
     if stopped_by_race:
         return exit_code, f"Interactive session for '{name}' stopped."

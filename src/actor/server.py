@@ -273,6 +273,13 @@ def new_actor(
 
     if prompt is not None:
         prompt = prompt.strip()
+    # Mirror cli.py: if the caller passed a template but no prompt, fall
+    # back to the template's prompt so `new_actor(name=..., template=...)`
+    # behaves the same as `actor new <name> --template ...` at the CLI.
+    if not prompt and template is not None:
+        tpl = app_config.templates.get(template)
+        if tpl is not None and tpl.prompt:
+            prompt = tpl.prompt
     if prompt:
         try:
             _spawn_background_run(name, prompt, config_pairs=[], ctx=ctx)
