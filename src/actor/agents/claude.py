@@ -7,48 +7,54 @@ import subprocess
 import threading
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 from ..errors import ActorError
 from ..interfaces import Agent, LogEntry, LogEntryKind
-from ..types import Config
+from ..types import ActorConfig
 
 
 class ClaudeAgent(Agent):
+    AGENT_DEFAULTS: Dict[str, str] = {
+        "permission-mode": "auto",
+    }
+    ACTOR_DEFAULTS: Dict[str, str] = {
+        "use-subscription": "true",
+    }
+
     def __init__(self) -> None:
         self._children: Dict[int, subprocess.Popen] = {}  # type: ignore[type-arg]
         self._lock = threading.Lock()
 
-    # Config keys that are handled specially and not passed as CLI flags
-    _INTERNAL_KEYS = {"strip-api-keys"}
+    def emit_agent_args(self, defaults: Dict[str, str]) -> List[str]:
+        """Map the resolved `agent_args` dict to claude CLI flags.
 
-    @staticmethod
-    def _config_args(config: Config) -> List[str]:
-        """Build common config flags. Each key becomes --key value.
-        Empty values become bare flags (--key). Internal keys are skipped."""
+        Straight mapping: `key "value"` → `--key value`; empty string becomes
+        a bare `--key`. `None` values are skipped defensively — ActorConfig
+        is supposed to contain only concrete strings (the cmd_new resolver
+        strips kdl-layer `None` cancel markers), but we drop them here too
+        so a misrouted caller can't feed `None` into subprocess.Popen."""
         args: List[str] = []
-        for key, value in sorted(config.items()):
-            if key in ClaudeAgent._INTERNAL_KEYS:
+        for key, value in sorted(defaults.items()):
+            if value is None:
                 continue
             args.append(f"--{key}")
-            if value:
+            if value != "":
                 args.append(value)
         return args
 
-    @staticmethod
-    def _permission_args(config: Config) -> List[str]:
-        """Build permission flags from config."""
-        mode = config.get("permission-mode", "bypassPermissions")
-        if mode == "bypassPermissions":
-            return ["--dangerously-skip-permissions"]
-        return ["--permission-mode", mode]
+    def apply_actor_keys(
+        self, actor_keys: Dict[str, str], env: Mapping[str, str]
+    ) -> Dict[str, str]:
+        """Strip ANTHROPIC_API_KEY from the env when use-subscription is on
+        (default true) so Claude falls back to the logged-in subscription."""
+        out = dict(env)
+        if actor_keys.get("use-subscription", "true") != "false":
+            out.pop("ANTHROPIC_API_KEY", None)
+        return out
 
-    def _spawn_and_track(self, args: List[str], cwd: Path, config: Config) -> int:
-        strip = config.get("strip-api-keys", "true") != "false"
-        if strip:
-            env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-        else:
-            env = dict(os.environ)
+    def _spawn_and_track(self, args: List[str], cwd: Path, config: ActorConfig) -> int:
+        env = self.apply_actor_keys(config.actor_keys, os.environ)
         proc = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
@@ -80,31 +86,29 @@ class ClaudeAgent(Agent):
     # orchestrate their own children identically to the top-level Claude session.
     _CHANNEL_ARGS = ["--dangerously-load-development-channels", "server:actor"]
 
-    def start(self, dir: Path, prompt: str, config: Config) -> Tuple[int, Optional[str]]:
+    def start(self, dir: Path, prompt: str, config: ActorConfig) -> Tuple[int, Optional[str]]:
         session_id = str(uuid.uuid4())
         args = [
             "claude",
             *self._CHANNEL_ARGS,
             "-p",
-            *self._permission_args(config),
             "--session-id",
             session_id,
-            *self._config_args(config),
+            *self.emit_agent_args(config.agent_args),
             "--",
             prompt,
         ]
         pid = self._spawn_and_track(args, dir, config)
         return pid, session_id
 
-    def resume(self, dir: Path, session_id: str, prompt: str, config: Config) -> int:
+    def resume(self, dir: Path, session_id: str, prompt: str, config: ActorConfig) -> int:
         args = [
             "claude",
             *self._CHANNEL_ARGS,
             "-p",
-            *self._permission_args(config),
             "--resume",
             session_id,
-            *self._config_args(config),
+            *self.emit_agent_args(config.agent_args),
             "--",
             prompt,
         ]
@@ -209,13 +213,12 @@ class ClaudeAgent(Agent):
 
         return entries
 
-    def interactive_argv(self, session_id: str, config: Config) -> List[str]:
+    def interactive_argv(self, session_id: str, config: ActorConfig) -> List[str]:
         return [
             "claude",
             *self._CHANNEL_ARGS,
-            *self._permission_args(config),
             "--resume", session_id,
-            *self._config_args(config),
+            *self.emit_agent_args(config.agent_args),
         ]
 
     def stop(self, pid: int) -> None:

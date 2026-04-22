@@ -9,13 +9,49 @@ from .errors import ActorError, AlreadyExistsError, NotFoundError
 from .interfaces import ProcessManager
 from .types import (
     Actor,
+    ActorConfig,
     AgentKind,
-    Config,
     Run,
     Status,
     _now_iso,
     _sorted_config,
 )
+
+
+def _actor_config_to_json(cfg: ActorConfig) -> str:
+    """Serialize an ActorConfig to the on-disk JSON shape.
+
+    Shape: `{"actor_keys": {...}, "agent_args": {...}}` — mirrors the
+    dataclass fields 1:1. Both sub-dicts are stored sorted so rows are
+    deterministic and diff-friendly when inspected.
+
+    This is a breaking schema change vs. the pre-refactor flat dict. There
+    is no migration — the repo is pre-1.0 and the refactor directive
+    accepts a hard break of existing `~/.actor/actor.db` files."""
+    return json.dumps({
+        "actor_keys": _sorted_config(cfg.actor_keys),
+        "agent_args": _sorted_config(cfg.agent_args),
+    })
+
+
+def _json_to_actor_config(s: str) -> ActorConfig:
+    """Deserialize the JSON column back into an ActorConfig.
+
+    Missing sub-dicts default to empty, so a row stamped as the legacy
+    empty dict `"{}"` yields `ActorConfig()` rather than blowing up. Any
+    other unexpected shape (e.g. non-dict sub-fields) raises via the
+    dataclass constructor."""
+    if not s:
+        return ActorConfig()
+    data = json.loads(s)
+    if not isinstance(data, dict):
+        raise ActorError(f"config JSON must be a dict, got {type(data).__name__}")
+    actor_keys = data.get("actor_keys", {}) or {}
+    agent_args = data.get("agent_args", {}) or {}
+    return ActorConfig(
+        actor_keys=_sorted_config(actor_keys),
+        agent_args=_sorted_config(agent_args),
+    )
 
 
 class Database:
@@ -86,7 +122,7 @@ class Database:
     # -- Actor CRUD --
 
     def insert_actor(self, actor: Actor) -> None:
-        config_json = json.dumps(_sorted_config(actor.config))
+        config_json = _actor_config_to_json(actor.config)
         try:
             self._conn.execute(
                 """INSERT INTO actors
@@ -167,8 +203,8 @@ class Database:
         if cur.rowcount == 0:
             raise NotFoundError(name)
 
-    def update_actor_config(self, name: str, config: Config) -> None:
-        config_json = json.dumps(_sorted_config(config))
+    def update_actor_config(self, name: str, config: ActorConfig) -> None:
+        config_json = _actor_config_to_json(config)
         now = _now_iso()
         cur = self._conn.execute(
             "UPDATE actors SET config = ?, updated_at = ? WHERE name = ?",
@@ -181,7 +217,7 @@ class Database:
     # -- Run CRUD --
 
     def insert_run(self, run: Run) -> int:
-        config_json = json.dumps(_sorted_config(run.config))
+        config_json = _actor_config_to_json(run.config)
         cur = self._conn.execute(
             """INSERT INTO runs
                (actor_name, prompt, status, exit_code, pid, config, started_at, finished_at)
@@ -274,7 +310,6 @@ class Database:
 
     @staticmethod
     def _row_to_actor(row: tuple) -> Actor:
-        config: Config = json.loads(row[8]) if row[8] else {}
         return Actor(
             name=row[0],
             agent=AgentKind.from_str(row[1]),
@@ -284,14 +319,13 @@ class Database:
             base_branch=row[5],
             worktree=bool(row[6]),
             parent=row[7],
-            config=_sorted_config(config),
+            config=_json_to_actor_config(row[8]),
             created_at=row[9],
             updated_at=row[10],
         )
 
     @staticmethod
     def _row_to_run(row: tuple) -> Run:
-        config: Config = json.loads(row[6]) if row[6] else {}
         return Run(
             id=row[0],
             actor_name=row[1],
@@ -299,7 +333,7 @@ class Database:
             status=Status.from_str(row[3]),
             exit_code=row[4],
             pid=row[5],
-            config=_sorted_config(config),
+            config=_json_to_actor_config(row[6]),
             started_at=row[7],
             finished_at=row[8],
         )

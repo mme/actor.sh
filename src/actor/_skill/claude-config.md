@@ -1,6 +1,14 @@
 # Claude Agent Configuration
 
-All options below are set via `--config key=value` on `actor new` or `actor config`. They are passed to `claude` on every run.
+All options below are set via `--config key=value` on `actor new` or `actor config`. Most are passed straight through to `claude` as `--key value` on every run; a few (listed as "actor-sh interpreted") are consumed by actor-sh itself and never reach the agent binary.
+
+## Use Subscription
+
+Actor-sh interpreted. When `true` (the default), actor-sh strips `ANTHROPIC_API_KEY` from the agent's environment so Claude uses the logged-in `claude` subscription. Set to `false` to keep the API key and bill requests against it.
+
+```
+actor new my-feature --config use-subscription=false
+```
 
 ## Model
 
@@ -21,8 +29,8 @@ actor new my-feature --config permission-mode=auto
 ```
 
 Options:
-- `bypassPermissions` (default) — skip all permission checks, fully autonomous
-- `auto` — agent decides when to ask for approval
+- `auto` (default) — agent decides when to ask for approval; in an actor worktree this is effectively autonomous
+- `bypassPermissions` — skip all permission checks (reachable by setting `permission-mode=bypassPermissions` explicitly)
 - `acceptEdits` — auto-approve file edits, ask for other actions
 - `default` — standard permission prompts
 - `dontAsk` — never ask, skip actions that need approval

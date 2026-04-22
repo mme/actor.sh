@@ -20,8 +20,8 @@ if TYPE_CHECKING:
 from .interfaces import Agent, GitOps, LogEntry, LogEntryKind, ProcessManager, binary_exists
 from .types import (
     Actor,
+    ActorConfig,
     AgentKind,
-    Config,
     Run,
     Status,
     _now_iso,
@@ -76,13 +76,21 @@ def _format_duration(started_at: str, finished_at: Optional[str]) -> str:
     return f"{remainder}s"
 
 
-def _create_agent(kind: AgentKind) -> Agent:
-    if kind == AgentKind.CLAUDE:
-        return ClaudeAgent()
-    elif kind == AgentKind.CODEX:
-        return CodexAgent()
-    else:
+_AGENT_CLASS_BY_KIND = {
+    AgentKind.CLAUDE: ClaudeAgent,
+    AgentKind.CODEX: CodexAgent,
+}
+
+
+def _agent_class(kind: AgentKind):
+    try:
+        return _AGENT_CLASS_BY_KIND[kind]
+    except KeyError:
         raise ActorError(f"unknown agent kind: {kind}")
+
+
+def _create_agent(kind: AgentKind) -> Agent:
+    return _agent_class(kind)()
 
 
 
@@ -115,7 +123,7 @@ def cmd_new(
     no_worktree: bool,
     base: Optional[str],
     agent_name: Optional[str],
-    config_pairs: List[str],
+    cli_overrides: ActorConfig,
     template_name: Optional[str] = None,
     app_config: Optional["AppConfig"] = None,
 ) -> Actor:
@@ -135,11 +143,57 @@ def cmd_new(
     if not binary_exists(agent_kind.binary_name):
         print(f"warning: '{agent_kind.binary_name}' not found on PATH", file=sys.stderr)
 
-    # Config precedence: template's config is the base; CLI pairs overlay on top.
-    config: Dict[str, str] = dict(template.config) if template else {}
-    for k, v in parse_config(config_pairs).items():
-        config[k] = v
-    config = _sorted_config(config)
+    # Config precedence (lowest → highest), merged into two side-by-side
+    # dicts (actor_keys, agent_args) — the split is preserved positionally
+    # across every layer; nothing downstream reconstructs it via name lookup:
+    #   1. Agent class defaults (ACTOR_DEFAULTS / AGENT_DEFAULTS baseline)
+    #   2. kdl `agent "<name>" { ... }` block for this agent_kind
+    #   3. Template config (kdl template is a flat namespace; we partition
+    #      each key here using the agent class's ACTOR_DEFAULTS whitelist)
+    #   4. CLI overrides (already structured by the CLI layer, which also
+    #      validates that `--config` keys don't collide with actor-keys)
+    # Only layer 2 can carry `None` (kdl's `null` cancel marker). The other
+    # layers are typed `Dict[str, str]` and contribute only concrete values.
+    agent_cls = _agent_class(agent_kind)
+    merged_actor_keys: Dict[str, Optional[str]] = dict(agent_cls.ACTOR_DEFAULTS)
+    merged_agent_args: Dict[str, Optional[str]] = dict(agent_cls.AGENT_DEFAULTS)
+
+    # Layer 2: kdl agent_defaults for this agent_kind (if any). `None` values
+    # cancel lower-precedence entries by popping them from the bucket.
+    if app_config is not None:
+        kdl_defaults = app_config.agent_defaults.get(agent_kind.value)
+        if kdl_defaults is not None:
+            for k, v in kdl_defaults.actor_keys.items():
+                if v is None:
+                    merged_actor_keys.pop(k, None)
+                else:
+                    merged_actor_keys[k] = v
+            for k, v in kdl_defaults.agent_args.items():
+                if v is None:
+                    merged_agent_args.pop(k, None)
+                else:
+                    merged_agent_args[k] = v
+
+    # Layer 3: template config. The kdl template namespace is flat, so we
+    # partition by checking each key against the agent's ACTOR_DEFAULTS
+    # whitelist — this is an input-boundary split, not runtime routing.
+    if template is not None:
+        for k, v in template.config.items():
+            if k in agent_cls.ACTOR_DEFAULTS:
+                merged_actor_keys[k] = v
+            else:
+                merged_agent_args[k] = v
+
+    # Layer 4: CLI overrides (already split by the CLI layer).
+    for k, v in cli_overrides.actor_keys.items():
+        merged_actor_keys[k] = v
+    for k, v in cli_overrides.agent_args.items():
+        merged_agent_args[k] = v
+
+    config = ActorConfig(
+        actor_keys=_sorted_config({k: v for k, v in merged_actor_keys.items() if v is not None}),
+        agent_args=_sorted_config({k: v for k, v in merged_agent_args.items() if v is not None}),
+    )
 
     if dir is not None:
         try:
@@ -209,7 +263,7 @@ def cmd_run(
     proc_mgr: ProcessManager,
     name: str,
     prompt: str,
-    config_pairs: List[str],
+    cli_overrides: ActorConfig,
 ) -> str:
     actor = db.get_actor(name)
 
@@ -229,12 +283,18 @@ def cmd_run(
             f"actor directory '{actor.dir}' does not exist \u2014 use 'actor discard {name}' to clean up"
         )
 
-    # Merge config: actor defaults + run overrides
-    run_overrides = parse_config(config_pairs)
-    effective_config = dict(actor.config)
-    for k, v in run_overrides.items():
-        effective_config[k] = v
-    effective_config = _sorted_config(effective_config)
+    # Merge config: actor defaults + run overrides. The split is preserved
+    # — actor_keys and agent_args are layered independently. cli_overrides
+    # is already structured by the CLI (--config pairs are agent_args only,
+    # validated at the CLI boundary).
+    merged_actor_keys = dict(actor.config.actor_keys)
+    merged_actor_keys.update(cli_overrides.actor_keys)
+    merged_agent_args = dict(actor.config.agent_args)
+    merged_agent_args.update(cli_overrides.agent_args)
+    effective_config = ActorConfig(
+        actor_keys=_sorted_config(merged_actor_keys),
+        agent_args=_sorted_config(merged_agent_args),
+    )
 
     dir_p = Path(actor.dir)
 
@@ -445,8 +505,14 @@ def cmd_show(db: Database, pm: ProcessManager, name: str, runs_limit: int) -> st
     if actor.base_branch is not None:
         output += f"Base:      {actor.base_branch}\n"
 
-    if actor.config:
-        pairs = [f"{k}={v}" for k, v in sorted(actor.config.items())]
+    # Display-only: merge both buckets for the user-facing `Config:` line.
+    # Both dicts are disjoint by construction (an ACTOR_DEFAULTS key only
+    # lands in actor_keys; everything else lands in agent_args), so the
+    # merge is lossless.
+    if actor.config.actor_keys or actor.config.agent_args:
+        flat = dict(actor.config.agent_args)
+        flat.update(actor.config.actor_keys)
+        pairs = [f"{k}={v}" for k, v in sorted(flat.items())]
         output += f"Config:    {', '.join(pairs)}\n"
 
     if actor.agent_session is not None:
@@ -551,18 +617,34 @@ def cmd_config(db: Database, name: str, config_pairs: List[str]) -> str:
     actor = db.get_actor(name)
 
     if not config_pairs:
+        # Display merged view — both dicts are disjoint by construction so
+        # the flatten for display is lossless.
+        flat = dict(actor.config.agent_args)
+        flat.update(actor.config.actor_keys)
         output = ""
-        for key, value in sorted(actor.config.items()):
+        for key, value in sorted(flat.items()):
             output += f"{key}={value}\n"
         return output
 
-    new_config = parse_config(config_pairs)
+    # Partition new pairs into actor_keys / agent_args using the actor's
+    # agent class whitelist. This is the single boundary where user-entered
+    # flat pairs get lifted into the split structure; the merge itself and
+    # all downstream layers operate positionally.
+    updates = parse_config(config_pairs)
+    agent_cls = _agent_class(actor.agent)
+    new_actor_keys = dict(actor.config.actor_keys)
+    new_agent_args = dict(actor.config.agent_args)
+    for k, v in updates.items():
+        if k in agent_cls.ACTOR_DEFAULTS:
+            new_actor_keys[k] = v
+        else:
+            new_agent_args[k] = v
+    new_config = ActorConfig(
+        actor_keys=_sorted_config(new_actor_keys),
+        agent_args=_sorted_config(new_agent_args),
+    )
 
-    merged = dict(actor.config)
-    for key, value in new_config.items():
-        merged[key] = value
-
-    db.update_actor_config(name, _sorted_config(merged))
+    db.update_actor_config(name, new_config)
 
     return f"{name} config updated"
 
@@ -671,16 +753,6 @@ def encode_dir(dir_path) -> str:
 def claude_session_file_path(dir_path, session_id: str) -> str:
     """Public wrapper for ClaudeAgent._session_file_path. Returns string path."""
     return str(ClaudeAgent._session_file_path(Path(dir_path), session_id))
-
-
-def claude_config_args(config: Config) -> List[str]:
-    """Public wrapper for ClaudeAgent._config_args."""
-    return ClaudeAgent._config_args(config)
-
-
-def codex_config_args(config: Config) -> List[str]:
-    """Public wrapper for CodexAgent._config_args."""
-    return CodexAgent._config_args(config)
 
 
 def claude_read_logs(path: str) -> List[LogEntry]:

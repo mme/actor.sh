@@ -26,7 +26,7 @@ from .types import (
     Status,
     Actor,
     Run,
-    Config,
+    ActorConfig,
     validate_name,
     parse_config,
     _now_iso,
@@ -35,7 +35,7 @@ from .types import (
 )
 
 # Config
-from .config import AppConfig, Template, load_config
+from .config import AgentDefaults, AppConfig, Template, load_config
 
 # Interfaces
 from .interfaces import (
@@ -77,8 +77,6 @@ from .commands import (
     worktree_path,
     encode_dir,
     claude_session_file_path,
-    claude_config_args,
-    codex_config_args,
     claude_read_logs,
 )
 
@@ -86,6 +84,8 @@ from .commands import (
 from .cli import main, _build_parser, _db_path, _create_agent
 
 __all__ = [
+    # Version
+    "__version__",
     # Errors
     "ActorError",
     "AlreadyExistsError",
@@ -101,10 +101,11 @@ __all__ = [
     "Status",
     "Actor",
     "Run",
-    "Config",
+    "ActorConfig",
     "validate_name",
     "parse_config",
     # Config
+    "AgentDefaults",
     "AppConfig",
     "Template",
     "load_config",
@@ -141,8 +142,6 @@ __all__ = [
     "worktree_path",
     "encode_dir",
     "claude_session_file_path",
-    "claude_config_args",
-    "codex_config_args",
     "claude_read_logs",
     # CLI
     "main",

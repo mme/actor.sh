@@ -11,9 +11,9 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
-from actor import __version__
+from actor import ActorConfig, __version__
 from actor.cli import main
-from actor.errors import ActorError
+from actor.errors import ActorError, ConfigError
 
 
 class VersionFlagTests(unittest.TestCase):
@@ -89,7 +89,7 @@ class NewCommandTests(unittest.TestCase):
         kwargs = cmd_run.call_args.kwargs
         self.assertEqual(kwargs["name"], "foo")
         self.assertEqual(kwargs["prompt"], "do x")
-        self.assertEqual(kwargs["config_pairs"], [])  # saved as defaults already
+        self.assertEqual(kwargs["cli_overrides"], ActorConfig())  # saved as defaults already
         self.assertEqual(code, 0)
 
     def test_new_with_stdin_prompt_creates_and_runs(self):
@@ -105,30 +105,30 @@ class NewCommandTests(unittest.TestCase):
         cmd_run.assert_not_called()
         self.assertEqual(code, 1)
 
-    def test_new_translates_model_and_strip_api_keys_to_config_pairs(self):
+    def test_new_translates_model_and_use_subscription_to_cli_overrides(self):
         cmd_new, _cmd_run, _code = self._run([
-            "new", "foo", "--model", "sonnet", "--no-strip-api-keys",
+            "new", "foo", "--model", "sonnet", "--no-use-subscription",
         ])
-        pairs = cmd_new.call_args.kwargs["config_pairs"]
-        self.assertIn("model=sonnet", pairs)
-        self.assertIn("strip-api-keys=false", pairs)
+        overrides = cmd_new.call_args.kwargs["cli_overrides"]
+        self.assertEqual(overrides.agent_args.get("model"), "sonnet")
+        self.assertEqual(overrides.actor_keys.get("use-subscription"), "false")
 
-    def test_new_without_strip_api_keys_flag_does_not_emit_override(self):
-        """Tri-state check: omitting both --strip-api-keys and --no-strip-api-keys
-        must NOT push a strip-api-keys pair, so a template's value wins."""
+    def test_new_without_use_subscription_flag_does_not_emit_override(self):
+        """Tri-state check: omitting both --use-subscription and --no-use-subscription
+        must NOT push a use-subscription value, so a template's value wins."""
         cmd_new, _cmd_run, _code = self._run(["new", "foo"])
-        pairs = cmd_new.call_args.kwargs["config_pairs"]
-        self.assertFalse(
-            any(p.startswith("strip-api-keys=") for p in pairs),
-            f"expected no strip-api-keys override, got {pairs}",
+        overrides = cmd_new.call_args.kwargs["cli_overrides"]
+        self.assertNotIn(
+            "use-subscription", overrides.actor_keys,
+            f"expected no use-subscription override, got {overrides.actor_keys}",
         )
 
-    def test_new_explicit_strip_api_keys_flag_emits_true_override(self):
-        """Explicit --strip-api-keys must push strip-api-keys=true so it
-        can override a template's strip-api-keys "false"."""
-        cmd_new, _cmd_run, _code = self._run(["new", "foo", "--strip-api-keys"])
-        pairs = cmd_new.call_args.kwargs["config_pairs"]
-        self.assertIn("strip-api-keys=true", pairs)
+    def test_new_explicit_use_subscription_flag_emits_true_override(self):
+        """Explicit --use-subscription must push use-subscription=true so it
+        can override a template's use-subscription "false"."""
+        cmd_new, _cmd_run, _code = self._run(["new", "foo", "--use-subscription"])
+        overrides = cmd_new.call_args.kwargs["cli_overrides"]
+        self.assertEqual(overrides.actor_keys.get("use-subscription"), "true")
 
     def test_new_passes_template_arg_to_cmd_new_and_uses_template_prompt(self):
         fake_db = MagicMock()
@@ -281,8 +281,12 @@ class NewCommandTests(unittest.TestCase):
 
 class RunCommandTests(unittest.TestCase):
     def test_run_passes_config_overrides(self):
+        from actor.types import AgentKind
         cmd_run = MagicMock(return_value="ok")
         fake_db = MagicMock()
+        # cli.main resolves the actor's agent kind before building cli_overrides;
+        # pin it so _agent_class sees a valid kind (not a MagicMock attribute).
+        fake_db.get_actor.return_value.agent = AgentKind.CLAUDE
         with patch("actor.cli.cmd_run", cmd_run), \
              patch("actor.cli.Database") as db_cls, \
              patch("actor.cli._create_agent", return_value=MagicMock()):
@@ -292,7 +296,9 @@ class RunCommandTests(unittest.TestCase):
             with patch("sys.stdin", stdin):
                 main(["run", "foo", "--config", "model=opus", "do x"])
         cmd_run.assert_called_once()
-        self.assertEqual(cmd_run.call_args.kwargs["config_pairs"], ["model=opus"])
+        overrides = cmd_run.call_args.kwargs["cli_overrides"]
+        self.assertEqual(overrides.agent_args.get("model"), "opus")
+        self.assertEqual(overrides.actor_keys, {})
 
     def test_run_dash_i_dispatches_to_cmd_interactive(self):
         """`actor run foo -i` must route through cmd_interactive, not cmd_run."""
@@ -390,7 +396,7 @@ class SubClaudeChannelTests(unittest.TestCase):
             return 12345
 
         with patch.object(ClaudeAgent, "_spawn_and_track", fake_spawn):
-            agent.start(Path("/tmp"), "hi", {})
+            agent.start(Path("/tmp"), "hi", ActorConfig())
 
         self.assertIn("--dangerously-load-development-channels", captured["args"])
         idx = captured["args"].index("--dangerously-load-development-channels")
@@ -408,7 +414,7 @@ class SubClaudeChannelTests(unittest.TestCase):
             return 12345
 
         with patch.object(ClaudeAgent, "_spawn_and_track", fake_spawn):
-            agent.resume(Path("/tmp"), "some-session", "continue", {})
+            agent.resume(Path("/tmp"), "some-session", "continue", ActorConfig())
 
         self.assertIn("--dangerously-load-development-channels", captured["args"])
 
@@ -470,10 +476,91 @@ class McpToolTests(unittest.TestCase):
 
     def test_run_actor_forwards_config(self):
         from actor import server
-        with patch("actor.server._spawn_background_run") as spawn:
+        from actor.types import AgentKind
+        # server.run_actor reads the actor's agent kind to validate --config;
+        # pin it to a real kind so _agent_class doesn't reject a MagicMock.
+        with patch("actor.server._db") as db_fn, \
+             patch("actor.server._spawn_background_run") as spawn:
+            db_fn.return_value.get_actor.return_value.agent = AgentKind.CLAUDE
             server.run_actor(name="foo", prompt="do x", config=["model=opus"])
         args, kwargs = spawn.call_args
-        self.assertEqual(kwargs["config_pairs"], ["model=opus"])
+        overrides = kwargs["cli_overrides"]
+        self.assertEqual(overrides.agent_args.get("model"), "opus")
+        self.assertEqual(overrides.actor_keys, {})
+
+    # -- use_subscription param on new_actor ----------------------------------
+
+    def _capture_new_actor_overrides(self, **kwargs) -> ActorConfig:
+        """Invoke server.new_actor with no prompt, return cli_overrides cmd_new saw."""
+        from actor import server
+        with patch("actor.server.cmd_new") as cmd_new, \
+             patch("actor.server._spawn_background_run") as spawn:
+            fake_actor = MagicMock()
+            fake_actor.dir = "/tmp/foo"
+            cmd_new.return_value = fake_actor
+            server.new_actor(name="foo", **kwargs)
+        spawn.assert_not_called()
+        return cmd_new.call_args.kwargs["cli_overrides"]
+
+    def test_new_actor_use_subscription_true_sets_actor_key(self):
+        overrides = self._capture_new_actor_overrides(use_subscription=True)
+        self.assertEqual(overrides.actor_keys, {"use-subscription": "true"})
+        self.assertEqual(overrides.agent_args, {})
+
+    def test_new_actor_use_subscription_false_sets_actor_key(self):
+        overrides = self._capture_new_actor_overrides(use_subscription=False)
+        self.assertEqual(overrides.actor_keys, {"use-subscription": "false"})
+        self.assertEqual(overrides.agent_args, {})
+
+    def test_new_actor_use_subscription_default_none_emits_nothing(self):
+        """Tri-state: omitting the param leaves actor_keys empty so lower
+        layers (template / kdl / class default) supply the value."""
+        overrides = self._capture_new_actor_overrides()
+        self.assertEqual(overrides.actor_keys, {})
+
+    def test_new_actor_rejects_use_subscription_via_config(self):
+        from actor import server
+        with patch("actor.server.cmd_new") as cmd_new:
+            with self.assertRaises(ConfigError):
+                server.new_actor(name="foo", config=["use-subscription=true"])
+        cmd_new.assert_not_called()
+
+    # -- use_subscription param on run_actor ----------------------------------
+
+    def _capture_run_actor_overrides(self, **kwargs) -> ActorConfig:
+        from actor import server
+        from actor.types import AgentKind
+        with patch("actor.server._db") as db_fn, \
+             patch("actor.server._spawn_background_run") as spawn:
+            db_fn.return_value.get_actor.return_value.agent = AgentKind.CLAUDE
+            server.run_actor(name="foo", prompt="do x", **kwargs)
+        return spawn.call_args.kwargs["cli_overrides"]
+
+    def test_run_actor_use_subscription_true_sets_actor_key(self):
+        overrides = self._capture_run_actor_overrides(use_subscription=True)
+        self.assertEqual(overrides.actor_keys, {"use-subscription": "true"})
+        self.assertEqual(overrides.agent_args, {})
+
+    def test_run_actor_use_subscription_false_sets_actor_key(self):
+        overrides = self._capture_run_actor_overrides(use_subscription=False)
+        self.assertEqual(overrides.actor_keys, {"use-subscription": "false"})
+        self.assertEqual(overrides.agent_args, {})
+
+    def test_run_actor_use_subscription_default_none_emits_nothing(self):
+        overrides = self._capture_run_actor_overrides()
+        self.assertEqual(overrides.actor_keys, {})
+
+    def test_run_actor_rejects_use_subscription_via_config(self):
+        from actor import server
+        from actor.types import AgentKind
+        with patch("actor.server._db") as db_fn, \
+             patch("actor.server._spawn_background_run") as spawn:
+            db_fn.return_value.get_actor.return_value.agent = AgentKind.CLAUDE
+            with self.assertRaises(ConfigError):
+                server.run_actor(
+                    name="foo", prompt="do x", config=["use-subscription=true"],
+                )
+        spawn.assert_not_called()
 
 
 if __name__ == "__main__":

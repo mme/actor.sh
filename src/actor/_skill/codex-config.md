@@ -1,18 +1,28 @@
 # Codex Agent Configuration
 
-All options below are set via `--config key=value` on `actor new` or `actor config`. They are passed to `codex` on every run.
+All options below are set via `--config key=value` on `actor new` or `actor config`. Most are passed straight through to `codex` as CLI flags on every run (one-character keys like `m`, `a` become short flags `-m`, `-a`; longer keys become `--key value`); a few (listed as "actor-sh interpreted") are consumed by actor-sh itself and never reach the agent binary.
 
-## Model
+Codex uses its native flag names verbatim — the key you write in config is the flag name Codex receives. This is different from the Claude agent's semantic long-flag naming.
+
+## Use Subscription
+
+Actor-sh interpreted. When `true` (the default), actor-sh strips `OPENAI_API_KEY` from the agent's environment so Codex uses the logged-in `codex` subscription. Set to `false` to keep the API key and bill requests against it.
+
+```
+actor new my-feature --agent codex --config use-subscription=false
+```
+
+## Model (`m`)
 
 Select which model to use. Can also be set via `--model` on `actor new`.
 
 ```
-actor new my-feature --agent codex --config model=o3
+actor new my-feature --agent codex --config m=o3
 ```
 
 Default: agent's default model.
 
-## Sandbox
+## Sandbox (`sandbox`)
 
 Controls the sandbox policy for shell commands.
 
@@ -25,22 +35,18 @@ Options:
 - `workspace-write` — allow writes only in the workspace
 - `read-only` — no writes allowed
 
-When neither `sandbox` nor `approval` is set, the default is `--dangerously-bypass-approvals-and-sandbox` (full access, no approval prompts).
-
-## Approval
+## Approval (`a`)
 
 Controls when the agent asks for approval before running commands.
 
 ```
-actor new my-feature --agent codex --config approval=on-request
+actor new my-feature --agent codex --config a=on-request
 ```
 
 Options:
 - `never` (default) — never ask, execute everything
 - `on-request` — agent decides when to ask
 - `untrusted` — only auto-approve trusted commands (ls, cat, etc.)
-
-When neither `sandbox` nor `approval` is set, the default is `--dangerously-bypass-approvals-and-sandbox` (full access, no approval prompts).
 
 ## Additional Directories
 

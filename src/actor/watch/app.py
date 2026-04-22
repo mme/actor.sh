@@ -298,7 +298,8 @@ class ActorWatchApp(App):
 
         status = self._prev_statuses.get(actor.name, Status.IDLE)
         info = self.query_one("#info-content", Static)
-        config_str = "\n".join(f"  {k}={v}" for k, v in sorted(actor.config.items())) if actor.config else "  (none)"
+        flat_config = {**actor.config.agent_args, **actor.config.actor_keys}
+        config_str = "\n".join(f"  {k}={v}" for k, v in sorted(flat_config.items())) if flat_config else "  (none)"
         info.update(
             f"Name:      {actor.name}\n"
             f"Agent:     {actor.agent.value}\n"
@@ -547,7 +548,7 @@ class ActorWatchApp(App):
                     agent=_create_agent(actor.agent),
                     session_id=actor.agent_session,
                     cwd=Path(actor.dir),
-                    config=dict(actor.config),
+                    config=actor.config,
                 )
             except Exception as e:
                 self.notify(f"failed to start interactive session: {e}", severity="error")

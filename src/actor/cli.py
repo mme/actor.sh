@@ -6,15 +6,15 @@ import sys
 from typing import List, Optional
 
 from . import __version__
-from .errors import ActorError
+from .errors import ActorError, ConfigError
 from .interfaces import Agent
-from .types import AgentKind, Status
+from .types import ActorConfig, AgentKind, Status, parse_config
 from .db import Database
 from .git import RealGit
 from .process import RealProcessManager
-from .agents.claude import ClaudeAgent
-from .agents.codex import CodexAgent
 from .commands import (
+    _agent_class,
+    _create_agent as _create_agent_impl,
     cmd_config,
     cmd_discard,
     cmd_interactive,
@@ -28,12 +28,57 @@ from .commands import (
 
 
 def _create_agent(kind: AgentKind) -> Agent:
-    if kind == AgentKind.CLAUDE:
-        return ClaudeAgent()
-    elif kind == AgentKind.CODEX:
-        return CodexAgent()
-    else:
-        raise ActorError(f"unknown agent kind: {kind}")
+    # Thin re-export of commands._create_agent so existing test patches and
+    # sibling modules (server.py, watch.app) can keep importing from `cli`.
+    return _create_agent_impl(kind)
+
+
+def _resolve_agent_kind_for_cli(
+    cli_agent: Optional[str],
+    template_name: Optional[str],
+    app_config,
+) -> AgentKind:
+    """Replicate cmd_new's agent resolution for CLI-side validation.
+
+    CLI validation of `--config` needs the target agent class to know which
+    keys are actor-keys. Agent precedence mirrors cmd_new: explicit flag →
+    template's `agent` → "claude"."""
+    if cli_agent is not None:
+        return AgentKind.from_str(cli_agent)
+    if template_name is not None and app_config is not None:
+        tpl = app_config.templates.get(template_name)
+        if tpl is not None and tpl.agent:
+            return AgentKind.from_str(tpl.agent)
+    return AgentKind.CLAUDE
+
+
+def _build_cli_overrides(
+    agent_cls,
+    config_pairs: list[str],
+    use_subscription: Optional[bool] = None,
+) -> ActorConfig:
+    """Translate raw CLI inputs into a structured ActorConfig.
+
+    `--config KEY=VALUE` always targets agent_args; if KEY collides with an
+    actor-key name (i.e. appears in the agent class's ACTOR_DEFAULTS), we
+    reject here with a helpful error pointing users at the dedicated flag.
+    Dedicated actor-key flags (currently just `--use-subscription` /
+    `--no-use-subscription`) populate actor_keys directly."""
+    agent_args = parse_config(config_pairs)
+    for key in agent_args:
+        if key in agent_cls.ACTOR_DEFAULTS:
+            # Channel-agnostic: same validation runs for CLI `--config` and
+            # MCP `config=[...]`. Name both dedicated entrypoints so the
+            # message is useful regardless of caller.
+            param = key.replace("-", "_")
+            raise ConfigError(
+                f"{key} is an actor-key and cannot be set via --config / config=[...]; "
+                f"use --{key} / --no-{key} (CLI) or {param}=true/false (MCP) instead."
+            )
+    actor_keys: dict[str, str] = {}
+    if use_subscription is not None:
+        actor_keys["use-subscription"] = "true" if use_subscription else "false"
+    return ActorConfig(actor_keys=actor_keys, agent_args=agent_args)
 
 
 def _db_path() -> str:
@@ -65,7 +110,7 @@ Examples:
   actor new my-feature                              Create (worktree from current repo)
   actor new my-feature "fix the nav bar"            Create and run with a prompt
   actor new my-feature --model sonnet               Use a specific model
-  actor new my-feature --no-strip-api-keys          Pass API keys to the agent
+  actor new my-feature --no-use-subscription        Pass API keys to the agent
   actor new my-feature --no-worktree                Use current directory directly
   actor new my-feature --dir /path/to/repo          Worktree from another repo
   actor new my-feature --base develop               Branch off develop
@@ -81,12 +126,12 @@ Examples:
     p_new.add_argument("--agent", default=None, help="Coding agent to use (defaults to template's agent or 'claude')")
     p_new.add_argument("--template", default=None, help="Apply a template from settings.kdl")
     p_new.add_argument("--model", default=None, help="Model for the agent to use")
-    # Tri-state: default None = "no override" so a template's strip-api-keys
-    # value wins. Explicit --strip-api-keys / --no-strip-api-keys set True/
-    # False and beat the template. When neither CLI nor template sets the
-    # key, it's omitted from config and the agent's own default applies.
-    p_new.add_argument("--strip-api-keys", action="store_const", const=True, default=None, dest="strip_api_keys", help="Strip API keys from environment (default)")
-    p_new.add_argument("--no-strip-api-keys", action="store_const", const=False, dest="strip_api_keys", help="Pass API keys through to the agent")
+    # Tri-state: default None = "no CLI override" so lower precedence layers
+    # (template, kdl agent-block, class default) supply the value. Explicit
+    # --use-subscription / --no-use-subscription force True/False as the
+    # highest-precedence (CLI) layer.
+    p_new.add_argument("--use-subscription", action="store_const", const=True, default=None, dest="use_subscription", help="Use the subscription by stripping API keys from the environment (overrides lower layers)")
+    p_new.add_argument("--no-use-subscription", action="store_const", const=False, dest="use_subscription", help="Pass API keys through to the agent (overrides lower layers)")
     p_new.add_argument("--config", dest="config", action="append", default=[], metavar="KEY=VALUE", help="Config key=value pair (repeat for multiple)")
 
     # -- run --
@@ -341,13 +386,22 @@ def main(argv: Optional[List[str]] = None) -> None:
             from .config import load_config
             app_config = load_config()
 
+            # --config goes into agent_args; --model is an agent_arg too.
+            # --use-subscription is an actor-key, so it routes separately.
             config_pairs = list(args.config)
             if args.model is not None:
                 config_pairs.append(f"model={args.model}")
-            if args.strip_api_keys is not None:
-                config_pairs.append(
-                    f"strip-api-keys={'true' if args.strip_api_keys else 'false'}"
-                )
+
+            agent_kind = _resolve_agent_kind_for_cli(
+                args.agent, args.template, app_config,
+            )
+            agent_cls = _agent_class(agent_kind)
+            cli_overrides = _build_cli_overrides(
+                agent_cls,
+                config_pairs,
+                use_subscription=args.use_subscription,
+            )
+
             actor = cmd_new(
                 db, git,
                 name=args.name,
@@ -355,7 +409,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 no_worktree=args.no_worktree,
                 base=args.base,
                 agent_name=args.agent,
-                config_pairs=config_pairs,
+                cli_overrides=cli_overrides,
                 template_name=args.template,
                 app_config=app_config,
             )
@@ -383,7 +437,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                         db, agent, proc_mgr,
                         name=args.name,
                         prompt=prompt,
-                        config_pairs=[],  # creation flags already saved as defaults
+                        cli_overrides=ActorConfig(),  # creation flags already saved as defaults
                     )
                 except Exception as e:
                     print(f"error: actor created but run failed: {e}", file=sys.stderr)
@@ -411,12 +465,15 @@ def main(argv: Optional[List[str]] = None) -> None:
                 print("error: prompt is required (pass as argument or pipe via stdin, or use -i)", file=sys.stderr)
                 sys.exit(1)
 
-            agent = agent_for(args.name)
+            actor_row = db.get_actor(args.name)
+            agent_cls = _agent_class(actor_row.agent)
+            cli_overrides = _build_cli_overrides(agent_cls, list(args.config))
+            agent = _create_agent(actor_row.agent)
             cmd_run(
                 db, agent, proc_mgr,
                 name=args.name,
                 prompt=prompt,
-                config_pairs=list(args.config),
+                cli_overrides=cli_overrides,
             )
 
         elif args.command == "list":

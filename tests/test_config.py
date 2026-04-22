@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from actor.config import AppConfig, Template, load_config
+from actor.config import AgentDefaults, AppConfig, Template, load_config
 from actor.errors import ConfigError
 
 
@@ -132,9 +132,9 @@ class TestLoadConfigParseShapes(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             p = Path(cwd) / ".actor" / "settings.kdl"
             p.parent.mkdir()
-            p.write_text('template "x" {\n    strip-api-keys true\n}\n')
+            p.write_text('template "x" {\n    use-subscription true\n}\n')
             cfg = load_config(cwd=Path(cwd), home=Path(home))
-            self.assertEqual(cfg.templates["x"].config["strip-api-keys"], "true")
+            self.assertEqual(cfg.templates["x"].config["use-subscription"], "true")
 
     def test_int_value_coerced_without_trailing_zero(self):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
@@ -145,8 +145,9 @@ class TestLoadConfigParseShapes(unittest.TestCase):
             self.assertEqual(cfg.templates["x"].config["max-budget-usd"], "5")
 
     def test_unknown_top_level_nodes_are_ignored(self):
-        # Forward-compat: hooks/agent/alias exist in follow-up tickets but
-        # should parse as no-ops today rather than erroring.
+        # Forward-compat: hooks / alias are reserved for follow-up tickets
+        # #30 / #33 and should parse as no-ops today rather than erroring.
+        # (`agent` is now a first-class node — see TestLoadConfigAgentBlocks.)
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             p = Path(cwd) / ".actor" / "settings.kdl"
             p.parent.mkdir()
@@ -227,6 +228,38 @@ class TestLoadConfigParseStrict(unittest.TestCase):
             "non-empty",
         )
 
+    def test_null_in_template_raises_friendly_error(self):
+        # Null is only meaningful inside `agent { }` blocks (as a cancel
+        # marker). Inside templates it would silently stringify to "None"
+        # or crash with an ugly type error. Reject loudly.
+        self._expect_error(
+            'template "qa" {\n    model null\n}\n',
+            "null",
+        )
+
+    def test_bare_defaults_block_in_agent_raises(self):
+        # A `defaults` block with no children is ambiguous (did the user
+        # mean to unset something? forget to fill it in?). Reject rather
+        # than silently accept a no-op.
+        self._expect_error(
+            'agent "claude" {\n    defaults {\n    }\n}\n',
+            "defaults",
+        )
+
+    def test_actor_key_inside_defaults_block_raises(self):
+        # `use-subscription` is an actor-interpreted flag and must live at
+        # the top of the agent block, not inside `defaults { }` (which is
+        # for agent CLI flags). Let the user fix the shape rather than
+        # silently routing it through the wrong merge lane.
+        self._expect_error(
+            'agent "claude" {\n'
+            '    defaults {\n'
+            '        use-subscription "true"\n'
+            '    }\n'
+            '}\n',
+            "use-subscription",
+        )
+
 
 class TestLoadConfigCoercion(unittest.TestCase):
 
@@ -289,6 +322,206 @@ class TestLoadConfigCwdUnderHome(unittest.TestCase):
             )
             cfg = load_config(cwd=proj, home=home_p)
             self.assertEqual(cfg.templates["qa"].agent, "codex")
+
+
+class TestLoadConfigAgentBlocks(unittest.TestCase):
+
+    def _write(self, path: Path, body: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+
+    def test_agent_defaults_parsed(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    use-subscription false\n'
+                '    defaults {\n'
+                '        permission-mode "bypassPermissions"\n'
+                '        model "opus"\n'
+                '    }\n'
+                '}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            d = cfg.agent_defaults["claude"]
+            self.assertEqual(d.actor_keys, {"use-subscription": "false"})
+            self.assertEqual(
+                d.agent_args,
+                {"permission-mode": "bypassPermissions", "model": "opus"},
+            )
+
+    def test_null_in_defaults_survives_merge_as_cancel_marker(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    defaults {\n'
+                '        permission-mode null\n'
+                '    }\n'
+                '}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            # Null must survive all the way to cmd_new so it can cancel a
+            # lower-precedence class default.
+            self.assertIn("claude", cfg.agent_defaults)
+            self.assertIsNone(
+                cfg.agent_defaults["claude"].agent_args["permission-mode"]
+            )
+
+    def test_unknown_agent_rejected(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(
+                'agent "bogus" {\n'
+                '    defaults {\n'
+                '        x "1"\n'
+                '    }\n'
+                '}\n'
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn("bogus", str(ctx.exception))
+
+    def test_unknown_flat_key_rejected(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(
+                'agent "claude" {\n'
+                '    not-a-real-flat-key "x"\n'
+                '}\n'
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn("not-a-real-flat-key", str(ctx.exception))
+
+    def test_project_agent_defaults_override_user_per_key(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    defaults {\n'
+                '        model "sonnet"\n'
+                '        permission-mode "auto"\n'
+                '    }\n'
+                '}\n',
+            )
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    defaults {\n'
+                '        permission-mode null\n'
+                '    }\n'
+                '}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            d = cfg.agent_defaults["claude"]
+            self.assertEqual(d.agent_args.get("model"), "sonnet")
+            # project layer null wins over user layer "auto" and is preserved
+            # as a cancel marker for cmd_new's class-default merge.
+            self.assertIn("permission-mode", d.agent_args)
+            self.assertIsNone(d.agent_args["permission-mode"])
+
+    def test_project_agent_defaults_actor_key_override(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    use-subscription true\n'
+                '}\n',
+            )
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    use-subscription false\n'
+                '}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            d = cfg.agent_defaults["claude"]
+            self.assertEqual(d.actor_keys.get("use-subscription"), "false")
+
+    def test_defaults_block_at_template_level_rejected(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(
+                'template "qa" {\n'
+                '    defaults {\n'
+                '        model "opus"\n'
+                '    }\n'
+                '}\n'
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn("reserved", str(ctx.exception))
+
+    def test_codex_agent_defaults_parsed(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'agent "codex" {\n'
+                '    defaults {\n'
+                '        m "o3"\n'
+                '        sandbox "read-only"\n'
+                '    }\n'
+                '}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            d = cfg.agent_defaults["codex"]
+            self.assertEqual(d.agent_args, {"m": "o3", "sandbox": "read-only"})
+
+    def test_duplicate_agent_block_rejected(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(
+                'agent "claude" {\n'
+                '    use-subscription true\n'
+                '}\n'
+                'agent "claude" {\n'
+                '    use-subscription false\n'
+                '}\n'
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn("claude", str(ctx.exception))
+
+    def test_agent_block_without_name_rejected(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(
+                'agent {\n'
+                '    defaults {\n'
+                '        model "opus"\n'
+                '    }\n'
+                '}\n'
+            )
+            with self.assertRaises(ConfigError):
+                load_config(cwd=Path(cwd), home=Path(home))
+
+    def test_null_flat_key_survives_merge(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    use-subscription true\n'
+                '}\n',
+            )
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'agent "claude" {\n'
+                '    use-subscription null\n'
+                '}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            # Project layer null wins over user layer "true" and is preserved
+            # so cmd_new can cancel the class ACTOR_DEFAULTS entry.
+            self.assertIn("claude", cfg.agent_defaults)
+            self.assertIsNone(
+                cfg.agent_defaults["claude"].actor_keys["use-subscription"]
+            )
 
 
 if __name__ == "__main__":
