@@ -31,6 +31,10 @@ from .interactive.manager import InteractiveSessionManager
 from .interactive.widget import TerminalWidget
 from .patches import apply_patches
 from .splash import Splash
+from .omarchy_theme import (
+    apply_omarchy_flavor,
+    omarchy_theme_mtime,
+)
 from .themes import CLAUDE_DARK, CLAUDE_LIGHT
 from .tree import ActorTree
 from .helpers import read_log_entries, compute_diff
@@ -183,7 +187,21 @@ class ActorWatchApp(App):
     def on_ready(self) -> None:
         self.register_theme(CLAUDE_DARK)
         self.register_theme(CLAUDE_LIGHT)
-        self.theme = "claude-dark"
+
+        # Prefer omarchy's palette when we detect it; fall back to the
+        # hardcoded Claude themes otherwise. Live-reload below keeps us
+        # in sync with `omarchy theme set <name>`.
+        self._omarchy_mtime: float | None = None
+        if not self._try_apply_omarchy_theme():
+            self.theme = "claude-dark"
+
+        # SIGUSR2 → re-read palette NOW. Used by the optional
+        # `~/.config/omarchy/hooks/theme-set` hook installed via
+        # `actor setup --for omarchy` to get instant theme swaps (the
+        # 3s interval below is the no-setup fallback). Unsupported on
+        # Windows / in contexts without a running loop — silent skip;
+        # polling still works.
+        self._install_sigusr2_handler()
 
         # Apply Claude Code markdown styles to the app console
         self._apply_markdown_styles()
@@ -194,6 +212,87 @@ class ActorWatchApp(App):
         actors, statuses = self._fetch_actors()
         self._update_ui(actors, statuses)
         self.set_interval(2.0, self._poll_actors_async)
+        # Omarchy theme live-reload. Polls mtime; cheap enough that a
+        # 3s cadence is fine and we don't need inotify / platform-specific
+        # machinery. No-op on non-omarchy systems.
+        self.set_interval(3.0, self._poll_omarchy_theme)
+
+    def _install_sigusr2_handler(self) -> None:
+        """Wire SIGUSR2 into the asyncio loop so the hook installed via
+        `actor setup --for omarchy` can push-notify us on theme change.
+        Returns silently when the platform or event-loop state doesn't
+        support signal handlers (e.g. Windows, non-main thread)."""
+        try:
+            import asyncio
+            import signal
+            loop = asyncio.get_running_loop()
+            loop.add_signal_handler(signal.SIGUSR2, self._poll_omarchy_theme)
+        except (NotImplementedError, RuntimeError, ValueError):
+            # Polling covers us; no need to surface this.
+            pass
+
+    def _try_apply_omarchy_theme(self) -> bool:
+        """If omarchy is present, flavor the currently active Claude
+        base (dark or light) and register the result under its own
+        name so no extra picker entry appears. Returns True when
+        omarchy affected the rendered theme."""
+        return self._reflavor_current_base()
+
+    def _poll_omarchy_theme(self) -> None:
+        """Refresh the active theme if omarchy's colors.toml changed.
+
+        Cheap stat call; returns early when the file isn't there or
+        its mtime matches what we last saw. Malformed reloads keep
+        whatever theme is currently active."""
+        current = omarchy_theme_mtime()
+        if current is None:
+            # File vanished (user uninstalled omarchy or removed the
+            # symlink). Leave whatever theme is active as-is; they can
+            # re-run `actor watch` to fall back cleanly.
+            return
+        if self._omarchy_mtime is not None and current == self._omarchy_mtime:
+            return
+        self._reflavor_current_base()
+        self._omarchy_mtime = current
+
+    def _reflavor_current_base(self) -> bool:
+        """Flavor whichever CLAUDE_* base matches the currently active
+        theme. Keeps user-chosen light/dark preference intact — each
+        base carries its own hardcoded surface + foreground, so the
+        flavor only shifts the slots apply_omarchy_flavor owns."""
+        active = getattr(self, "theme", None)
+        if active == "claude-light":
+            base = CLAUDE_LIGHT
+        else:
+            # Default to claude-dark on first application and on any
+            # other active name (e.g. textual's built-ins) so we
+            # always converge on our dark baseline when omarchy is
+            # present.
+            base = CLAUDE_DARK
+        flavored = apply_omarchy_flavor(base)
+        if flavored is None:
+            return False
+        self._apply_flavored(flavored, base.name)
+        self._omarchy_mtime = omarchy_theme_mtime()
+        return True
+
+    def _apply_flavored(self, flavored, name: str) -> None:
+        """Register the flavored theme and force Textual to re-apply.
+
+        Setting `self.theme = name` when it's already the active name
+        is a no-op — the `theme` reactive compares names for equality
+        and short-circuits. Calling `_watch_theme` directly runs the
+        same invalidation chain the reactive would have run on a real
+        name change: toggles the light/dark CSS class, refreshes the
+        truecolor filter, and invalidates the compiled stylesheet so
+        our new palette actually renders."""
+        self.register_theme(flavored)
+        if self.theme != name:
+            self.theme = name
+            return
+        # Private but stable: Textual's public API has no "force
+        # re-apply without changing the name" hook.
+        self._watch_theme(self.theme)
 
     def _apply_markdown_styles(self) -> None:
         """Override Rich console markdown styles to match Claude Code."""
@@ -366,6 +465,13 @@ class ActorWatchApp(App):
         at_bottom = log.scroll_offset.y >= log.max_scroll_y - 1
 
         t = self.current_theme
+        # user_fg mirrors Claude Code's behavior: the user-message text
+        # uses the BASE theme's foreground (not the active theme's,
+        # which may have been flavored by omarchy). Pinning it to the
+        # unflavored base keeps legible contrast against the base-defined
+        # surface color no matter how much the flavor shifts the rest
+        # of the palette.
+        base = CLAUDE_DARK if (t and t.dark) else CLAUDE_LIGHT
         colors = ThemeColors(
             surface=t.surface if t else "#24283B",
             warning=t.warning if t else "#E0AF68",
@@ -373,6 +479,7 @@ class ActorWatchApp(App):
             success_color=t.success if t else "#4EBA65",
             error_color=t.error if t else "#FF6B80",
             inactive="#999999" if (t and t.dark) else "#666666",
+            user_fg=base.foreground,
         )
         render_log_entries(log, entries, colors)
 

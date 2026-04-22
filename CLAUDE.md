@@ -255,6 +255,31 @@ hooks {
 Project hooks override user hooks per event (same merge rule as
 templates).
 
+## Watch theme
+
+The `actor watch` TUI ships with `claude-dark` / `claude-light`. If it
+detects omarchy running locally (presence of
+`~/.config/omarchy/current/theme/colors.toml`), it **flavors** the
+claude-dark theme with omarchy's foreground color — the brand slots
+(primary / secondary / accent / warning / error / success / background /
+surface / panel) stay as claude-dark defines them, so the app still
+reads as an "Actor.sh" TUI but its body text matches the rest of the
+user's desktop. Today only the foreground slot is overridden; growing
+this to cover more slots is a one-line-per-slot extension.
+
+**Live reload:** every 3 seconds we re-stat the resolved-target mtime of
+`colors.toml`. If it changed (e.g. the user ran `omarchy theme set
+<name>`), we rebuild the flavor and re-register under the same theme
+name. For instant updates, `actor setup --for omarchy` installs a
+one-line fragment into `~/.config/omarchy/hooks/theme-set` that sends
+`SIGUSR2` to any running `actor watch`, triggering an immediate reload.
+The SIGUSR2 handler is wired unconditionally — the setup command only
+adds the hook that sends the signal.
+
+See `src/actor/watch/omarchy_theme.py` for the flavor logic. Malformed
+TOML logs a warning and keeps whatever theme is active rather than
+crashing the TUI.
+
 ## Interactive mode
 
 Both the CLI and the watch TUI can open a live Claude/Codex session for
