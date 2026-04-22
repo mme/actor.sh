@@ -12,9 +12,11 @@ from textual.theme import Theme
 from actor.watch.omarchy_theme import (
     _hex,
     _is_dark,
+    _load_active_border,
     _shift_toward_foreground,
     apply_omarchy_flavor,
     omarchy_colors_path,
+    omarchy_hyprland_path,
     omarchy_theme_mtime,
 )
 
@@ -40,6 +42,13 @@ _BASE = Theme(
 
 def _write_palette(home: Path, body: str) -> Path:
     target = home / ".config" / "omarchy" / "current" / "theme" / "colors.toml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body)
+    return target
+
+
+def _write_hyprland(home: Path, body: str) -> Path:
+    target = home / ".config" / "omarchy" / "current" / "theme" / "hyprland.conf"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(body)
     return target
@@ -77,7 +86,9 @@ class TestApplyOmarchyFlavor(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             self.assertIsNone(apply_omarchy_flavor(_BASE, home=Path(home)))
 
-    def test_overrides_only_foreground(self):
+    def test_overrides_only_environmental_slots(self):
+        # No hyprland.conf → only FG gets overridden (palette flavor
+        # works even without the window-border file).
         with tempfile.TemporaryDirectory() as home:
             _write_palette(Path(home), _DARK_PALETTE)
             out = apply_omarchy_flavor(_BASE, home=Path(home))
@@ -96,8 +107,22 @@ class TestApplyOmarchyFlavor(unittest.TestCase):
         self.assertEqual(out.surface, "#333333")
         self.assertEqual(out.panel, "#444444")
         self.assertEqual(out.dark, True)
-        # Keeps the base's name so picker entries don't multiply.
         self.assertEqual(out.name, _BASE.name)
+
+    def test_active_border_overrides_primary_and_accent(self):
+        with tempfile.TemporaryDirectory() as home:
+            _write_palette(Path(home), _DARK_PALETTE)
+            _write_hyprland(
+                Path(home),
+                "$activeBorderColor = rgb(7aa2f7)\n\n"
+                "general {\n    col.active_border = $activeBorderColor\n}\n",
+            )
+            out = apply_omarchy_flavor(_BASE, home=Path(home))
+        assert out is not None
+        self.assertEqual(out.primary, "#7aa2f7")
+        self.assertEqual(out.accent, "#7aa2f7")
+        # Secondary untouched.
+        self.assertEqual(out.secondary, _BASE.secondary)
 
     def test_light_palette_still_only_touches_foreground(self):
         with tempfile.TemporaryDirectory() as home:
@@ -175,7 +200,42 @@ class TestOmarchyThemeMtime(unittest.TestCase):
         self.assertIsNotNone(mtime)
 
 
+class TestLoadActiveBorder(unittest.TestCase):
+
+    def test_missing_file_returns_none(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.assertIsNone(_load_active_border(Path(home)))
+
+    def test_parses_rgb_literal(self):
+        with tempfile.TemporaryDirectory() as home:
+            _write_hyprland(Path(home), "$activeBorderColor = rgb(7aa2f7)\n")
+            self.assertEqual(_load_active_border(Path(home)), "#7aa2f7")
+
+    def test_parses_rgba_literal_ignoring_alpha(self):
+        with tempfile.TemporaryDirectory() as home:
+            _write_hyprland(Path(home), "$activeBorderColor = rgba(7aa2f7, 1.0)\n")
+            self.assertEqual(_load_active_border(Path(home)), "#7aa2f7")
+
+    def test_missing_variable_returns_none(self):
+        with tempfile.TemporaryDirectory() as home:
+            _write_hyprland(
+                Path(home),
+                "general {\n    col.active_border = rgb(123456)\n}\n",
+            )
+            self.assertIsNone(_load_active_border(Path(home)))
+
+    def test_normalizes_case(self):
+        with tempfile.TemporaryDirectory() as home:
+            _write_hyprland(Path(home), "$activeBorderColor = rgb(7AA2F7)\n")
+            self.assertEqual(_load_active_border(Path(home)), "#7aa2f7")
+
+
 class TestOmarchyHelpers(unittest.TestCase):
+
+    def test_omarchy_hyprland_path_defaults(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = omarchy_hyprland_path(home=Path(home))
+        self.assertTrue(str(path).endswith(".config/omarchy/current/theme/hyprland.conf"))
 
     def test_omarchy_colors_path_defaults(self):
         with tempfile.TemporaryDirectory() as home:

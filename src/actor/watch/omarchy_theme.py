@@ -4,22 +4,30 @@ Omarchy is a Linux desktop setup that manages a coordinated color palette
 across terminal emulators, editors, and window managers. When a user
 switches themes via `omarchy theme set <name>`, the symlink at
 `~/.config/omarchy/current/theme` flips to point at the new theme
-directory; its `colors.toml` holds the shared hex palette.
+directory; its `colors.toml` holds the shared hex palette and
+`hyprland.conf` declares the active-window-border highlight.
 
-This module detects that file and returns a *flavored* variant of a
-supplied base theme — today only the foreground slot is pulled from
-omarchy, keeping every brand/semantic color from the base intact. That
-mirrors what Claude Code ends up looking like on omarchy (unstyled text
-follows the terminal's default FG; everything else stays branded) and
-avoids the "TUI looks like a totally different app" outcome a pure
-palette swap would produce.
+This module reads both and returns a *flavored* variant of a supplied
+base theme. Today we pull two slots from omarchy:
+
+- `foreground` from `colors.toml` — so body text matches the desktop's
+  default FG, giving plain prose the "feels-native" look Claude Code
+  gets for free from unstyled line output.
+- `primary` (and `accent`) from `hyprland.conf`'s `$activeBorderColor`
+  — so focus rings, selected rows, and active tabs glow the same color
+  as the user's active-window border.
+
+Every other slot (brand colors, semantic warn/err/success, backgrounds)
+stays as the base theme defines it, so the TUI still reads as
+"Actor.sh" rather than becoming a pure palette swap.
 
 Non-omarchy users never touch this — `apply_omarchy_flavor()` returns
-the base unchanged when the file isn't there. Malformed input is
+the base unchanged when the files aren't there. Malformed input is
 swallowed with a warning so a broken palette never takes down the TUI.
 """
 from __future__ import annotations
 
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -32,6 +40,17 @@ def omarchy_colors_path(home: Optional[Path] = None) -> Path:
     """Path to omarchy's active colors.toml. Does not check existence."""
     base = home if home is not None else Path.home()
     return base / ".config" / "omarchy" / "current" / "theme" / "colors.toml"
+
+
+def omarchy_hyprland_path(home: Optional[Path] = None) -> Path:
+    """Path to omarchy's active hyprland.conf. Does not check existence.
+
+    We don't stat this for the live-reload mtime check — colors.toml
+    and hyprland.conf live in the same theme directory, so a theme
+    switch flips them together. One stat covers both files' freshness.
+    """
+    base = home if home is not None else Path.home()
+    return base / ".config" / "omarchy" / "current" / "theme" / "hyprland.conf"
 
 
 def omarchy_theme_mtime(home: Optional[Path] = None) -> Optional[float]:
@@ -62,8 +81,9 @@ def apply_omarchy_flavor(
     data = _load_palette(home)
     if data is None:
         return None
+    active_border = _load_active_border(home)
     try:
-        return _flavor(base, data)
+        return _flavor(base, data, active_border)
     except (KeyError, ValueError, TypeError) as e:
         print(
             f"warning: omarchy palette is malformed: {e}",
@@ -87,21 +107,29 @@ def _load_palette(home: Optional[Path]) -> Optional[Dict[str, object]]:
         return None
 
 
-def _flavor(base: Theme, data: Dict[str, object]) -> Theme:
+def _flavor(
+    base: Theme,
+    data: Dict[str, object],
+    active_border: Optional[str],
+) -> Theme:
     """Overlay omarchy values onto `base`. Keep the base's name so it
     shows up under its existing picker entry (e.g. 'claude-dark') — the
     user doesn't see a separate 'omarchy' item.
 
-    Today only the foreground is overridden; every other slot stays as
-    `base` had it. We recompute `dark` from the overridden luminance in
-    case omarchy picks a light-mode theme while base is dark (or vice
-    versa) — keeps widget contrast logic correct."""
+    Overridden slots:
+    - `foreground` ← colors.toml's foreground (desktop-native body text)
+    - `primary` and `accent` ← hyprland.conf's $activeBorderColor
+      (TUI focus rings match active-window border)
+
+    Everything else stays as `base` had it."""
     foreground = _hex(data, "foreground", base.foreground)
+    primary = active_border if active_border is not None else base.primary
+    accent = active_border if active_border is not None else base.accent
     return Theme(
         name=base.name,
-        primary=base.primary,
+        primary=primary,
         secondary=base.secondary,
-        accent=base.accent,
+        accent=accent,
         warning=base.warning,
         error=base.error,
         success=base.success,
@@ -111,6 +139,38 @@ def _flavor(base: Theme, data: Dict[str, object]) -> Theme:
         panel=base.panel,
         dark=base.dark,
     )
+
+
+# Matches `$activeBorderColor = rgb(7aa2f7)` or `rgba(7aa2f7, 1.0)` at
+# the start of a line. Hyprland's config language accepts `$variable =
+# value` assignments and rgb()/rgba() color literals with bare hex
+# (no leading #). Alpha is parsed but ignored — Textual primary doesn't
+# do per-slot alpha.
+_ACTIVE_BORDER_RE = re.compile(
+    r"^\s*\$activeBorderColor\s*=\s*rgba?\(\s*([0-9a-fA-F]{6})",
+    re.MULTILINE,
+)
+
+
+def _load_active_border(home: Optional[Path]) -> Optional[str]:
+    """Extract $activeBorderColor from omarchy's hyprland.conf as a
+    '#rrggbb' string. Returns None if the file isn't there, can't be
+    read, or doesn't declare the variable in the expected shape."""
+    path = omarchy_hyprland_path(home)
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(errors="replace")
+    except OSError as e:
+        print(
+            f"warning: could not read omarchy hyprland.conf at {path}: {e}",
+            file=sys.stderr,
+        )
+        return None
+    match = _ACTIVE_BORDER_RE.search(text)
+    if match is None:
+        return None
+    return "#" + match.group(1).lower()
 
 
 def _hex(data: Dict[str, object], key: str, fallback: str) -> str:
