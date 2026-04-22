@@ -142,8 +142,8 @@ Shell hooks declared in the same `settings.kdl` file. They apply to
 every actor (merged across user + project `settings.kdl`). Each runs via
 `/bin/sh -c`, inheriting the caller's env plus `ACTOR_NAME`, `ACTOR_DIR`,
 `ACTOR_AGENT`, and (when set) `ACTOR_SESSION_ID`. Cwd is the actor
-directory, except for on-discard on an actor whose worktree is gone
-(see below).
+directory, except for `on-discard` and `after-run` on an actor whose
+worktree is gone (see below).
 
 ```kdl
 hooks {
@@ -167,6 +167,9 @@ hooks {
   never affected. Does not fire if `before-run` vetoed the run, if the
   agent failed to start, or if `actor stop` won the race against the
   agent's own exit (in the last case the run is recorded as `stopped`).
+  If the actor's worktree was removed mid-run, the hook runs from
+  `$HOME` instead — `ACTOR_DIR` still points at the (missing) path
+  (same fallback as `on-discard`).
 - `on-discard` — fires during `actor discard`, after resource cleanup
   (running agents stopped) and before the DB row is removed. Non-zero
   aborts discard unless `actor discard --force` / `-f` is passed. If the

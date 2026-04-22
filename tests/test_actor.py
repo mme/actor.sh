@@ -2649,8 +2649,9 @@ class TestCmdRunAfterRunHook(unittest.TestCase):
         self.assertEqual(env["ACTOR_NAME"], "test")
         self.assertEqual(env["ACTOR_AGENT"], "claude")
         self.assertEqual(env["ACTOR_EXIT_CODE"], "0")
-        # Run id is the newly inserted row; first insert → id 1.
-        self.assertEqual(env["ACTOR_RUN_ID"], "1")
+        # Run id must match the row cmd_run inserted (not a hardcoded
+        # autoincrement assumption).
+        self.assertEqual(env["ACTOR_RUN_ID"], str(db.latest_run("test").id))
         self.assertIn("ACTOR_DURATION_MS", env)
         # Duration must be a non-negative integer string.
         self.assertGreaterEqual(int(env["ACTOR_DURATION_MS"]), 0)

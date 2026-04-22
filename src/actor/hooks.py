@@ -25,7 +25,7 @@ def merge_env_extra(
     """Merge ``env_extra`` into ``env`` in place. A value of ``None`` means
     "unset this key" so callers can scrub stale parent-env vars without
     mutating ``os.environ`` (thread-safe for concurrent Agent calls)."""
-    if not env_extra:
+    if env_extra is None:
         return
     for key, value in env_extra.items():
         if value is None:
