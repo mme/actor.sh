@@ -344,7 +344,15 @@ def cmd_run(
 
     # Expose actor name to the agent process via env_extra — passed per-call
     # so concurrent MCP runs don't clobber each other's ACTOR_NAME.
-    env_extra = {"ACTOR_NAME": name}
+    # None values scrub run-specific keys a hook-triggered ancestor may
+    # have left in the parent env (ACTOR_RUN_ID / ACTOR_EXIT_CODE /
+    # ACTOR_DURATION_MS), mirroring cmd_interactive's explicit env pop.
+    env_extra: dict[str, Optional[str]] = {
+        "ACTOR_NAME": name,
+        "ACTOR_RUN_ID": None,
+        "ACTOR_EXIT_CODE": None,
+        "ACTOR_DURATION_MS": None,
+    }
 
     # Start or resume
     try:

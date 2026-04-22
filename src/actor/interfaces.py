@@ -35,12 +35,15 @@ class Agent(abc.ABC):
         dir: Path,
         prompt: str,
         config: Config,
-        env_extra: Optional[Mapping[str, str]] = None,
+        env_extra: Optional[Mapping[str, Optional[str]]] = None,
     ) -> Tuple[int, Optional[str]]:
         """Start a new agent session. Returns (pid, optional session_id).
 
-        env_extra augments the child process env (e.g. ACTOR_NAME). Implementations
-        must not mutate os.environ so concurrent callers don't see each other's keys.
+        env_extra augments the child process env (e.g. ACTOR_NAME). A value
+        of None means "unset this key" — callers use this to scrub stale
+        parent-env vars without mutating os.environ. Implementations must
+        not mutate os.environ so concurrent callers don't see each other's
+        keys.
         """
 
     @abc.abstractmethod
@@ -50,7 +53,7 @@ class Agent(abc.ABC):
         session_id: str,
         prompt: str,
         config: Config,
-        env_extra: Optional[Mapping[str, str]] = None,
+        env_extra: Optional[Mapping[str, Optional[str]]] = None,
     ) -> int:
         """Resume an existing session with a new prompt. Returns pid."""
 

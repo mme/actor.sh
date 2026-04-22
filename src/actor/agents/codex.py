@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
 
 from ..errors import ActorError
+from ..hooks import merge_env_extra
 from ..interfaces import Agent, LogEntry, LogEntryKind
 from ..types import Config
 
@@ -70,15 +71,14 @@ class CodexAgent(Agent):
         args: List[str],
         cwd: Optional[Path],
         config: Config,
-        env_extra: Optional[Mapping[str, str]] = None,
+        env_extra: Optional[Mapping[str, Optional[str]]] = None,
     ) -> Tuple[int, Optional[str]]:
         strip = config.get("strip-api-keys", "true") != "false"
         if strip:
             env = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
         else:
             env = dict(os.environ)
-        if env_extra:
-            env.update(env_extra)
+        merge_env_extra(env, env_extra)
         kwargs: dict = dict(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -177,7 +177,7 @@ class CodexAgent(Agent):
         dir: Path,
         prompt: str,
         config: Config,
-        env_extra: Optional[Mapping[str, str]] = None,
+        env_extra: Optional[Mapping[str, Optional[str]]] = None,
     ) -> Tuple[int, Optional[str]]:
         args = [
             "codex",
@@ -197,7 +197,7 @@ class CodexAgent(Agent):
         session_id: str,
         prompt: str,
         config: Config,
-        env_extra: Optional[Mapping[str, str]] = None,
+        env_extra: Optional[Mapping[str, Optional[str]]] = None,
     ) -> int:
         args = [
             "codex",

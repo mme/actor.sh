@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
 
 from ..errors import ActorError
+from ..hooks import merge_env_extra
 from ..interfaces import Agent, LogEntry, LogEntryKind
 from ..types import Config
 
@@ -48,15 +49,14 @@ class ClaudeAgent(Agent):
         args: List[str],
         cwd: Path,
         config: Config,
-        env_extra: Optional[Mapping[str, str]] = None,
+        env_extra: Optional[Mapping[str, Optional[str]]] = None,
     ) -> int:
         strip = config.get("strip-api-keys", "true") != "false"
         if strip:
             env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
         else:
             env = dict(os.environ)
-        if env_extra:
-            env.update(env_extra)
+        merge_env_extra(env, env_extra)
         proc = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
@@ -93,7 +93,7 @@ class ClaudeAgent(Agent):
         dir: Path,
         prompt: str,
         config: Config,
-        env_extra: Optional[Mapping[str, str]] = None,
+        env_extra: Optional[Mapping[str, Optional[str]]] = None,
     ) -> Tuple[int, Optional[str]]:
         session_id = str(uuid.uuid4())
         args = [
@@ -116,7 +116,7 @@ class ClaudeAgent(Agent):
         session_id: str,
         prompt: str,
         config: Config,
-        env_extra: Optional[Mapping[str, str]] = None,
+        env_extra: Optional[Mapping[str, Optional[str]]] = None,
     ) -> int:
         args = [
             "claude",

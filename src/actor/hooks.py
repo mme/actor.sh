@@ -13,9 +13,25 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Mapping, Optional, Union
+from typing import Callable, Dict, Mapping, MutableMapping, Optional, Union
 
 from .errors import HookFailedError
+
+
+def merge_env_extra(
+    env: MutableMapping[str, str],
+    env_extra: Optional[Mapping[str, Optional[str]]],
+) -> None:
+    """Merge ``env_extra`` into ``env`` in place. A value of ``None`` means
+    "unset this key" so callers can scrub stale parent-env vars without
+    mutating ``os.environ`` (thread-safe for concurrent Agent calls)."""
+    if not env_extra:
+        return
+    for key, value in env_extra.items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
 
 
 @dataclass(frozen=True)

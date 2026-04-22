@@ -51,6 +51,9 @@ class FakeAgentCall:
         self.prompt = prompt
         self.config = config
         self.session_id = session_id
+        # env_extra may contain None values — they mean "unset this key"
+        # when the real agent merges with os.environ. FakeAgent preserves
+        # them verbatim so tests can assert the scrub intent.
         self.env_extra = env_extra
 
 
@@ -2752,15 +2755,12 @@ class TestCmdRunAfterRunHook(unittest.TestCase):
 
     def test_after_run_sees_db_as_done_before_firing(self):
         from actor import Hooks
-        observed_status: list[Status] = []
+        observed_runs: list = []
 
         def runner(cmd, env, cwd):
-            # At hook time, the DB must already reflect the run's final
-            # status so scripts that `actor show` see the run as done.
-            latest = db.latest_run("test")
-            observed_status.append(latest.status)
-            self.assertIsNotNone(latest.finished_at)
-            self.assertEqual(latest.exit_code, 0)
+            # Capture the Run snapshot for post-run assertions. Assertions
+            # here would be swallowed by _fire_after_run's broad except.
+            observed_runs.append(db.latest_run("test"))
             return 0
 
         db = self._db()
@@ -2775,7 +2775,13 @@ class TestCmdRunAfterRunHook(unittest.TestCase):
             hooks=Hooks(after_run="echo after"),
             hook_runner=runner,
         )
-        self.assertEqual(observed_status, [Status.DONE])
+        # At hook time the DB must already reflect the run's final status
+        # so scripts calling `actor show` see the run as done.
+        self.assertEqual(len(observed_runs), 1)
+        run = observed_runs[0]
+        self.assertEqual(run.status, Status.DONE)
+        self.assertIsNotNone(run.finished_at)
+        self.assertEqual(run.exit_code, 0)
 
     def test_after_run_nonzero_exit_logged_and_swallowed(self):
         import io
@@ -2964,6 +2970,36 @@ class TestCmdRunAfterRunHook(unittest.TestCase):
         self.assertNotIn("ACTOR_RUN_ID", env)
         self.assertNotIn("ACTOR_EXIT_CODE", env)
         self.assertNotIn("ACTOR_DURATION_MS", env)
+
+    def test_cmd_run_scrubs_stale_run_env_for_child_agent(self):
+        # Symmetric with cmd_interactive: when cmd_run is invoked from a
+        # context that carries stale ACTOR_RUN_ID / ACTOR_EXIT_CODE /
+        # ACTOR_DURATION_MS (e.g. a hook-invoked run chain), the child
+        # agent process must not inherit them. cmd_run signals this via
+        # env_extra entries with None values — the agent impl treats None
+        # as "unset this key" when building the subprocess env.
+        db = self._db()
+        create_actor(db, "test", config=[])
+        agent = FakeAgent()
+        pm = FakeProcessManager()
+        cmd_run(
+            db, agent, pm,
+            name="test",
+            prompt="go",
+            config_pairs=[],
+        )
+        self.assertEqual(len(agent.calls), 1)
+        env_extra = agent.calls[0].env_extra
+        self.assertIsNotNone(env_extra)
+        self.assertEqual(env_extra.get("ACTOR_NAME"), "test")
+        # These three keys must be present with value None so the agent
+        # strips any stale values from the parent os.environ.
+        self.assertIn("ACTOR_RUN_ID", env_extra)
+        self.assertIsNone(env_extra["ACTOR_RUN_ID"])
+        self.assertIn("ACTOR_EXIT_CODE", env_extra)
+        self.assertIsNone(env_extra["ACTOR_EXIT_CODE"])
+        self.assertIn("ACTOR_DURATION_MS", env_extra)
+        self.assertIsNone(env_extra["ACTOR_DURATION_MS"])
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -3266,6 +3302,42 @@ class TestHookEnv(unittest.TestCase):
                     actor_session_id=None,
                     **{kwarg: True},
                 )
+
+
+class TestMergeEnvExtra(unittest.TestCase):
+    """merge_env_extra lets Agent callers scrub stale parent-env vars
+    without mutating os.environ (thread-safe for concurrent runs)."""
+
+    def test_none_value_unsets_existing_key(self):
+        from actor.hooks import merge_env_extra
+        env = {"ACTOR_RUN_ID": "99", "ACTOR_NAME": "foo"}
+        merge_env_extra(env, {"ACTOR_RUN_ID": None})
+        self.assertNotIn("ACTOR_RUN_ID", env)
+        self.assertEqual(env["ACTOR_NAME"], "foo")
+
+    def test_none_value_on_missing_key_is_noop(self):
+        from actor.hooks import merge_env_extra
+        env = {"ACTOR_NAME": "foo"}
+        merge_env_extra(env, {"ACTOR_RUN_ID": None})
+        self.assertEqual(env, {"ACTOR_NAME": "foo"})
+
+    def test_string_value_sets_or_overwrites_key(self):
+        from actor.hooks import merge_env_extra
+        env = {"ACTOR_NAME": "old"}
+        merge_env_extra(env, {"ACTOR_NAME": "new", "EXTRA": "x"})
+        self.assertEqual(env, {"ACTOR_NAME": "new", "EXTRA": "x"})
+
+    def test_none_env_extra_leaves_env_untouched(self):
+        from actor.hooks import merge_env_extra
+        env = {"A": "1"}
+        merge_env_extra(env, None)
+        self.assertEqual(env, {"A": "1"})
+
+    def test_mixed_set_and_unset_in_single_call(self):
+        from actor.hooks import merge_env_extra
+        env = {"STALE": "zz", "KEEP": "k"}
+        merge_env_extra(env, {"STALE": None, "FRESH": "f"})
+        self.assertEqual(env, {"KEEP": "k", "FRESH": "f"})
 
 
 class TestRunHook(unittest.TestCase):
