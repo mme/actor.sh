@@ -33,10 +33,18 @@ class _PlainIndentedCode(TextElement):
     whitespace preserved. Rich's default CodeBlock wraps them in a
     Syntax widget with padding, which produces a visible boxed frame
     for artistic poem indentation — not what Claude Code does.
-    ``marked``'s ``formatToken`` ``code`` case emits ``token.text +
-    EOL`` verbatim with no frame, so we mirror that here."""
+
+    ``marked``'s ``formatToken`` ``code`` case emits
+    ``token.text + EOL`` verbatim with no frame *and* without an
+    inter-block blank line. We mirror that: render the content as a
+    plain Text and set ``new_line = False`` so Rich doesn't insert a
+    blank-line separator between this element and the one that
+    follows. The blank line BEFORE the code block still comes from
+    markdown-it's ``space`` token for the preceding empty source
+    line, so the overall shape still matches Claude's output."""
 
     style_name = "none"
+    new_line = False
 
     def __rich_console__(
         self, console: Console, options: ConsoleOptions
