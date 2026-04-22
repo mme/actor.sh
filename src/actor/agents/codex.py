@@ -13,7 +13,7 @@ from typing import Dict, List, Mapping, Optional, Tuple
 
 from ..errors import ActorError
 from ..interfaces import Agent, LogEntry, LogEntryKind
-from ..types import Config
+from ..types import ActorConfig
 
 
 class _CodexChild:
@@ -36,16 +36,16 @@ class CodexAgent(Agent):
         self._children: Dict[int, _CodexChild] = {}
         self._lock = threading.Lock()
 
-    def emit_agent_args(self, defaults: Config) -> List[str]:
-        """Map the resolved `defaults { }` dict to codex CLI flags.
+    def emit_agent_args(self, defaults: Dict[str, str]) -> List[str]:
+        """Map the resolved `agent_args` dict to codex CLI flags.
 
         Users write Codex's native flag names verbatim (e.g. `m`, `a`,
         `sandbox`). One-character keys emit a short flag (`-k value`);
         longer keys emit a long flag (`--key value`). Empty string becomes
-        a bare flag. `None` values are skipped defensively — the resolver
-        in cmd_new is expected to have stripped kdl-layer `None` cancel
-        markers before this runs, but we drop them here too so a misrouted
-        caller can't feed `None` into subprocess.Popen."""
+        a bare flag. `None` values are skipped defensively — ActorConfig
+        is supposed to contain only concrete strings (the cmd_new resolver
+        strips kdl-layer `None` cancel markers), but we drop them here too
+        so a misrouted caller can't feed `None` into subprocess.Popen."""
         args: List[str] = []
         for key, value in sorted(defaults.items()):
             if value is None:
@@ -57,20 +57,19 @@ class CodexAgent(Agent):
         return args
 
     def apply_actor_keys(
-        self, flat: Config, env: Mapping[str, str]
+        self, actor_keys: Dict[str, str], env: Mapping[str, str]
     ) -> Dict[str, str]:
         """Strip OPENAI_API_KEY from the env when use-subscription is on
         (default true) so Codex falls back to the logged-in subscription."""
         out = dict(env)
-        if flat.get("use-subscription", "true") != "false":
+        if actor_keys.get("use-subscription", "true") != "false":
             out.pop("OPENAI_API_KEY", None)
         return out
 
     def _spawn_and_capture(
-        self, args: List[str], cwd: Optional[Path], config: Config
+        self, args: List[str], cwd: Optional[Path], config: ActorConfig
     ) -> Tuple[int, Optional[str]]:
-        actor_keys, _ = self._split_config(config)
-        env = self.apply_actor_keys(actor_keys, os.environ)
+        env = self.apply_actor_keys(config.actor_keys, os.environ)
         kwargs: dict = dict(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -164,28 +163,26 @@ class CodexAgent(Agent):
         except Exception as e:
             raise ActorError(f"codex DB query failed: {e}")
 
-    def start(self, dir: Path, prompt: str, config: Config) -> Tuple[int, Optional[str]]:
-        _, agent_args = self._split_config(config)
+    def start(self, dir: Path, prompt: str, config: ActorConfig) -> Tuple[int, Optional[str]]:
         args = [
             "codex",
             "exec",
             "--json",
             "-C",
             str(dir),
-            *self.emit_agent_args(agent_args),
+            *self.emit_agent_args(config.agent_args),
             prompt,
         ]
         return self._spawn_and_capture(args, cwd=None, config=config)
 
-    def resume(self, dir: Path, session_id: str, prompt: str, config: Config) -> int:
-        _, agent_args = self._split_config(config)
+    def resume(self, dir: Path, session_id: str, prompt: str, config: ActorConfig) -> int:
         args = [
             "codex",
             "exec",
             "resume",
             session_id,
             "--json",
-            *self.emit_agent_args(agent_args),
+            *self.emit_agent_args(config.agent_args),
             prompt,
         ]
         pid, _ = self._spawn_and_capture(args, cwd=dir, config=config)
@@ -271,13 +268,12 @@ class CodexAgent(Agent):
 
         return entries
 
-    def interactive_argv(self, session_id: str, config: Config) -> List[str]:
+    def interactive_argv(self, session_id: str, config: ActorConfig) -> List[str]:
         # Propagate agent flags so interactive sessions honor the same
         # defaults as non-interactive runs (parity with Claude).
-        _, agent_args = self._split_config(config)
         return [
             "codex", "resume", session_id,
-            *self.emit_agent_args(agent_args),
+            *self.emit_agent_args(config.agent_args),
         ]
 
     def stop(self, pid: int) -> None:

@@ -7,7 +7,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
 
-from .types import Config
+from .types import ActorConfig
 
 
 class LogEntryKind(Enum):
@@ -29,40 +29,40 @@ class LogEntry:
 
 
 class Agent(abc.ABC):
-    # Per-agent defaults split. Subclasses fill these in.
+    # Per-agent defaults. Subclasses fill these in.
     #
-    # Keys in ACTOR_DEFAULTS are interpreted by actor-sh (e.g. env filtering)
-    # and are NEVER passed to the agent binary. Keys in AGENT_DEFAULTS live
-    # under `defaults { }` in settings.kdl and map straight to CLI flags.
-    # Values are always concrete strings — `None` is a kdl-layer-only cancel
-    # marker and never appears in class-level defaults.
+    # These are used for two purposes only:
+    #   1. Hardcoded baseline defaults merged at actor creation time.
+    #   2. Validation whitelist — at the CLI layer, `--config key=value`
+    #      whose key appears in ACTOR_DEFAULTS is rejected (actor-keys
+    #      have dedicated flags).
+    #
+    # They are NOT used as a runtime routing table. Once an ActorConfig
+    # exists, `cfg.actor_keys` and `cfg.agent_args` carry the split
+    # positionally; nothing downstream looks keys up by name.
+    #
+    # Values are always concrete strings — `None` is a kdl-layer-only
+    # cancel marker and never appears in class-level defaults.
     AGENT_DEFAULTS: Dict[str, str] = {}
     ACTOR_DEFAULTS: Dict[str, str] = {}
 
     @abc.abstractmethod
-    def emit_agent_args(self, defaults: Config) -> List[str]:
-        """Turn the resolved `defaults { }` dict into CLI flags."""
+    def emit_agent_args(self, defaults: Dict[str, str]) -> List[str]:
+        """Turn the agent_args dict into CLI flags for the agent binary."""
 
     @abc.abstractmethod
     def apply_actor_keys(
-        self, flat: Config, env: Mapping[str, str]
+        self, actor_keys: Dict[str, str], env: Mapping[str, str]
     ) -> Dict[str, str]:
         """Return a NEW env dict with actor-key side effects applied
         (e.g. stripping API keys)."""
 
-    def _split_config(self, config: Config) -> Tuple[Config, Config]:
-        """Partition a flat config dict into (actor_keys, agent_args)
-        using this agent's ACTOR_DEFAULTS whitelist."""
-        actor_keys = {k: v for k, v in config.items() if k in self.ACTOR_DEFAULTS}
-        agent_args = {k: v for k, v in config.items() if k not in self.ACTOR_DEFAULTS}
-        return actor_keys, agent_args
-
     @abc.abstractmethod
-    def start(self, dir: Path, prompt: str, config: Config) -> Tuple[int, Optional[str]]:
+    def start(self, dir: Path, prompt: str, config: ActorConfig) -> Tuple[int, Optional[str]]:
         """Start a new agent session. Returns (pid, optional session_id)."""
 
     @abc.abstractmethod
-    def resume(self, dir: Path, session_id: str, prompt: str, config: Config) -> int:
+    def resume(self, dir: Path, session_id: str, prompt: str, config: ActorConfig) -> int:
         """Resume an existing session with a new prompt. Returns pid."""
 
     @abc.abstractmethod
@@ -78,7 +78,7 @@ class Agent(abc.ABC):
         """Kill a running agent process."""
 
     @abc.abstractmethod
-    def interactive_argv(self, session_id: str, config: Config) -> List[str]:
+    def interactive_argv(self, session_id: str, config: ActorConfig) -> List[str]:
         """Argv to launch an interactive session (TTY / PTY). No prompt."""
 
 

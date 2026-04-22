@@ -11,7 +11,7 @@ from typing import Dict, List, Mapping, Optional, Tuple
 
 from ..errors import ActorError
 from ..interfaces import Agent, LogEntry, LogEntryKind
-from ..types import Config
+from ..types import ActorConfig
 
 
 class ClaudeAgent(Agent):
@@ -26,14 +26,14 @@ class ClaudeAgent(Agent):
         self._children: Dict[int, subprocess.Popen] = {}  # type: ignore[type-arg]
         self._lock = threading.Lock()
 
-    def emit_agent_args(self, defaults: Config) -> List[str]:
-        """Map the resolved `defaults { }` dict to claude CLI flags.
+    def emit_agent_args(self, defaults: Dict[str, str]) -> List[str]:
+        """Map the resolved `agent_args` dict to claude CLI flags.
 
         Straight mapping: `key "value"` → `--key value`; empty string becomes
-        a bare `--key`. `None` values are skipped defensively — the resolver
-        in cmd_new is expected to have stripped kdl-layer `None` cancel
-        markers before this runs, but we drop them here too so a misrouted
-        caller can't feed `None` into subprocess.Popen."""
+        a bare `--key`. `None` values are skipped defensively — ActorConfig
+        is supposed to contain only concrete strings (the cmd_new resolver
+        strips kdl-layer `None` cancel markers), but we drop them here too
+        so a misrouted caller can't feed `None` into subprocess.Popen."""
         args: List[str] = []
         for key, value in sorted(defaults.items()):
             if value is None:
@@ -44,18 +44,17 @@ class ClaudeAgent(Agent):
         return args
 
     def apply_actor_keys(
-        self, flat: Config, env: Mapping[str, str]
+        self, actor_keys: Dict[str, str], env: Mapping[str, str]
     ) -> Dict[str, str]:
         """Strip ANTHROPIC_API_KEY from the env when use-subscription is on
         (default true) so Claude falls back to the logged-in subscription."""
         out = dict(env)
-        if flat.get("use-subscription", "true") != "false":
+        if actor_keys.get("use-subscription", "true") != "false":
             out.pop("ANTHROPIC_API_KEY", None)
         return out
 
-    def _spawn_and_track(self, args: List[str], cwd: Path, config: Config) -> int:
-        actor_keys, _ = self._split_config(config)
-        env = self.apply_actor_keys(actor_keys, os.environ)
+    def _spawn_and_track(self, args: List[str], cwd: Path, config: ActorConfig) -> int:
+        env = self.apply_actor_keys(config.actor_keys, os.environ)
         proc = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
@@ -87,8 +86,7 @@ class ClaudeAgent(Agent):
     # orchestrate their own children identically to the top-level Claude session.
     _CHANNEL_ARGS = ["--dangerously-load-development-channels", "server:actor"]
 
-    def start(self, dir: Path, prompt: str, config: Config) -> Tuple[int, Optional[str]]:
-        _, agent_args = self._split_config(config)
+    def start(self, dir: Path, prompt: str, config: ActorConfig) -> Tuple[int, Optional[str]]:
         session_id = str(uuid.uuid4())
         args = [
             "claude",
@@ -96,22 +94,21 @@ class ClaudeAgent(Agent):
             "-p",
             "--session-id",
             session_id,
-            *self.emit_agent_args(agent_args),
+            *self.emit_agent_args(config.agent_args),
             "--",
             prompt,
         ]
         pid = self._spawn_and_track(args, dir, config)
         return pid, session_id
 
-    def resume(self, dir: Path, session_id: str, prompt: str, config: Config) -> int:
-        _, agent_args = self._split_config(config)
+    def resume(self, dir: Path, session_id: str, prompt: str, config: ActorConfig) -> int:
         args = [
             "claude",
             *self._CHANNEL_ARGS,
             "-p",
             "--resume",
             session_id,
-            *self.emit_agent_args(agent_args),
+            *self.emit_agent_args(config.agent_args),
             "--",
             prompt,
         ]
@@ -216,13 +213,12 @@ class ClaudeAgent(Agent):
 
         return entries
 
-    def interactive_argv(self, session_id: str, config: Config) -> List[str]:
-        _, agent_args = self._split_config(config)
+    def interactive_argv(self, session_id: str, config: ActorConfig) -> List[str]:
         return [
             "claude",
             *self._CHANNEL_ARGS,
             "--resume", session_id,
-            *self.emit_agent_args(agent_args),
+            *self.emit_agent_args(config.agent_args),
         ]
 
     def stop(self, pid: int) -> None:

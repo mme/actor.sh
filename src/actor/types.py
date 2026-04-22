@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, List, Optional
@@ -55,13 +55,30 @@ class Status(Enum):
         return self.value
 
 
-# Config is a sorted dict (matching Rust BTreeMap)
-Config = Dict[str, str]
-
-
 def _sorted_config(d: Dict[str, str]) -> Dict[str, str]:
     """Return a dict sorted by key (matching BTreeMap behavior)."""
     return dict(sorted(d.items()))
+
+
+@dataclass(frozen=True)
+class ActorConfig:
+    """Structured config for an actor, with actor_keys separated from agent_args.
+
+    - actor_keys: keys interpreted by actor-sh (e.g. use-subscription).
+      Never forwarded to the agent binary. Whitelist lives on the Agent
+      subclass as ACTOR_DEFAULTS.
+    - agent_args: keys that become CLI flags on the agent binary.
+
+    Both dicts contain concrete strings. None values (kdl-layer cancel
+    markers) are stripped before an ActorConfig is constructed — they do
+    not appear in this type.
+
+    Keys are sorted (matching Rust BTreeMap semantics) — callers that
+    construct ActorConfig should pass sorted dicts (use _sorted_config)
+    or rely on the stored order being sorted already.
+    """
+    actor_keys: Dict[str, str] = field(default_factory=dict)
+    agent_args: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -74,7 +91,7 @@ class Actor:
     base_branch: Optional[str]
     worktree: bool
     parent: Optional[str]
-    config: Config
+    config: ActorConfig
     created_at: str
     updated_at: str
 
@@ -87,7 +104,7 @@ class Run:
     status: Status
     exit_code: Optional[int]
     pid: Optional[int]
-    config: Config
+    config: ActorConfig
     started_at: str
     finished_at: Optional[str]
 
@@ -108,9 +125,17 @@ def validate_name(name: str) -> None:
         raise InvalidNameError(f"'{name}' is a reserved name")
 
 
-def parse_config(pairs: List[str]) -> Config:
-    """Parse config pairs into a dict. Supports key=value and bare keys (boolean flags)."""
-    config: Config = {}
+def parse_config(pairs: List[str]) -> Dict[str, str]:
+    """Parse `key=value` pairs (CLI `--config`) into a sorted dict. Supports
+    bare keys (boolean flags) as `key=""`.
+
+    The returned dict is intended for ActorConfig.agent_args — `--config`
+    may only set agent-binary flags. actor-keys (like `use-subscription`)
+    have dedicated CLI flags and must not flow through `--config`. The CLI
+    layer is responsible for validating that keys here are not in the
+    chosen agent's ACTOR_DEFAULTS whitelist.
+    """
+    config: Dict[str, str] = {}
     for pair in pairs:
         idx = pair.find("=")
         if idx == -1:

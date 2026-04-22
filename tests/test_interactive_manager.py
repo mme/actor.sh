@@ -19,7 +19,7 @@ if sys.platform == "win32":
 
 from actor import INTERACTIVE_PROMPT
 from actor.db import Database
-from actor.types import Config, Status
+from actor.types import ActorConfig, Status
 from actor.watch.interactive.manager import InteractiveSessionManager
 from actor.watch.interactive.diagnostics import DiagnosticRecorder, EventKind
 
@@ -42,7 +42,7 @@ class _FakeAgent:
     def __init__(self, argv: list[str]) -> None:
         self._argv = argv
 
-    def interactive_argv(self, session_id: str, config: Config) -> list[str]:
+    def interactive_argv(self, session_id: str, config: ActorConfig) -> list[str]:
         return list(self._argv)
 
     def start(self, *a, **k):  # pragma: no cover
@@ -69,7 +69,7 @@ def _ensure_actor(db: Database, name: str, session: str = "sess-1") -> None:
     cmd_new(
         db, git,
         name=name, dir="/tmp", no_worktree=True, base=None,
-        agent_name="claude", config_pairs=[],
+        agent_name="claude", cli_overrides=ActorConfig(),
     )
     db.update_actor_session(name, session)
 
@@ -105,7 +105,7 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
             agent=_FakeAgent([cat]),
             session_id="sess-1",
             cwd=Path("/tmp"),
-            config={},
+            config=ActorConfig(),
         )
         self.assertTrue(self.manager.has("alice"))
         self.assertIs(self.manager.get("alice"), info)
@@ -120,13 +120,13 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         cat = _find_binary("cat")
         first = self.manager.create(
             actor_name="alice", agent=_FakeAgent([cat]),
-            session_id="s", cwd=Path("/tmp"), config={},
+            session_id="s", cwd=Path("/tmp"), config=ActorConfig(),
         )
         try:
             with self.assertRaises(RuntimeError):
                 self.manager.create(
                     actor_name="alice", agent=_FakeAgent([cat]),
-                    session_id="s", cwd=Path("/tmp"), config={},
+                    session_id="s", cwd=Path("/tmp"), config=ActorConfig(),
                 )
             # The original session is still registered and alive.
             self.assertIs(self.manager.get("alice"), first)
@@ -137,7 +137,7 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         cat = _find_binary("cat")
         info = self.manager.create(
             actor_name="alice", agent=_FakeAgent([cat]),
-            session_id="s", cwd=Path("/tmp"), config={},
+            session_id="s", cwd=Path("/tmp"), config=ActorConfig(),
         )
         self.manager.close("alice")
         self.assertFalse(self.manager.has("alice"))
@@ -151,7 +151,7 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         sh = _find_binary("sh")
         info = self.manager.create(
             actor_name="alice", agent=_FakeAgent([sh, "-c", "exit 3"]),
-            session_id="s", cwd=Path("/tmp"), config={},
+            session_id="s", cwd=Path("/tmp"), config=ActorConfig(),
         )
         # Let child exit and on_exit chain run.
         for _ in range(200):
@@ -172,7 +172,7 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         sh = _find_binary("sh")
         info = self.manager.create(
             actor_name="alice", agent=_FakeAgent([sh, "-c", "exit 0"]),
-            session_id="s", cwd=Path("/tmp"), config={},
+            session_id="s", cwd=Path("/tmp"), config=ActorConfig(),
         )
         for _ in range(200):
             run = self.db.get_run(info.run_id)
@@ -191,7 +191,7 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         cat = _find_binary("cat")
         info = self.manager.create(
             actor_name="alice", agent=_FakeAgent([cat]),
-            session_id="s", cwd=Path("/tmp"), config={},
+            session_id="s", cwd=Path("/tmp"), config=ActorConfig(),
         )
         try:
             run = self.db.get_run(info.run_id)
@@ -211,7 +211,7 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         sleep_bin = _find_binary("sleep")
         info = self.manager.create(
             actor_name="alice", agent=_FakeAgent([sleep_bin, "100"]),
-            session_id="s", cwd=Path("/tmp"), config={},
+            session_id="s", cwd=Path("/tmp"), config=ActorConfig(),
         )
         start = time.monotonic()
         self.manager.shutdown()
@@ -228,11 +228,11 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         cat = _find_binary("cat")
         alice = self.manager.create(
             actor_name="alice", agent=_FakeAgent([cat]),
-            session_id="s1", cwd=Path("/tmp"), config={},
+            session_id="s1", cwd=Path("/tmp"), config=ActorConfig(),
         )
         bob = self.manager.create(
             actor_name="bob", agent=_FakeAgent([cat]),
-            session_id="s2", cwd=Path("/tmp"), config={},
+            session_id="s2", cwd=Path("/tmp"), config=ActorConfig(),
         )
         self.manager.close_all()
         self.assertEqual(self.manager.live_names(), [])
@@ -245,7 +245,7 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         cat = _find_binary("cat")
         info = self.manager.create(
             actor_name="alice", agent=_FakeAgent([cat]),
-            session_id="s", cwd=Path("/tmp"), config={},
+            session_id="s", cwd=Path("/tmp"), config=ActorConfig(),
         )
         # Simulate external stop marking the row DONE before our on_exit.
         self.db.update_run_status(info.run_id, Status.DONE, 0)

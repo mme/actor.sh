@@ -26,7 +26,7 @@ from .types import (
     Status,
     Actor,
     Run,
-    Config,
+    ActorConfig,
     validate_name,
     parse_config,
     _now_iso,
@@ -101,7 +101,7 @@ __all__ = [
     "Status",
     "Actor",
     "Run",
-    "Config",
+    "ActorConfig",
     "validate_name",
     "parse_config",
     # Config

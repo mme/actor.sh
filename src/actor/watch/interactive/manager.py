@@ -16,7 +16,7 @@ from typing import Callable, Dict, List, Optional
 from ...commands import INTERACTIVE_PROMPT
 from ...db import Database
 from ...interfaces import Agent
-from ...types import Run, Status, _now_iso
+from ...types import ActorConfig, Run, Status, _now_iso
 from .diagnostics import DiagnosticRecorder, EventKind
 from .pty_session import PtySession
 from .screen import TerminalScreen
@@ -70,7 +70,7 @@ class InteractiveSessionManager:
         agent: Agent,
         session_id: str,
         cwd: Path,
-        config: dict,
+        config: ActorConfig,
     ) -> InteractiveSession:
         """Spawn a new interactive session for the given actor.
 
@@ -182,7 +182,7 @@ class InteractiveSessionManager:
 
     # -- DB integration ----------------------------------------------------
 
-    def _insert_run(self, actor_name: str, config: dict) -> int:
+    def _insert_run(self, actor_name: str, config: ActorConfig) -> int:
         with self._db_opener() as db:
             run = Run(
                 id=0,
@@ -191,7 +191,7 @@ class InteractiveSessionManager:
                 status=Status.RUNNING,
                 exit_code=None,
                 pid=None,
-                config=dict(config),
+                config=config,
                 started_at=_now_iso(),
                 finished_at=None,
             )

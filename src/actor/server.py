@@ -19,7 +19,9 @@ from .db import Database
 from .errors import ActorError
 from .git import RealGit
 from .process import RealProcessManager
+from .types import ActorConfig
 from .commands import (
+    _agent_class,
     cmd_config,
     cmd_discard,
     cmd_list,
@@ -29,7 +31,7 @@ from .commands import (
     cmd_show,
     cmd_stop,
 )
-from .cli import _db_path, _create_agent
+from .cli import _build_cli_overrides, _db_path, _create_agent, _resolve_agent_kind_for_cli
 
 
 class ActorMCP(FastMCP):
@@ -165,7 +167,7 @@ def config_actor(name: str, pairs: List[str] | None = None) -> str:
 def _spawn_background_run(
     name: str,
     prompt: str,
-    config_pairs: list[str],
+    cli_overrides: ActorConfig,
     ctx: Context | None,
 ) -> None:
     """Kick off a run in a background thread; send a channel notification when it finishes."""
@@ -187,7 +189,7 @@ def _spawn_background_run(
                 thread_db, agent_impl, pm,
                 name=name,
                 prompt=prompt,
-                config_pairs=config_pairs,
+                cli_overrides=cli_overrides,
             )
         except Exception as e:
             output = str(e)
@@ -237,6 +239,13 @@ def new_actor(
     """
     db = _db()
     git = RealGit()
+    # MCP exposes `config` as a flat list of key=value pairs, just like the
+    # CLI's `--config`. Route them into agent_args only (actor-keys would
+    # need dedicated MCP params, which we don't expose yet) and validate
+    # against the chosen agent's ACTOR_DEFAULTS whitelist.
+    agent_kind = _resolve_agent_kind_for_cli(agent, None, None)
+    agent_cls = _agent_class(agent_kind)
+    cli_overrides = _build_cli_overrides(agent_cls, config or [])
     actor = cmd_new(
         db, git,
         name=name,
@@ -244,14 +253,14 @@ def new_actor(
         no_worktree=no_worktree,
         base=base,
         agent_name=agent,
-        config_pairs=config or [],
+        cli_overrides=cli_overrides,
     )
 
     if prompt is not None:
         prompt = prompt.strip()
     if prompt:
         try:
-            _spawn_background_run(name, prompt, config_pairs=[], ctx=ctx)
+            _spawn_background_run(name, prompt, cli_overrides=ActorConfig(), ctx=ctx)
         except Exception as e:
             print(f"[actor-mcp] new_actor '{name}' run failed to start: {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
@@ -277,7 +286,12 @@ def run_actor(
     prompt = prompt.strip()
     if not prompt:
         raise ActorError("prompt is required")
-    _spawn_background_run(name, prompt, config_pairs=config or [], ctx=ctx)
+    # Validate MCP `config` pairs against the actor's agent — run-time
+    # overrides are agent_args only.
+    actor = _db().get_actor(name)
+    agent_cls = _agent_class(actor.agent)
+    cli_overrides = _build_cli_overrides(agent_cls, config or [])
+    _spawn_background_run(name, prompt, cli_overrides=cli_overrides, ctx=ctx)
     return f"Actor '{name}' is running."
 
 

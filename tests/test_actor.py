@@ -12,7 +12,7 @@ from actor import (
     ActorError, AlreadyExistsError, NotFoundError, IsRunningError, NotRunningError,
     InvalidNameError, AgentNotFoundError, GitError, ConfigError,
     # Types
-    AgentKind, Status, Actor, Run, LogEntry, LogEntryKind,
+    AgentKind, Status, Actor, Run, ActorConfig, LogEntry, LogEntryKind,
     validate_name, parse_config,
     # ABCs
     Agent, GitOps, ProcessManager,
@@ -24,6 +24,19 @@ from actor import (
     # Helpers
     truncate, format_duration,
 )
+
+
+def _cli(*pairs: str, actor_keys: dict | None = None) -> ActorConfig:
+    """Test helper: build an ActorConfig as if the CLI had produced it.
+
+    Positional `pairs` are treated as `--config` inputs (agent_args only);
+    the optional `actor_keys` kwarg carries dedicated-flag inputs (e.g.
+    use-subscription). Keeps test call sites compact now that the CLI
+    layer splits these before calling cmd_new / cmd_run."""
+    return ActorConfig(
+        actor_keys=dict(actor_keys or {}),
+        agent_args=parse_config(list(pairs)),
+    )
 
 # Aliases for brevity (tests use short names)
 AlreadyExists = AlreadyExistsError
@@ -39,7 +52,7 @@ AgentNotFound = AgentNotFoundError
 # ──────────────────────────────────────────────────────────────────────
 
 class FakeAgentCall:
-    def __init__(self, dir: str, prompt: str, config: dict, session_id: str | None):
+    def __init__(self, dir: str, prompt: str, config: ActorConfig, session_id: str | None):
         self.dir = dir
         self.prompt = prompt
         self.config = config
@@ -72,7 +85,7 @@ class FakeAgent(Agent):
 
     # -- Agent interface --
 
-    def start(self, dir: str, prompt: str, config: dict) -> tuple[int, str | None]:
+    def start(self, dir: str, prompt: str, config: ActorConfig) -> tuple[int, str | None]:
         if self.next_start_error is not None:
             err = self.next_start_error
             self.next_start_error = None
@@ -80,13 +93,13 @@ class FakeAgent(Agent):
         pid = self.next_pid
         self.next_pid += 1
         session_id = self.next_session_id
-        self.calls.append(FakeAgentCall(dir, prompt, dict(config), session_id=None))
+        self.calls.append(FakeAgentCall(dir, prompt, config, session_id=None))
         return pid, session_id
 
-    def resume(self, dir: str, session_id: str, prompt: str, config: dict) -> int:
+    def resume(self, dir: str, session_id: str, prompt: str, config: ActorConfig) -> int:
         pid = self.next_pid
         self.next_pid += 1
-        self.calls.append(FakeAgentCall(dir, prompt, dict(config), session_id=session_id))
+        self.calls.append(FakeAgentCall(dir, prompt, config, session_id=session_id))
         return pid
 
     def wait(self, pid: int) -> tuple[int, str]:
@@ -191,7 +204,19 @@ class FakeProcessManager(ProcessManager):
 #  Shared helpers
 # ──────────────────────────────────────────────────────────────────────
 
+def _coerce_config(c) -> ActorConfig:
+    """Accept ActorConfig directly, or a flat dict (treated as agent_args
+    for back-compat — every pre-refactor fixture passed things like
+    `{"model": "sonnet"}`, which are agent-bound flags)."""
+    if isinstance(c, ActorConfig):
+        return c
+    if isinstance(c, dict):
+        return ActorConfig(agent_args=dict(c))
+    raise TypeError(f"unexpected config type: {type(c).__name__}")
+
+
 def make_actor(name: str, **overrides) -> Actor:
+    overrides["config"] = _coerce_config(overrides.get("config", ActorConfig()))
     kwargs = dict(
         name=name,
         agent=AgentKind.CLAUDE,
@@ -201,7 +226,7 @@ def make_actor(name: str, **overrides) -> Actor:
         base_branch=None,
         worktree=False,
         parent=None,
-        config={},
+        config=ActorConfig(),
         created_at="2026-01-01T00:00:00Z",
         updated_at="2026-01-01T00:00:00Z",
     )
@@ -228,7 +253,7 @@ def make_run(actor_name: str, prompt: str, status: Status,
         status=status,
         exit_code=exit_code,
         pid=pid,
-        config={},
+        config=ActorConfig(),
         started_at=started_at,
         finished_at=finished_at,
     )
@@ -244,7 +269,7 @@ def create_actor(db: Database, name: str, config: list[str] | None = None):
         no_worktree=True,
         base=None,
         agent_name="claude",
-        config_pairs=config or ["model=sonnet"],
+        cli_overrides=_cli(*(config or ["model=sonnet"])),
     )
 
 
@@ -257,7 +282,7 @@ def create_actor_with_worktree(db: Database, git: FakeGit, name: str):
         no_worktree=False,
         base=None,
         agent_name="claude",
-        config_pairs=[],
+        cli_overrides=ActorConfig(),
     )
 
 
@@ -359,7 +384,7 @@ class TestDatabase(unittest.TestCase):
             status=Status.RUNNING,
             exit_code=None,
             pid=1234,
-            config={},
+            config=ActorConfig(),
             started_at="2026-01-01T00:00:00Z",
             finished_at=None,
         )
@@ -381,7 +406,7 @@ class TestDatabase(unittest.TestCase):
         db.insert_actor(make_actor("test"))
         run1 = Run(
             id=0, actor_name="test", prompt="first", status=Status.DONE,
-            exit_code=0, pid=1, config={},
+            exit_code=0, pid=1, config=ActorConfig(),
             started_at="2026-01-01T00:00:00Z",
             finished_at="2026-01-01T00:01:00Z",
         )
@@ -391,7 +416,7 @@ class TestDatabase(unittest.TestCase):
 
         run2 = Run(
             id=0, actor_name="test", prompt="second", status=Status.ERROR,
-            exit_code=1, pid=2, config={},
+            exit_code=1, pid=2, config=ActorConfig(),
             started_at="2026-01-01T00:02:00Z",
             finished_at="2026-01-01T00:03:00Z",
         )
@@ -404,7 +429,7 @@ class TestDatabase(unittest.TestCase):
         db.insert_actor(make_actor("test"))
         run = Run(
             id=0, actor_name="test", prompt="go", status=Status.RUNNING,
-            exit_code=None, pid=99, config={},
+            exit_code=None, pid=99, config=ActorConfig(),
             started_at="2026-01-01T00:00:00Z", finished_at=None,
         )
         run_id = db.insert_run(run)
@@ -419,7 +444,7 @@ class TestDatabase(unittest.TestCase):
         db.insert_actor(make_actor("test"))
         run = Run(
             id=0, actor_name="test", prompt="go", status=Status.DONE,
-            exit_code=0, pid=1, config={},
+            exit_code=0, pid=1, config=ActorConfig(),
             started_at="2026-01-01T00:00:00Z",
             finished_at="2026-01-01T00:01:00Z",
         )
@@ -433,7 +458,7 @@ class TestDatabase(unittest.TestCase):
         for i in range(10):
             r = Run(
                 id=0, actor_name="test", prompt=f"prompt {i}",
-                status=Status.DONE, exit_code=0, pid=i, config={},
+                status=Status.DONE, exit_code=0, pid=i, config=ActorConfig(),
                 started_at=f"2026-01-01T00:{i:02d}:00Z",
                 finished_at=f"2026-01-01T00:{i:02d}:30Z",
             )
@@ -452,7 +477,7 @@ class TestDatabase(unittest.TestCase):
     def test_update_actor_config_missing_actor_errors(self):
         db = self._db()
         with self.assertRaises(NotFound):
-            db.update_actor_config("nonexistent", {})
+            db.update_actor_config("nonexistent", ActorConfig())
 
     def test_update_run_status_missing_run_errors(self):
         db = self._db()
@@ -464,8 +489,8 @@ class TestDatabase(unittest.TestCase):
         actor = make_actor("test", config={"model": "sonnet", "max-budget-usd": "5"})
         db.insert_actor(actor)
         fetched = db.get_actor("test")
-        self.assertEqual(fetched.config["model"], "sonnet")
-        self.assertEqual(fetched.config["max-budget-usd"], "5")
+        self.assertEqual(fetched.config.agent_args["model"], "sonnet")
+        self.assertEqual(fetched.config.agent_args["max-budget-usd"], "5")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -487,13 +512,13 @@ class TestCmdNew(unittest.TestCase):
             no_worktree=True,
             base=None,
             agent_name="claude",
-            config_pairs=["model=sonnet"],
+            cli_overrides=_cli('model=sonnet'),
         )
         self.assertEqual(actor.name, "test-actor")
         self.assertFalse(actor.worktree)
         self.assertIsNone(actor.source_repo)
         self.assertIsNone(actor.base_branch)
-        self.assertEqual(actor.config["model"], "sonnet")
+        self.assertEqual(actor.config.agent_args["model"], "sonnet")
         fetched = db.get_actor("test-actor")
         self.assertEqual(fetched.name, "test-actor")
 
@@ -508,7 +533,7 @@ class TestCmdNew(unittest.TestCase):
             no_worktree=False,
             base=None,
             agent_name="claude",
-            config_pairs=[],
+            cli_overrides=ActorConfig(),
         )
         self.assertTrue(actor.worktree)
         self.assertEqual(actor.base_branch, "develop")
@@ -525,7 +550,7 @@ class TestCmdNew(unittest.TestCase):
             no_worktree=False,
             base="release-1.0",
             agent_name="claude",
-            config_pairs=[],
+            cli_overrides=ActorConfig(),
         )
         self.assertEqual(actor.base_branch, "release-1.0")
 
@@ -540,7 +565,7 @@ class TestCmdNew(unittest.TestCase):
                 no_worktree=True,
                 base=None,
                 agent_name="claude",
-                config_pairs=[],
+                cli_overrides=ActorConfig(),
             )
 
     def test_new_actor_duplicate_name(self):
@@ -548,7 +573,7 @@ class TestCmdNew(unittest.TestCase):
         git = FakeGit()
         kwargs = dict(
             name="dupe", dir="/tmp", no_worktree=True,
-            base=None, agent_name="claude", config_pairs=[],
+            base=None, agent_name="claude", cli_overrides=ActorConfig(),
         )
         cmd_new(db, git, **kwargs)
         with self.assertRaises(AlreadyExists):
@@ -565,7 +590,7 @@ class TestCmdNew(unittest.TestCase):
             no_worktree=False,
             base=None,
             agent_name="claude",
-            config_pairs=[],
+            cli_overrides=ActorConfig(),
         )
         self.assertFalse(actor.worktree)
         self.assertIsNone(actor.source_repo)
@@ -583,7 +608,7 @@ class TestCmdNew(unittest.TestCase):
                 no_worktree=False,
                 base=None,
                 agent_name="claude",
-                config_pairs=[],
+                cli_overrides=ActorConfig(),
             )
         with self.assertRaises(NotFound):
             db.get_actor("feature")
@@ -619,13 +644,13 @@ class TestCmdNewTemplate(unittest.TestCase):
             no_worktree=True,
             base=None,
             agent_name=None,
-            config_pairs=[],
+            cli_overrides=ActorConfig(),
             template_name="qa",
             app_config=self._cfg_with_qa(),
         )
         self.assertEqual(actor.agent, AgentKind.CODEX)
-        self.assertEqual(actor.config["model"], "opus")
-        self.assertEqual(actor.config["effort"], "max")
+        self.assertEqual(actor.config.agent_args["model"], "opus")
+        self.assertEqual(actor.config.agent_args["effort"], "max")
 
     def test_cli_agent_overrides_template_agent(self):
         db = self._db()
@@ -637,7 +662,7 @@ class TestCmdNewTemplate(unittest.TestCase):
             no_worktree=True,
             base=None,
             agent_name="claude",
-            config_pairs=[],
+            cli_overrides=ActorConfig(),
             template_name="qa",
             app_config=self._cfg_with_qa(),
         )
@@ -653,12 +678,12 @@ class TestCmdNewTemplate(unittest.TestCase):
             no_worktree=True,
             base=None,
             agent_name=None,
-            config_pairs=["model=haiku"],
+            cli_overrides=_cli('model=haiku'),
             template_name="qa",
             app_config=self._cfg_with_qa(),
         )
-        self.assertEqual(actor.config["model"], "haiku")
-        self.assertEqual(actor.config["effort"], "max")
+        self.assertEqual(actor.config.agent_args["model"], "haiku")
+        self.assertEqual(actor.config.agent_args["effort"], "max")
 
     def test_unknown_template_raises_config_error(self):
         from actor.errors import ConfigError
@@ -672,7 +697,7 @@ class TestCmdNewTemplate(unittest.TestCase):
                 no_worktree=True,
                 base=None,
                 agent_name=None,
-                config_pairs=[],
+                cli_overrides=ActorConfig(),
                 template_name="does-not-exist",
                 app_config=self._cfg_with_qa(),
             )
@@ -687,10 +712,10 @@ class TestCmdNewTemplate(unittest.TestCase):
             no_worktree=True,
             base=None,
             agent_name="claude",
-            config_pairs=["model=sonnet"],
+            cli_overrides=_cli('model=sonnet'),
         )
         self.assertEqual(actor.agent, AgentKind.CLAUDE)
-        self.assertEqual(actor.config["model"], "sonnet")
+        self.assertEqual(actor.config.agent_args["model"], "sonnet")
 
     def test_agent_name_none_without_template_defaults_to_claude(self):
         db = self._db()
@@ -702,7 +727,7 @@ class TestCmdNewTemplate(unittest.TestCase):
             no_worktree=True,
             base=None,
             agent_name=None,
-            config_pairs=[],
+            cli_overrides=ActorConfig(),
         )
         self.assertEqual(actor.agent, AgentKind.CLAUDE)
 
@@ -725,12 +750,12 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
             no_worktree=True,
             base=None,
             agent_name="claude",
-            config_pairs=[],
+            cli_overrides=ActorConfig(),
             template_name=None,
             app_config=AppConfig(),
         )
-        self.assertEqual(actor.config.get("permission-mode"), "auto")
-        self.assertEqual(actor.config.get("use-subscription"), "true")
+        self.assertEqual(actor.config.agent_args.get("permission-mode"), "auto")
+        self.assertEqual(actor.config.actor_keys.get("use-subscription"), "true")
 
     def test_class_defaults_applied_when_app_config_is_none(self):
         # Callers that don't pass app_config (e.g. older integration paths)
@@ -744,10 +769,10 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
             no_worktree=True,
             base=None,
             agent_name="claude",
-            config_pairs=[],
+            cli_overrides=ActorConfig(),
         )
-        self.assertEqual(actor.config.get("permission-mode"), "auto")
-        self.assertEqual(actor.config.get("use-subscription"), "true")
+        self.assertEqual(actor.config.agent_args.get("permission-mode"), "auto")
+        self.assertEqual(actor.config.actor_keys.get("use-subscription"), "true")
 
     def test_class_defaults_apply_to_codex(self):
         from actor import AppConfig
@@ -760,12 +785,12 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
             no_worktree=True,
             base=None,
             agent_name="codex",
-            config_pairs=[],
+            cli_overrides=ActorConfig(),
             app_config=AppConfig(),
         )
-        self.assertEqual(actor.config.get("sandbox"), "danger-full-access")
-        self.assertEqual(actor.config.get("a"), "never")
-        self.assertEqual(actor.config.get("use-subscription"), "true")
+        self.assertEqual(actor.config.agent_args.get("sandbox"), "danger-full-access")
+        self.assertEqual(actor.config.agent_args.get("a"), "never")
+        self.assertEqual(actor.config.actor_keys.get("use-subscription"), "true")
 
     def test_kdl_agent_defaults_override_class_defaults(self):
         from actor import AgentDefaults, AppConfig
@@ -786,12 +811,12 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
             no_worktree=True,
             base=None,
             agent_name="claude",
-            config_pairs=[],
+            cli_overrides=ActorConfig(),
             app_config=app,
         )
-        self.assertEqual(actor.config.get("use-subscription"), "false")
-        self.assertEqual(actor.config.get("permission-mode"), "plan")
-        self.assertEqual(actor.config.get("model"), "opus")
+        self.assertEqual(actor.config.actor_keys.get("use-subscription"), "false")
+        self.assertEqual(actor.config.agent_args.get("permission-mode"), "plan")
+        self.assertEqual(actor.config.agent_args.get("model"), "opus")
 
     def test_kdl_null_cancels_class_default(self):
         from actor import AgentDefaults, AppConfig
@@ -811,12 +836,12 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
             no_worktree=True,
             base=None,
             agent_name="claude",
-            config_pairs=[],
+            cli_overrides=ActorConfig(),
             app_config=app,
         )
-        self.assertNotIn("permission-mode", actor.config)
+        self.assertNotIn("permission-mode", actor.config.agent_args)
         # Other class defaults still apply.
-        self.assertEqual(actor.config.get("use-subscription"), "true")
+        self.assertEqual(actor.config.actor_keys.get("use-subscription"), "true")
 
     def test_template_overrides_kdl_agent_defaults(self):
         from actor import AgentDefaults, AppConfig, Template
@@ -837,11 +862,11 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
             no_worktree=True,
             base=None,
             agent_name="claude",
-            config_pairs=[],
+            cli_overrides=ActorConfig(),
             template_name="qa",
             app_config=app,
         )
-        self.assertEqual(actor.config.get("permission-mode"), "plan")
+        self.assertEqual(actor.config.agent_args.get("permission-mode"), "plan")
 
     def test_cli_overrides_template_over_kdl_over_class_defaults(self):
         from actor import AgentDefaults, AppConfig, Template
@@ -868,14 +893,14 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
             no_worktree=True,
             base=None,
             agent_name="claude",
-            config_pairs=["model=haiku"],
+            cli_overrides=_cli('model=haiku'),
             template_name="qa",
             app_config=app,
         )
-        self.assertEqual(actor.config.get("model"), "haiku")            # CLI wins
-        self.assertEqual(actor.config.get("extra"), "tpl")              # tpl > kdl
-        self.assertEqual(actor.config.get("permission-mode"), "plan")   # tpl
-        self.assertEqual(actor.config.get("use-subscription"), "false") # kdl > class
+        self.assertEqual(actor.config.agent_args.get("model"), "haiku")            # CLI wins
+        self.assertEqual(actor.config.agent_args.get("extra"), "tpl")              # tpl > kdl
+        self.assertEqual(actor.config.agent_args.get("permission-mode"), "plan")   # tpl
+        self.assertEqual(actor.config.actor_keys.get("use-subscription"), "false") # kdl > class
 
     def test_codex_agent_defaults_do_not_leak_into_claude_actor(self):
         from actor import AgentDefaults, AppConfig
@@ -893,10 +918,10 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
             no_worktree=True,
             base=None,
             agent_name="claude",
-            config_pairs=[],
+            cli_overrides=ActorConfig(),
             app_config=app,
         )
-        self.assertNotIn("m", actor.config)
+        self.assertNotIn("m", actor.config.agent_args)
 
     def test_single_kdl_layer_null_cancels_class_default_end_to_end(self):
         """Regression: a settings.kdl that only contains null-as-cancel must
@@ -924,12 +949,12 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
                 no_worktree=True,
                 base=None,
                 agent_name="claude",
-                config_pairs=[],
+                cli_overrides=ActorConfig(),
                 app_config=cfg,
             )
-        self.assertNotIn("permission-mode", actor.config)
+        self.assertNotIn("permission-mode", actor.config.agent_args)
         # Other class defaults stay in place.
-        self.assertEqual(actor.config.get("use-subscription"), "true")
+        self.assertEqual(actor.config.actor_keys.get("use-subscription"), "true")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -946,7 +971,7 @@ class TestCmdRun(unittest.TestCase):
         create_actor(db, "test")
         agent = FakeAgent()
         pm = FakeProcessManager()
-        cmd_run(db, agent, pm, name="test", prompt="do the thing", config_pairs=[])
+        cmd_run(db, agent, pm, name="test", prompt="do the thing", cli_overrides=ActorConfig())
         actor = db.get_actor("test")
         self.assertIsNotNone(actor.agent_session)
         latest = db.latest_run("test")
@@ -959,8 +984,8 @@ class TestCmdRun(unittest.TestCase):
         create_actor(db, "test")
         agent = FakeAgent()
         pm = FakeProcessManager()
-        cmd_run(db, agent, pm, name="test", prompt="first", config_pairs=[])
-        cmd_run(db, agent, pm, name="test", prompt="second", config_pairs=[])
+        cmd_run(db, agent, pm, name="test", prompt="first", cli_overrides=ActorConfig())
+        cmd_run(db, agent, pm, name="test", prompt="second", cli_overrides=ActorConfig())
         self.assertEqual(len(agent.calls), 2)
         # Second call should have a session_id (resume)
         self.assertIsNotNone(agent.calls[1].session_id)
@@ -971,14 +996,14 @@ class TestCmdRun(unittest.TestCase):
         pm = FakeProcessManager()
         run = Run(
             id=0, actor_name="test", prompt="go", status=Status.RUNNING,
-            exit_code=None, pid=999, config={},
+            exit_code=None, pid=999, config=ActorConfig(),
             started_at="2026-01-01T00:00:00Z", finished_at=None,
         )
         db.insert_run(run)
         pm.mark_alive(999)
         agent = FakeAgent()
         with self.assertRaises(IsRunning):
-            cmd_run(db, agent, pm, name="test", prompt="another", config_pairs=[])
+            cmd_run(db, agent, pm, name="test", prompt="another", cli_overrides=ActorConfig())
 
     def test_run_detects_stale_pid_and_proceeds(self):
         db = self._db()
@@ -986,13 +1011,13 @@ class TestCmdRun(unittest.TestCase):
         pm = FakeProcessManager()
         run = Run(
             id=0, actor_name="test", prompt="stale", status=Status.RUNNING,
-            exit_code=None, pid=888, config={},
+            exit_code=None, pid=888, config=ActorConfig(),
             started_at="2026-01-01T00:00:00Z", finished_at=None,
         )
         db.insert_run(run)
         # PID 888 is NOT alive
         agent = FakeAgent()
-        cmd_run(db, agent, pm, name="test", prompt="retry", config_pairs=[])
+        cmd_run(db, agent, pm, name="test", prompt="retry", cli_overrides=ActorConfig())
         runs, _ = db.list_runs("test", limit=10)
         self.assertEqual(len(runs), 2)
         self.assertEqual(runs[0].status, Status.DONE)    # latest
@@ -1004,13 +1029,13 @@ class TestCmdRun(unittest.TestCase):
         agent = FakeAgent()
         pm = FakeProcessManager()
         cmd_run(db, agent, pm, name="test", prompt="go",
-                config_pairs=["model=opus", "max-budget-usd=10"])
+                cli_overrides=_cli('model=opus', 'max-budget-usd=10'))
         latest = db.latest_run("test")
-        self.assertEqual(latest.config["model"], "opus")        # overridden
-        self.assertEqual(latest.config["max-budget-usd"], "10") # added
+        self.assertEqual(latest.config.agent_args["model"], "opus")        # overridden
+        self.assertEqual(latest.config.agent_args["max-budget-usd"], "10") # added
         # Actor config unchanged
         actor = db.get_actor("test")
-        self.assertEqual(actor.config["model"], "sonnet")
+        self.assertEqual(actor.config.agent_args["model"], "sonnet")
 
     def test_run_with_nonzero_exit_sets_error(self):
         db = self._db()
@@ -1018,7 +1043,7 @@ class TestCmdRun(unittest.TestCase):
         agent = FakeAgent()
         agent.set_exit_code(1)
         pm = FakeProcessManager()
-        cmd_run(db, agent, pm, name="test", prompt="fail", config_pairs=[])
+        cmd_run(db, agent, pm, name="test", prompt="fail", cli_overrides=ActorConfig())
         latest = db.latest_run("test")
         self.assertEqual(latest.status, Status.ERROR)
         self.assertEqual(latest.exit_code, 1)
@@ -1028,7 +1053,7 @@ class TestCmdRun(unittest.TestCase):
         agent = FakeAgent()
         pm = FakeProcessManager()
         with self.assertRaises(NotFound):
-            cmd_run(db, agent, pm, name="nope", prompt="go", config_pairs=[])
+            cmd_run(db, agent, pm, name="nope", prompt="go", cli_overrides=ActorConfig())
 
     def test_run_agent_start_failure_marks_run_as_error(self):
         db = self._db()
@@ -1037,7 +1062,7 @@ class TestCmdRun(unittest.TestCase):
         agent.set_start_error(ActorError("agent crashed"))
         pm = FakeProcessManager()
         with self.assertRaises(ActorError):
-            cmd_run(db, agent, pm, name="test", prompt="do the thing", config_pairs=[])
+            cmd_run(db, agent, pm, name="test", prompt="do the thing", cli_overrides=ActorConfig())
         latest = db.latest_run("test")
         self.assertIsNotNone(latest, "run row should exist marked as error")
         self.assertEqual(latest.status, Status.ERROR)
@@ -1115,7 +1140,7 @@ class TestCmdInteractive(unittest.TestCase):
         pm = FakeProcessManager()
         run = Run(
             id=0, actor_name="test", prompt="go", status=Status.RUNNING,
-            exit_code=None, pid=999, config={},
+            exit_code=None, pid=999, config=ActorConfig(),
             started_at="2026-01-01T00:00:00Z", finished_at=None,
         )
         db.insert_run(run)
@@ -1750,7 +1775,7 @@ class TestCmdStop(unittest.TestCase):
         run = Run(
             id=0, actor_name=actor_name, prompt="do stuff",
             status=Status.RUNNING, exit_code=None, pid=pid,
-            config={}, started_at="2026-01-01T00:00:00Z", finished_at=None,
+            config=ActorConfig(), started_at="2026-01-01T00:00:00Z", finished_at=None,
         )
         return db.insert_run(run)
 
@@ -1775,7 +1800,7 @@ class TestCmdStop(unittest.TestCase):
         pm = FakeProcessManager()
         run = Run(
             id=0, actor_name="test", prompt="done", status=Status.DONE,
-            exit_code=0, pid=100, config={},
+            exit_code=0, pid=100, config=ActorConfig(),
             started_at="2026-01-01T00:00:00Z",
             finished_at="2026-01-01T00:01:00Z",
         )
@@ -1819,7 +1844,7 @@ class TestCmdStop(unittest.TestCase):
         pm = FakeProcessManager()
         run = Run(
             id=0, actor_name="test", prompt="weird", status=Status.RUNNING,
-            exit_code=None, pid=None, config={},
+            exit_code=None, pid=None, config=ActorConfig(),
             started_at="2026-01-01T00:00:00Z", finished_at=None,
         )
         db.insert_run(run)
@@ -1848,7 +1873,7 @@ class TestCmdStop(unittest.TestCase):
         pm = FakeProcessManager()
         run1 = Run(
             id=0, actor_name="test", prompt="first", status=Status.DONE,
-            exit_code=0, pid=100, config={},
+            exit_code=0, pid=100, config=ActorConfig(),
             started_at="2026-01-01T00:00:00Z",
             finished_at="2026-01-01T00:01:00Z",
         )
@@ -1915,8 +1940,8 @@ class TestCmdConfig(unittest.TestCase):
         db.insert_actor(make_actor("test"))
         cmd_config(db, name="test", config_pairs=["model=sonnet", "max-turns=10"])
         actor = db.get_actor("test")
-        self.assertEqual(actor.config["model"], "sonnet")
-        self.assertEqual(actor.config["max-turns"], "10")
+        self.assertEqual(actor.config.agent_args["model"], "sonnet")
+        self.assertEqual(actor.config.agent_args["max-turns"], "10")
 
     def test_merge_config_preserves_existing(self):
         db = self._db()
@@ -1924,9 +1949,9 @@ class TestCmdConfig(unittest.TestCase):
         db.insert_actor(actor)
         cmd_config(db, name="test", config_pairs=["timeout=30"])
         actor = db.get_actor("test")
-        self.assertEqual(actor.config["model"], "sonnet")
-        self.assertEqual(actor.config["max-turns"], "10")
-        self.assertEqual(actor.config["timeout"], "30")
+        self.assertEqual(actor.config.agent_args["model"], "sonnet")
+        self.assertEqual(actor.config.agent_args["max-turns"], "10")
+        self.assertEqual(actor.config.agent_args["timeout"], "30")
 
     def test_merge_config_overwrites_existing_key(self):
         db = self._db()
@@ -1934,14 +1959,14 @@ class TestCmdConfig(unittest.TestCase):
         db.insert_actor(actor)
         cmd_config(db, name="test", config_pairs=["model=opus"])
         actor = db.get_actor("test")
-        self.assertEqual(actor.config["model"], "opus")
+        self.assertEqual(actor.config.agent_args["model"], "opus")
 
     def test_config_value_with_equals_sign(self):
         db = self._db()
         db.insert_actor(make_actor("test"))
         cmd_config(db, name="test", config_pairs=["prompt=a=b=c"])
         actor = db.get_actor("test")
-        self.assertEqual(actor.config["prompt"], "a=b=c")
+        self.assertEqual(actor.config.agent_args["prompt"], "a=b=c")
 
     def test_actor_not_found(self):
         db = self._db()
@@ -1953,17 +1978,17 @@ class TestCmdConfig(unittest.TestCase):
         db.insert_actor(make_actor("test"))
         cmd_config(db, name="test", config_pairs=["verbose"])
         actor = db.get_actor("test")
-        self.assertEqual(actor.config["verbose"], "")
+        self.assertEqual(actor.config.agent_args["verbose"], "")
 
     def test_set_multiple_config_pairs_at_once(self):
         db = self._db()
         db.insert_actor(make_actor("test"))
         cmd_config(db, name="test", config_pairs=["model=sonnet", "max-turns=10", "timeout=30"])
         actor = db.get_actor("test")
-        self.assertEqual(len(actor.config), 3)
-        self.assertEqual(actor.config["model"], "sonnet")
-        self.assertEqual(actor.config["max-turns"], "10")
-        self.assertEqual(actor.config["timeout"], "30")
+        self.assertEqual((len(actor.config.actor_keys) + len(actor.config.agent_args)), 3)
+        self.assertEqual(actor.config.agent_args["model"], "sonnet")
+        self.assertEqual(actor.config.agent_args["max-turns"], "10")
+        self.assertEqual(actor.config.agent_args["timeout"], "30")
 
     def test_successive_config_updates(self):
         db = self._db()
@@ -1972,9 +1997,9 @@ class TestCmdConfig(unittest.TestCase):
         cmd_config(db, name="test", config_pairs=["max-turns=10"])
         cmd_config(db, name="test", config_pairs=["model=opus"])
         actor = db.get_actor("test")
-        self.assertEqual(len(actor.config), 2)
-        self.assertEqual(actor.config["model"], "opus")
-        self.assertEqual(actor.config["max-turns"], "10")
+        self.assertEqual((len(actor.config.actor_keys) + len(actor.config.agent_args)), 2)
+        self.assertEqual(actor.config.agent_args["model"], "opus")
+        self.assertEqual(actor.config.agent_args["max-turns"], "10")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -2161,7 +2186,7 @@ class TestCmdDiscard(unittest.TestCase):
         pm = FakeProcessManager()
         run = Run(
             id=0, actor_name="test", prompt="go", status=Status.RUNNING,
-            exit_code=None, pid=999, config={},
+            exit_code=None, pid=999, config=ActorConfig(),
             started_at="2026-01-01T00:00:00Z", finished_at=None,
         )
         db.insert_run(run)
@@ -2177,7 +2202,7 @@ class TestCmdDiscard(unittest.TestCase):
         pm = FakeProcessManager()
         run = Run(
             id=0, actor_name="test", prompt="go", status=Status.RUNNING,
-            exit_code=None, pid=888, config={},
+            exit_code=None, pid=888, config=ActorConfig(),
             started_at="2026-01-01T00:00:00Z", finished_at=None,
         )
         db.insert_run(run)
@@ -2197,7 +2222,7 @@ class TestCmdDiscard(unittest.TestCase):
         create_actor(db, "test", config=[])
         run = Run(
             id=0, actor_name="test", prompt="go", status=Status.DONE,
-            exit_code=0, pid=1, config={},
+            exit_code=0, pid=1, config=ActorConfig(),
             started_at="2026-01-01T00:00:00Z",
             finished_at="2026-01-01T00:01:00Z",
         )
@@ -2249,7 +2274,7 @@ class TestCmdDiscard(unittest.TestCase):
         db.insert_actor(child)
         run = Run(
             id=0, actor_name="child", prompt="go", status=Status.RUNNING,
-            exit_code=None, pid=777, config={},
+            exit_code=None, pid=777, config=ActorConfig(),
             started_at="2026-01-01T00:00:00Z", finished_at=None,
         )
         db.insert_run(run)

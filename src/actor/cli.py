@@ -6,13 +6,14 @@ import sys
 from typing import List, Optional
 
 from . import __version__
-from .errors import ActorError
+from .errors import ActorError, ConfigError
 from .interfaces import Agent
-from .types import AgentKind, Status
+from .types import ActorConfig, AgentKind, Status, parse_config
 from .db import Database
 from .git import RealGit
 from .process import RealProcessManager
 from .commands import (
+    _agent_class,
     _create_agent as _create_agent_impl,
     cmd_config,
     cmd_discard,
@@ -30,6 +31,50 @@ def _create_agent(kind: AgentKind) -> Agent:
     # Thin re-export of commands._create_agent so existing test patches and
     # sibling modules (server.py, watch.app) can keep importing from `cli`.
     return _create_agent_impl(kind)
+
+
+def _resolve_agent_kind_for_cli(
+    cli_agent: Optional[str],
+    template_name: Optional[str],
+    app_config,
+) -> AgentKind:
+    """Replicate cmd_new's agent resolution for CLI-side validation.
+
+    CLI validation of `--config` needs the target agent class to know which
+    keys are actor-keys. Agent precedence mirrors cmd_new: explicit flag →
+    template's `agent` → "claude"."""
+    if cli_agent is not None:
+        return AgentKind.from_str(cli_agent)
+    if template_name is not None and app_config is not None:
+        tpl = app_config.templates.get(template_name)
+        if tpl is not None and tpl.agent:
+            return AgentKind.from_str(tpl.agent)
+    return AgentKind.CLAUDE
+
+
+def _build_cli_overrides(
+    agent_cls,
+    config_pairs: list[str],
+    use_subscription: Optional[bool] = None,
+) -> ActorConfig:
+    """Translate raw CLI inputs into a structured ActorConfig.
+
+    `--config KEY=VALUE` always targets agent_args; if KEY collides with an
+    actor-key name (i.e. appears in the agent class's ACTOR_DEFAULTS), we
+    reject here with a helpful error pointing users at the dedicated flag.
+    Dedicated actor-key flags (currently just `--use-subscription` /
+    `--no-use-subscription`) populate actor_keys directly."""
+    agent_args = parse_config(config_pairs)
+    for key in agent_args:
+        if key in agent_cls.ACTOR_DEFAULTS:
+            raise ConfigError(
+                f"--config {key}={agent_args[key]}: actor-keys cannot be set "
+                f"via --config; use --{key} / --no-{key} instead."
+            )
+    actor_keys: dict[str, str] = {}
+    if use_subscription is not None:
+        actor_keys["use-subscription"] = "true" if use_subscription else "false"
+    return ActorConfig(actor_keys=actor_keys, agent_args=agent_args)
 
 
 def _db_path() -> str:
@@ -337,13 +382,22 @@ def main(argv: Optional[List[str]] = None) -> None:
             from .config import load_config
             app_config = load_config()
 
+            # --config goes into agent_args; --model is an agent_arg too.
+            # --use-subscription is an actor-key, so it routes separately.
             config_pairs = list(args.config)
             if args.model is not None:
                 config_pairs.append(f"model={args.model}")
-            if args.use_subscription is not None:
-                config_pairs.append(
-                    f"use-subscription={'true' if args.use_subscription else 'false'}"
-                )
+
+            agent_kind = _resolve_agent_kind_for_cli(
+                args.agent, args.template, app_config,
+            )
+            agent_cls = _agent_class(agent_kind)
+            cli_overrides = _build_cli_overrides(
+                agent_cls,
+                config_pairs,
+                use_subscription=args.use_subscription,
+            )
+
             actor = cmd_new(
                 db, git,
                 name=args.name,
@@ -351,7 +405,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 no_worktree=args.no_worktree,
                 base=args.base,
                 agent_name=args.agent,
-                config_pairs=config_pairs,
+                cli_overrides=cli_overrides,
                 template_name=args.template,
                 app_config=app_config,
             )
@@ -379,7 +433,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                         db, agent, proc_mgr,
                         name=args.name,
                         prompt=prompt,
-                        config_pairs=[],  # creation flags already saved as defaults
+                        cli_overrides=ActorConfig(),  # creation flags already saved as defaults
                     )
                 except Exception as e:
                     print(f"error: actor created but run failed: {e}", file=sys.stderr)
@@ -407,12 +461,15 @@ def main(argv: Optional[List[str]] = None) -> None:
                 print("error: prompt is required (pass as argument or pipe via stdin, or use -i)", file=sys.stderr)
                 sys.exit(1)
 
-            agent = agent_for(args.name)
+            actor_row = db.get_actor(args.name)
+            agent_cls = _agent_class(actor_row.agent)
+            cli_overrides = _build_cli_overrides(agent_cls, list(args.config))
+            agent = _create_agent(actor_row.agent)
             cmd_run(
                 db, agent, proc_mgr,
                 name=args.name,
                 prompt=prompt,
-                config_pairs=list(args.config),
+                cli_overrides=cli_overrides,
             )
 
         elif args.command == "list":
