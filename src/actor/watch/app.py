@@ -232,16 +232,11 @@ class ActorWatchApp(App):
             pass
 
     def _try_apply_omarchy_theme(self) -> bool:
-        """If omarchy is present, flavor CLAUDE_DARK with its palette
-        and register the result under the same name ('claude-dark') so
-        no extra picker entry appears. Returns True when omarchy
-        affected the rendered theme."""
-        flavored = apply_omarchy_flavor(CLAUDE_DARK)
-        if flavored is None:
-            return False
-        self._apply_flavored(flavored)
-        self._omarchy_mtime = omarchy_theme_mtime()
-        return True
+        """If omarchy is present, flavor the currently active Claude
+        base (dark or light) and register the result under its own
+        name so no extra picker entry appears. Returns True when
+        omarchy affected the rendered theme."""
+        return self._reflavor_current_base()
 
     def _poll_omarchy_theme(self) -> None:
         """Refresh the active theme if omarchy's colors.toml changed.
@@ -257,31 +252,46 @@ class ActorWatchApp(App):
             return
         if self._omarchy_mtime is not None and current == self._omarchy_mtime:
             return
-        flavored = apply_omarchy_flavor(CLAUDE_DARK)
-        if flavored is None:
-            return
-        self._apply_flavored(flavored)
+        self._reflavor_current_base()
         self._omarchy_mtime = current
 
-    def _apply_flavored(self, flavored) -> None:
+    def _reflavor_current_base(self) -> bool:
+        """Flavor whichever CLAUDE_* base matches the currently active
+        theme. Keeps user-chosen light/dark preference intact — each
+        base carries its own hardcoded surface + foreground, so the
+        flavor only shifts the slots apply_omarchy_flavor owns."""
+        active = getattr(self, "theme", None)
+        if active == "claude-light":
+            base = CLAUDE_LIGHT
+        else:
+            # Default to claude-dark on first application and on any
+            # other active name (e.g. textual's built-ins) so we
+            # always converge on our dark baseline when omarchy is
+            # present.
+            base = CLAUDE_DARK
+        flavored = apply_omarchy_flavor(base)
+        if flavored is None:
+            return False
+        self._apply_flavored(flavored, base.name)
+        self._omarchy_mtime = omarchy_theme_mtime()
+        return True
+
+    def _apply_flavored(self, flavored, name: str) -> None:
         """Register the flavored theme and force Textual to re-apply.
 
-        Setting `self.theme = "claude-dark"` when it's already the
-        active name is a no-op — the `theme` reactive compares names
-        for equality and short-circuits. Calling `_watch_theme`
-        directly runs the same invalidation chain the reactive would
-        have run on a real name change: toggles the light/dark CSS
-        class, refreshes the truecolor filter, and invalidates the
-        compiled stylesheet so our new palette actually renders."""
+        Setting `self.theme = name` when it's already the active name
+        is a no-op — the `theme` reactive compares names for equality
+        and short-circuits. Calling `_watch_theme` directly runs the
+        same invalidation chain the reactive would have run on a real
+        name change: toggles the light/dark CSS class, refreshes the
+        truecolor filter, and invalidates the compiled stylesheet so
+        our new palette actually renders."""
         self.register_theme(flavored)
-        if self.theme != "claude-dark":
-            self.theme = "claude-dark"
+        if self.theme != name:
+            self.theme = name
             return
         # Private but stable: Textual's public API has no "force
-        # re-apply without changing the name" hook. If this breaks in
-        # a future Textual release, fall back to a brief flip-and-flop:
-        #   self.theme = "claude-light"; self.theme = "claude-dark"
-        # which triggers the reactive twice and survives short-circuit.
+        # re-apply without changing the name" hook.
         self._watch_theme(self.theme)
 
     def _apply_markdown_styles(self) -> None:
