@@ -239,8 +239,7 @@ class ActorWatchApp(App):
         flavored = apply_omarchy_flavor(CLAUDE_DARK)
         if flavored is None:
             return False
-        self.register_theme(flavored)
-        self.theme = "claude-dark"
+        self._apply_flavored(flavored)
         self._omarchy_mtime = omarchy_theme_mtime()
         return True
 
@@ -261,12 +260,29 @@ class ActorWatchApp(App):
         flavored = apply_omarchy_flavor(CLAUDE_DARK)
         if flavored is None:
             return
-        self.register_theme(flavored)
-        # Reassigning forces Textual to re-apply styles even when the
-        # theme name is unchanged — we want that because the palette
-        # just shifted.
-        self.theme = "claude-dark"
+        self._apply_flavored(flavored)
         self._omarchy_mtime = current
+
+    def _apply_flavored(self, flavored) -> None:
+        """Register the flavored theme and force Textual to re-apply.
+
+        Setting `self.theme = "claude-dark"` when it's already the
+        active name is a no-op — the `theme` reactive compares names
+        for equality and short-circuits. Calling `_watch_theme`
+        directly runs the same invalidation chain the reactive would
+        have run on a real name change: toggles the light/dark CSS
+        class, refreshes the truecolor filter, and invalidates the
+        compiled stylesheet so our new palette actually renders."""
+        self.register_theme(flavored)
+        if self.theme != "claude-dark":
+            self.theme = "claude-dark"
+            return
+        # Private but stable: Textual's public API has no "force
+        # re-apply without changing the name" hook. If this breaks in
+        # a future Textual release, fall back to a brief flip-and-flop:
+        #   self.theme = "claude-light"; self.theme = "claude-dark"
+        # which triggers the reactive twice and survives short-circuit.
+        self._watch_theme(self.theme)
 
     def _apply_markdown_styles(self) -> None:
         """Override Rich console markdown styles to match Claude Code."""
