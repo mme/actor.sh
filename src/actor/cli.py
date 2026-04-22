@@ -67,9 +67,13 @@ def _build_cli_overrides(
     agent_args = parse_config(config_pairs)
     for key in agent_args:
         if key in agent_cls.ACTOR_DEFAULTS:
+            # Channel-agnostic: same validation runs for CLI `--config` and
+            # MCP `config=[...]`. Name both dedicated entrypoints so the
+            # message is useful regardless of caller.
+            param = key.replace("-", "_")
             raise ConfigError(
-                f"--config {key}={agent_args[key]}: actor-keys cannot be set "
-                f"via --config; use --{key} / --no-{key} instead."
+                f"{key} is an actor-key and cannot be set via --config / config=[...]; "
+                f"use --{key} / --no-{key} (CLI) or {param}=true/false (MCP) instead."
             )
     actor_keys: dict[str, str] = {}
     if use_subscription is not None:

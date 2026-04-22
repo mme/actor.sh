@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 from actor import ActorConfig, __version__
 from actor.cli import main
-from actor.errors import ActorError
+from actor.errors import ActorError, ConfigError
 
 
 class VersionFlagTests(unittest.TestCase):
@@ -487,6 +487,80 @@ class McpToolTests(unittest.TestCase):
         overrides = kwargs["cli_overrides"]
         self.assertEqual(overrides.agent_args.get("model"), "opus")
         self.assertEqual(overrides.actor_keys, {})
+
+    # -- use_subscription param on new_actor ----------------------------------
+
+    def _capture_new_actor_overrides(self, **kwargs) -> ActorConfig:
+        """Invoke server.new_actor with no prompt, return cli_overrides cmd_new saw."""
+        from actor import server
+        with patch("actor.server.cmd_new") as cmd_new, \
+             patch("actor.server._spawn_background_run") as spawn:
+            fake_actor = MagicMock()
+            fake_actor.dir = "/tmp/foo"
+            cmd_new.return_value = fake_actor
+            server.new_actor(name="foo", **kwargs)
+        spawn.assert_not_called()
+        return cmd_new.call_args.kwargs["cli_overrides"]
+
+    def test_new_actor_use_subscription_true_sets_actor_key(self):
+        overrides = self._capture_new_actor_overrides(use_subscription=True)
+        self.assertEqual(overrides.actor_keys, {"use-subscription": "true"})
+        self.assertEqual(overrides.agent_args, {})
+
+    def test_new_actor_use_subscription_false_sets_actor_key(self):
+        overrides = self._capture_new_actor_overrides(use_subscription=False)
+        self.assertEqual(overrides.actor_keys, {"use-subscription": "false"})
+        self.assertEqual(overrides.agent_args, {})
+
+    def test_new_actor_use_subscription_default_none_emits_nothing(self):
+        """Tri-state: omitting the param leaves actor_keys empty so lower
+        layers (template / kdl / class default) supply the value."""
+        overrides = self._capture_new_actor_overrides()
+        self.assertEqual(overrides.actor_keys, {})
+
+    def test_new_actor_rejects_use_subscription_via_config(self):
+        from actor import server
+        with patch("actor.server.cmd_new") as cmd_new:
+            with self.assertRaises(ConfigError):
+                server.new_actor(name="foo", config=["use-subscription=true"])
+        cmd_new.assert_not_called()
+
+    # -- use_subscription param on run_actor ----------------------------------
+
+    def _capture_run_actor_overrides(self, **kwargs) -> ActorConfig:
+        from actor import server
+        from actor.types import AgentKind
+        with patch("actor.server._db") as db_fn, \
+             patch("actor.server._spawn_background_run") as spawn:
+            db_fn.return_value.get_actor.return_value.agent = AgentKind.CLAUDE
+            server.run_actor(name="foo", prompt="do x", **kwargs)
+        return spawn.call_args.kwargs["cli_overrides"]
+
+    def test_run_actor_use_subscription_true_sets_actor_key(self):
+        overrides = self._capture_run_actor_overrides(use_subscription=True)
+        self.assertEqual(overrides.actor_keys, {"use-subscription": "true"})
+        self.assertEqual(overrides.agent_args, {})
+
+    def test_run_actor_use_subscription_false_sets_actor_key(self):
+        overrides = self._capture_run_actor_overrides(use_subscription=False)
+        self.assertEqual(overrides.actor_keys, {"use-subscription": "false"})
+        self.assertEqual(overrides.agent_args, {})
+
+    def test_run_actor_use_subscription_default_none_emits_nothing(self):
+        overrides = self._capture_run_actor_overrides()
+        self.assertEqual(overrides.actor_keys, {})
+
+    def test_run_actor_rejects_use_subscription_via_config(self):
+        from actor import server
+        from actor.types import AgentKind
+        with patch("actor.server._db") as db_fn, \
+             patch("actor.server._spawn_background_run") as spawn:
+            db_fn.return_value.get_actor.return_value.agent = AgentKind.CLAUDE
+            with self.assertRaises(ConfigError):
+                server.run_actor(
+                    name="foo", prompt="do x", config=["use-subscription=true"],
+                )
+        spawn.assert_not_called()
 
 
 if __name__ == "__main__":

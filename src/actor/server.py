@@ -224,6 +224,7 @@ def new_actor(
     base: str | None = None,
     no_worktree: bool = False,
     config: List[str] | None = None,
+    use_subscription: bool | None = None,
     ctx: Context | None = None,
 ) -> str:
     """Create a new actor. If a prompt is given, also runs it in the background.
@@ -236,16 +237,23 @@ def new_actor(
         base: Branch to create the worktree from (defaults to current branch).
         no_worktree: If True, skip worktree creation.
         config: Config key=value pairs saved as actor defaults (e.g. ["model=opus", "effort=max"]).
+            Agent-args only; actor-keys like "use-subscription" are rejected here — use the
+            dedicated parameter below.
+        use_subscription: When True, force subscription auth (strip the agent's API key env var).
+            When False, pass the API key through. When omitted (None), defer to lower-precedence
+            layers (template / settings.kdl / class default).
     """
     db = _db()
     git = RealGit()
-    # MCP exposes `config` as a flat list of key=value pairs, just like the
-    # CLI's `--config`. Route them into agent_args only (actor-keys would
-    # need dedicated MCP params, which we don't expose yet) and validate
-    # against the chosen agent's ACTOR_DEFAULTS whitelist.
+    # MCP mirrors the CLI's positional split: `config` pairs go into
+    # agent_args (rejected if they collide with an actor-key); the dedicated
+    # `use_subscription` param populates actor_keys directly. Validation
+    # and bucketing are the same code path as the CLI.
     agent_kind = _resolve_agent_kind_for_cli(agent, None, None)
     agent_cls = _agent_class(agent_kind)
-    cli_overrides = _build_cli_overrides(agent_cls, config or [])
+    cli_overrides = _build_cli_overrides(
+        agent_cls, config or [], use_subscription=use_subscription,
+    )
     actor = cmd_new(
         db, git,
         name=name,
@@ -274,6 +282,7 @@ def run_actor(
     name: str,
     prompt: str,
     config: List[str] | None = None,
+    use_subscription: bool | None = None,
     ctx: Context | None = None,
 ) -> str:
     """Run an existing actor with a prompt. Returns immediately — the actor runs in the background.
@@ -281,16 +290,24 @@ def run_actor(
     Args:
         name: Actor name.
         prompt: The task for the actor to work on.
-        config: Per-run config overrides (e.g. ["model=opus"]). Not saved to actor defaults — use config_actor to change defaults.
+        config: Per-run config overrides (e.g. ["model=opus"]). Not saved to actor defaults — use config_actor
+            to change defaults. Agent-args only; actor-keys like "use-subscription" are rejected here —
+            use the dedicated parameter below.
+        use_subscription: Per-run actor-key override. When True, force subscription auth for this run
+            (strip the agent's API key env var). When False, pass the API key through. When omitted
+            (None), use the actor's stored value.
     """
     prompt = prompt.strip()
     if not prompt:
         raise ActorError("prompt is required")
-    # Validate MCP `config` pairs against the actor's agent — run-time
-    # overrides are agent_args only.
+    # MCP mirrors the CLI's positional split: `config` pairs go into
+    # agent_args (rejected if they collide with an actor-key); the dedicated
+    # `use_subscription` param populates actor_keys directly.
     actor = _db().get_actor(name)
     agent_cls = _agent_class(actor.agent)
-    cli_overrides = _build_cli_overrides(agent_cls, config or [])
+    cli_overrides = _build_cli_overrides(
+        agent_cls, config or [], use_subscription=use_subscription,
+    )
     _spawn_background_run(name, prompt, cli_overrides=cli_overrides, ctx=ctx)
     return f"Actor '{name}' is running."
 
