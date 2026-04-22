@@ -18,6 +18,7 @@ from .errors import (
     AgentNotFoundError,
     GitError,
     ConfigError,
+    HookFailedError,
 )
 
 # Types
@@ -35,7 +36,10 @@ from .types import (
 )
 
 # Config
-from .config import AgentDefaults, AppConfig, Template, load_config
+from .config import AgentDefaults, AppConfig, Hooks, Template, load_config
+
+# Hooks runtime
+from .hooks import HookResult, HookRunner, hook_env, run_hook
 
 # Interfaces
 from .interfaces import (
@@ -96,6 +100,7 @@ __all__ = [
     "AgentNotFoundError",
     "GitError",
     "ConfigError",
+    "HookFailedError",
     # Types
     "AgentKind",
     "Status",
@@ -107,8 +112,14 @@ __all__ = [
     # Config
     "AgentDefaults",
     "AppConfig",
+    "Hooks",
     "Template",
     "load_config",
+    # Hooks runtime
+    "HookResult",
+    "HookRunner",
+    "hook_env",
+    "run_hook",
     # Interfaces
     "LogEntryKind",
     "LogEntry",

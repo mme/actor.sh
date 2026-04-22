@@ -119,9 +119,38 @@ template "reviewer" {
   numbers; they're all coerced to strings to match the actor config
   pipeline.
 
-Unknown top-level nodes (`hooks`, `alias`) parse as no-ops today —
-they're reserved for follow-up tickets. Malformed KDL raises an error
-with the file path.
+Unknown top-level nodes (`alias`) parse as no-ops today — they're
+reserved for follow-up tickets. Malformed KDL raises an error with the
+file path.
+
+**Lifecycle hooks** run shell commands around actor events (create,
+run, discard) via an optional top-level `hooks { }` block. Each value
+runs via `/bin/sh -c` with `ACTOR_NAME`, `ACTOR_DIR`, `ACTOR_AGENT`,
+and `ACTOR_SESSION_ID` (when set) in the env; cwd is the actor's
+worktree:
+
+```kdl
+hooks {
+    on-start   "./scripts/setup.sh"
+    before-run "git fetch --quiet"
+    after-run  "./scripts/notify.sh"
+    on-discard "git diff --quiet"
+}
+```
+
+- `on-start` — fires once during `actor new`. Non-zero rolls back
+  the actor.
+- `before-run` — fires before every `actor run` (incl. interactive).
+  Non-zero aborts the run with no DB row written.
+- `after-run` — fires after the run finishes and the DB row has
+  been updated with final status. Receives `ACTOR_RUN_ID`,
+  `ACTOR_EXIT_CODE`, `ACTOR_DURATION_MS`. Observer only — non-zero
+  exit logs a warning but does not fail the completed run.
+- `on-discard` — fires during `actor discard`. Non-zero aborts
+  discard unless the user runs `actor discard --force` (CLI) or
+  passes `force=True` to `discard_actor` (MCP).
+
+Project hooks override user hooks per event.
 
 **Per-agent defaults** live alongside templates and apply automatically
 to every new actor of that agent kind:

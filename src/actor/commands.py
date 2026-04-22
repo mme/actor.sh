@@ -11,12 +11,14 @@ from .errors import (
     ActorError,
     AgentNotFoundError,
     ConfigError,
+    HookFailedError,
     IsRunningError,
     NotRunningError,
 )
 
 if TYPE_CHECKING:
-    from .config import AppConfig
+    from .config import AppConfig, Hooks
+from .hooks import HookRunner, hook_env, run_hook
 from .interfaces import Agent, GitOps, LogEntry, LogEntryKind, ProcessManager, binary_exists
 from .types import (
     Actor,
@@ -126,6 +128,7 @@ def cmd_new(
     cli_overrides: ActorConfig,
     template_name: Optional[str] = None,
     app_config: Optional["AppConfig"] = None,
+    hook_runner: Optional[HookRunner] = None,
 ) -> Actor:
     validate_name(name)
 
@@ -252,6 +255,40 @@ def cmd_new(
                 print(f"warning: failed to clean up worktree at {wt_path}: {cleanup_err}", file=sys.stderr)
         raise
 
+    # on-start hook fires after the actor row + worktree exist so the hook
+    # script can assume both. Non-zero exit rolls everything back.
+    on_start = app_config.hooks.on_start if app_config is not None else None
+    if on_start is not None:
+        env = hook_env(
+            os.environ,
+            actor_name=name,
+            actor_dir=Path(actor_dir),
+            actor_agent=agent_kind.value,
+            actor_session_id=None,
+        )
+        try:
+            run_hook("on-start", on_start, env, Path(actor_dir), runner=hook_runner)
+        except Exception:
+            try:
+                db.delete_actor(name)
+            except Exception as rollback_err:
+                print(
+                    f"warning: failed to roll back actor row for '{name}' "
+                    f"after on-start hook failure: {rollback_err}",
+                    file=sys.stderr,
+                )
+            if worktree:
+                assert source_repo is not None
+                wt_path = _worktree_path(name)
+                try:
+                    git.remove_worktree(Path(source_repo), wt_path)
+                except Exception as cleanup_err:
+                    print(
+                        f"warning: failed to clean up worktree at {wt_path}: {cleanup_err}",
+                        file=sys.stderr,
+                    )
+            raise
+
     return actor
 
 
@@ -264,6 +301,8 @@ def cmd_run(
     name: str,
     prompt: str,
     cli_overrides: ActorConfig,
+    app_config: Optional["AppConfig"] = None,
+    hook_runner: Optional[HookRunner] = None,
 ) -> str:
     actor = db.get_actor(name)
 
@@ -282,6 +321,19 @@ def cmd_run(
         raise ActorError(
             f"actor directory '{actor.dir}' does not exist \u2014 use 'actor discard {name}' to clean up"
         )
+
+    # before-run hook fires before the Run row is inserted so a failing
+    # pre-flight check doesn't leave a phantom run behind.
+    before_run = app_config.hooks.before_run if app_config is not None else None
+    if before_run is not None:
+        env = hook_env(
+            os.environ,
+            actor_name=name,
+            actor_dir=dir_path,
+            actor_agent=actor.agent.value,
+            actor_session_id=actor.agent_session,
+        )
+        run_hook("before-run", before_run, env, dir_path, runner=hook_runner)
 
     # Merge config: actor defaults + run overrides. The split is preserved
     # — actor_keys and agent_args are layered independently. cli_overrides
@@ -351,8 +403,36 @@ def cmd_run(
     if current_run is not None and current_run.id == run_id and current_run.status == Status.STOPPED:
         return output
 
-    status = Status.DONE if exit_code == 0 else Status.ERROR
-    db.update_run_status(run_id, status, exit_code)
+    run_status = Status.DONE if exit_code == 0 else Status.ERROR
+    db.update_run_status(run_id, run_status, exit_code)
+
+    # after-run hook fires AFTER the DB has been updated with the final
+    # status so a hook that runs `actor show` sees the completed run.
+    # Non-zero exit is logged to stderr but does NOT fail the run — the
+    # agent has already finished and there's nothing to roll back.
+    after_run = app_config.hooks.after_run if app_config is not None else None
+    if after_run is not None:
+        # Refetch so ACTOR_SESSION_ID reflects any new_session set above.
+        refreshed = db.get_actor(name)
+        start = _parse_iso(run.started_at)
+        end = _parse_iso(_now_iso())
+        duration_ms = None
+        if start is not None and end is not None:
+            duration_ms = max(0, int((end - start).total_seconds() * 1000))
+        env = hook_env(
+            os.environ,
+            actor_name=name,
+            actor_dir=dir_path,
+            actor_agent=refreshed.agent.value,
+            actor_session_id=refreshed.agent_session,
+            actor_run_id=run_id,
+            actor_exit_code=exit_code,
+            actor_duration_ms=duration_ms,
+        )
+        try:
+            run_hook("after-run", after_run, env, dir_path, runner=hook_runner)
+        except HookFailedError as e:
+            print(f"warning: {e}", file=sys.stderr)
     return output
 
 
@@ -367,6 +447,8 @@ def cmd_interactive(
     proc_mgr: ProcessManager,
     name: str,
     runner: Optional[Callable[[List[str], Path, dict], int]] = None,
+    app_config: Optional["AppConfig"] = None,
+    hook_runner: Optional[HookRunner] = None,
 ) -> Tuple[int, str]:
     """`runner` is injectable so tests can drive without spawning a real
     subprocess. Returns (exit_code, status_message)."""
@@ -390,6 +472,18 @@ def cmd_interactive(
         raise ActorError(
             f"actor directory '{actor.dir}' does not exist \u2014 use 'actor discard {name}' to clean up"
         )
+
+    # before-run hook mirrors cmd_run. Fires before the Run row is inserted.
+    before_run = app_config.hooks.before_run if app_config is not None else None
+    if before_run is not None:
+        env = hook_env(
+            os.environ,
+            actor_name=name,
+            actor_dir=dir_path,
+            actor_agent=actor.agent.value,
+            actor_session_id=actor.agent_session,
+        )
+        run_hook("before-run", before_run, env, dir_path, runner=hook_runner)
 
     argv = agent.interactive_argv(session_id, actor.config)
 
@@ -422,6 +516,32 @@ def cmd_interactive(
 
     final = Status.DONE if exit_code == 0 else Status.ERROR
     db.update_run_status(run_id, final, exit_code)
+
+    # after-run hook (same semantics as cmd_run): fires AFTER the DB
+    # update with final status. Non-zero exit logs a warning but doesn't
+    # fail the completed session.
+    after_run = app_config.hooks.after_run if app_config is not None else None
+    if after_run is not None:
+        refreshed = db.get_actor(name)
+        start = _parse_iso(run.started_at)
+        end_ts = _parse_iso(_now_iso())
+        duration_ms = None
+        if start is not None and end_ts is not None:
+            duration_ms = max(0, int((end_ts - start).total_seconds() * 1000))
+        after_env = hook_env(
+            os.environ,
+            actor_name=name,
+            actor_dir=dir_path,
+            actor_agent=refreshed.agent.value,
+            actor_session_id=refreshed.agent_session,
+            actor_run_id=run_id,
+            actor_exit_code=exit_code,
+            actor_duration_ms=duration_ms,
+        )
+        try:
+            run_hook("after-run", after_run, after_env, dir_path, runner=hook_runner)
+        except HookFailedError as e:
+            print(f"warning: {e}", file=sys.stderr)
     return exit_code, f"Interactive session for '{name}' ended (exit {exit_code})."
 
 
@@ -699,8 +819,11 @@ def cmd_discard(
     proc_mgr: ProcessManager,
     name: str,
     _visited: set[str] | None = None,
+    app_config: Optional["AppConfig"] = None,
+    hook_runner: Optional[HookRunner] = None,
+    force: bool = False,
 ) -> str:
-    db.get_actor(name)
+    actor = db.get_actor(name)
 
     # Track visited to prevent infinite recursion on circular parent chains
     if _visited is None:
@@ -712,13 +835,43 @@ def cmd_discard(
     discarded = []
     for child in children:
         if child.name not in _visited:
-            msg = cmd_discard(db, proc_mgr, name=child.name, _visited=_visited)
+            msg = cmd_discard(
+                db, proc_mgr, name=child.name, _visited=_visited,
+                app_config=app_config, hook_runner=hook_runner, force=force,
+            )
             discarded.append(msg)
 
     # Stop if running
     status = db.resolve_actor_status(name, proc_mgr)
     if status == Status.RUNNING:
         _force_stop(db, proc_mgr, name)
+
+    # on-discard hook fires after resource cleanup, before DB delete.
+    # If the actor's worktree no longer exists on disk we run the hook
+    # from $HOME so subprocess.Popen can still get a valid cwd; the hook
+    # script can detect the missing-worktree case via ACTOR_DIR.
+    on_discard = app_config.hooks.on_discard if app_config is not None else None
+    if on_discard is not None:
+        actor_dir = Path(actor.dir)
+        hook_cwd = actor_dir if actor_dir.is_dir() else Path.home()
+        env = hook_env(
+            os.environ,
+            actor_name=name,
+            actor_dir=actor_dir,
+            actor_agent=actor.agent.value,
+            actor_session_id=actor.agent_session,
+        )
+        try:
+            run_hook("on-discard", on_discard, env, hook_cwd, runner=hook_runner)
+        except HookFailedError as e:
+            if force:
+                print(
+                    f"warning: on-discard hook failed but --force was set; "
+                    f"discarding anyway: {e}",
+                    file=sys.stderr,
+                )
+            else:
+                raise
 
     db.delete_actor(name)
     discarded.append(f"{name} discarded")

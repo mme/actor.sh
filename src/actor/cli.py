@@ -241,9 +241,15 @@ Examples:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
-  actor discard my-feature                          Remove actor from DB""",
+  actor discard my-feature                          Remove actor from DB
+  actor discard my-feature --force                  Ignore an on-discard hook failure""",
     )
     p_discard.add_argument("name", help="Actor name")
+    p_discard.add_argument(
+        "-f", "--force",
+        action="store_true",
+        help="Bypass on-discard hook failures (actor is discarded even if the hook exits non-zero)",
+    )
 
     # -- setup --
     p_setup = sub.add_parser(
@@ -412,6 +418,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 cli_overrides=cli_overrides,
                 template_name=args.template,
                 app_config=app_config,
+                hook_runner=None,
             )
             print(f"{actor.name} created ({actor.dir})")
 
@@ -438,17 +445,21 @@ def main(argv: Optional[List[str]] = None) -> None:
                         name=args.name,
                         prompt=prompt,
                         cli_overrides=ActorConfig(),  # creation flags already saved as defaults
+                        app_config=app_config,
                     )
                 except Exception as e:
                     print(f"error: actor created but run failed: {e}", file=sys.stderr)
                     sys.exit(2)
 
         elif args.command == "run":
+            from .config import load_config as _load_config_run
+            app_config_run = _load_config_run()
             # Interactive mode
             if args.interactive:
                 agent = agent_for(args.name)
                 exit_code, msg = cmd_interactive(
                     db, agent, proc_mgr, name=args.name,
+                    app_config=app_config_run,
                 )
                 print(msg, file=sys.stderr)
                 # POSIX convention for signal termination: 128 + signum.
@@ -474,6 +485,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 name=args.name,
                 prompt=prompt,
                 cli_overrides=cli_overrides,
+                app_config=app_config_run,
             )
 
         elif args.command == "list":
@@ -506,7 +518,12 @@ def main(argv: Optional[List[str]] = None) -> None:
                 print(output, end="")
 
         elif args.command == "discard":
-            msg = cmd_discard(db, proc_mgr, name=args.name)
+            from .config import load_config as _load_config_discard
+            msg = cmd_discard(
+                db, proc_mgr, name=args.name,
+                app_config=_load_config_discard(),
+                force=args.force,
+            )
             print(msg)
 
     except ActorError as e:
