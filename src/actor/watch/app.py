@@ -98,7 +98,7 @@ class ActorWatchApp(App):
     }
     #logs-content {
         padding: 0 1;
-        scrollbar-size: 0 0;
+        scrollbar-size-horizontal: 0;
     }
     #info-content {
         padding: 1;
