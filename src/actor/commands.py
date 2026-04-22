@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
@@ -117,6 +118,11 @@ def _fire_after_run(
     after_run = hooks.after_run if hooks is not None else None
     if after_run is None:
         return
+    # If the worktree was deleted out of band, using it as subprocess cwd
+    # raises FileNotFoundError. Fall back to the user's home so the hook
+    # still runs; ACTOR_DIR still reports the original path so the hook
+    # script can detect the missing-worktree case (parity with on-discard).
+    hook_cwd = actor_dir if actor_dir.is_dir() else Path.home()
     env = hook_env(
         os.environ,
         actor_name=name,
@@ -128,7 +134,7 @@ def _fire_after_run(
         actor_duration_ms=duration_ms,
     )
     try:
-        run_hook("after-run", after_run, env, actor_dir, runner=hook_runner)
+        run_hook("after-run", after_run, env, hook_cwd, runner=hook_runner)
     except HookFailedError as e:
         print(
             f"warning: after-run hook failed for '{name}' ({e})",
@@ -140,6 +146,7 @@ def _fire_after_run(
             f"{type(e).__name__}: {e}",
             file=sys.stderr,
         )
+        traceback.print_exc(file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------

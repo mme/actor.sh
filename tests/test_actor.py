@@ -2869,6 +2869,80 @@ class TestCmdRunAfterRunHook(unittest.TestCase):
         self.assertEqual(db.latest_run("test").status, Status.DONE)
         self.assertIn("after-run", stderr.getvalue())
 
+    def test_after_run_falls_back_to_home_when_worktree_vanished(self):
+        # Parity with on-discard: if the worktree disappears mid-run (e.g.
+        # a concurrent `git worktree remove` or the agent itself deleting
+        # its cwd), using actor_dir as subprocess cwd would raise
+        # FileNotFoundError. after-run must still fire with a fallback
+        # cwd (home) while ACTOR_DIR reports the original path so the
+        # hook script can detect the missing-worktree case.
+        import shutil
+        from actor import Hooks
+        captured: list = []
+
+        def runner(cmd, env, cwd):
+            captured.append({"cwd": cwd, "env_dir": env.get("ACTOR_DIR")})
+            return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wt = Path(tmp) / "wt"
+            wt.mkdir()
+            db = self._db()
+            db.insert_actor(make_actor("test", dir=str(wt)))
+
+            class _DirRemovingAgent(FakeAgent):
+                def wait(self, pid):
+                    shutil.rmtree(str(wt))
+                    return super().wait(pid)
+
+            pm = FakeProcessManager()
+            cmd_run(
+                db, _DirRemovingAgent(), pm,
+                name="test",
+                prompt="go",
+                config_pairs=[],
+                hooks=Hooks(after_run="echo after"),
+                hook_runner=runner,
+            )
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(captured[0]["cwd"], Path.home())
+            # ACTOR_DIR still reflects the original (vanished) path.
+            self.assertEqual(captured[0]["env_dir"], str(wt))
+
+    def test_after_run_logs_traceback_on_unexpected_exception(self):
+        # Hook runner bugs or FileNotFoundError on vanished cwd surface via
+        # the broad `except Exception`. A traceback is essential for
+        # diagnosing such failures — the message alone doesn't point at
+        # the failing frame.
+        import io
+        import contextlib
+        from actor import Hooks
+
+        def runner(cmd, env, cwd):
+            raise RuntimeError("custom runner blew up")
+
+        db = self._db()
+        create_actor(db, "test", config=[])
+        agent = FakeAgent()
+        pm = FakeProcessManager()
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            cmd_run(
+                db, agent, pm,
+                name="test",
+                prompt="go",
+                config_pairs=[],
+                hooks=Hooks(after_run="oops"),
+                hook_runner=runner,
+            )
+        err = stderr.getvalue()
+        # The one-line warning still appears.
+        self.assertIn("after-run", err)
+        self.assertIn("RuntimeError", err)
+        # Plus a traceback frame pointing at the failing code.
+        self.assertIn("Traceback", err)
+        self.assertIn("custom runner blew up", err)
+
     def test_after_run_does_not_fire_when_stopped_by_race(self):
         # When cmd_stop flips the run to STOPPED before agent.wait returns,
         # cmd_run must not overwrite the status and must not fire after-run
