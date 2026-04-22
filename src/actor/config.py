@@ -5,8 +5,9 @@ Loads ~/.actor/settings.kdl (user) and <project>/.actor/settings.kdl
 templates map and per-agent defaults. Project config overrides user
 config per-key.
 
-Out of scope (see tickets #30 / #33): hooks, aliases. Their nodes are
-skipped at parse time without error for forward compatibility.
+Out of scope (see ticket #33): aliases. Unknown top-level nodes are
+skipped at parse time without error for forward compatibility with
+follow-up features like `ask { }` (#52).
 """
 from __future__ import annotations
 
@@ -61,9 +62,26 @@ class AgentDefaults:
 
 
 @dataclass
+class Hooks:
+    on_start: Optional[str] = None
+    before_run: Optional[str] = None
+    after_run: Optional[str] = None
+    on_discard: Optional[str] = None
+
+
+@dataclass
 class AppConfig:
     templates: Dict[str, Template] = field(default_factory=dict)
     agent_defaults: Dict[str, AgentDefaults] = field(default_factory=dict)
+    hooks: Hooks = field(default_factory=Hooks)
+
+
+_HOOK_KEYS = {
+    "on-start": "on_start",
+    "before-run": "before_run",
+    "after-run": "after_run",
+    "on-discard": "on_discard",
+}
 
 
 def _find_project_config(
@@ -343,6 +361,52 @@ def _parse_agent_block(node, source: Path) -> Tuple[str, AgentDefaults]:
     return raw_name, defaults
 
 
+def _parse_hooks(node, source: Path) -> Hooks:
+    if node.args:
+        raise ConfigError(
+            f"hooks block in {source} does not accept positional args"
+        )
+    if getattr(node, "props", None):
+        raise ConfigError(
+            f"hooks block in {source} does not accept properties"
+        )
+    hooks = Hooks()
+    seen: set[str] = set()
+    for child in node.nodes:
+        key = child.name
+        attr = _HOOK_KEYS.get(key)
+        if attr is None:
+            raise ConfigError(
+                f"hooks block in {source}: unknown hook '{key}' "
+                f"(valid: {', '.join(_HOOK_KEYS)})"
+            )
+        if key in seen:
+            raise ConfigError(
+                f"hooks block in {source}: duplicate hook '{key}'"
+            )
+        seen.add(key)
+        if not child.args:
+            raise ConfigError(
+                f"hooks block in {source}: '{key}' needs a value"
+            )
+        if len(child.args) > 1:
+            raise ConfigError(
+                f"hooks block in {source}: '{key}' has extra args "
+                f"(only a single shell command is supported)"
+            )
+        if getattr(child, "props", None):
+            raise ConfigError(
+                f"hooks block in {source}: '{key}' does not accept properties"
+            )
+        raw = child.args[0]
+        if not isinstance(raw, str):
+            raise ConfigError(
+                f"hooks block in {source}: '{key}' must be a string"
+            )
+        setattr(hooks, attr, raw)
+    return hooks
+
+
 def _parse_kdl_file(path: Path) -> AppConfig:
     try:
         text = path.read_text()
@@ -353,6 +417,7 @@ def _parse_kdl_file(path: Path) -> AppConfig:
     except kdl.ParseError as e:
         raise ConfigError(f"parse error in {path}: {e}") from e
     cfg = AppConfig()
+    hooks_seen = False
     for node in doc.nodes:
         if node.name == "template":
             tpl = _parse_template(node, path)
@@ -368,8 +433,16 @@ def _parse_kdl_file(path: Path) -> AppConfig:
                     f"duplicate agent block '{name}' in {path}"
                 )
             cfg.agent_defaults[name] = defaults
-        # Silently ignore hooks / alias — those belong to follow-up
-        # tickets #30 / #33 and are not implemented here.
+        elif node.name == "hooks":
+            if hooks_seen:
+                raise ConfigError(
+                    f"duplicate hooks block in {path}"
+                )
+            hooks_seen = True
+            cfg.hooks = _parse_hooks(node, path)
+        # Silently ignore alias / ask — follow-up tickets (#33 / #52)
+        # add them; keeping the parser lenient here preserves forward
+        # compat for any new top-level blocks.
     return cfg
 
 
@@ -410,9 +483,16 @@ def _merge(base: AppConfig, over: AppConfig) -> AppConfig:
         k: v for k, v in merged_defaults.items()
         if v.actor_keys or v.agent_args
     }
+    merged_hooks = Hooks(
+        on_start=over.hooks.on_start if over.hooks.on_start is not None else base.hooks.on_start,
+        before_run=over.hooks.before_run if over.hooks.before_run is not None else base.hooks.before_run,
+        after_run=over.hooks.after_run if over.hooks.after_run is not None else base.hooks.after_run,
+        on_discard=over.hooks.on_discard if over.hooks.on_discard is not None else base.hooks.on_discard,
+    )
     return AppConfig(
         templates=merged_templates,
         agent_defaults=merged_defaults,
+        hooks=merged_hooks,
     )
 
 

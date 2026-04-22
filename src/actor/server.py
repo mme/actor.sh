@@ -144,13 +144,18 @@ def stop_actor(name: str) -> str:
 
 
 @mcp.tool()
-def discard_actor(name: str) -> str:
+def discard_actor(name: str, force: bool = False) -> str:
     """Remove an actor from the database. Stops it first if running. Worktree stays on disk.
 
     Args:
         name: Actor name.
+        force: If True, ignore on-discard hook failures and discard anyway.
     """
-    return cmd_discard(_db(), RealProcessManager(), name=name)
+    from .config import load_config
+    return cmd_discard(
+        _db(), RealProcessManager(), name=name,
+        app_config=load_config(), force=force,
+    )
 
 
 @mcp.tool()
@@ -185,11 +190,13 @@ def _spawn_background_run(
         thread_db = Database.open(_db_path())
         output = ""
         try:
+            from .config import load_config as _lc
             output = cmd_run(
                 thread_db, agent_impl, pm,
                 name=name,
                 prompt=prompt,
                 cli_overrides=cli_overrides,
+                app_config=_lc(),
             )
         except Exception as e:
             output = str(e)
@@ -254,6 +261,8 @@ def new_actor(
     cli_overrides = _build_cli_overrides(
         agent_cls, config or [], use_subscription=use_subscription,
     )
+    from .config import load_config
+    app_config = load_config()
     actor = cmd_new(
         db, git,
         name=name,
@@ -262,6 +271,7 @@ def new_actor(
         base=base,
         agent_name=agent,
         cli_overrides=cli_overrides,
+        app_config=app_config,
     )
 
     if prompt is not None:

@@ -213,13 +213,47 @@ Built-in class defaults today:
   "never"}` and `CodexAgent.ACTOR_DEFAULTS = {"use-subscription":
   "true"}`.
 
-Unknown top-level nodes (e.g. `hooks`, `alias`) are silently ignored
-for forward-compat with follow-up tickets. A `defaults { ... }` block
+Unknown top-level nodes (e.g. `alias`) are silently ignored for
+forward-compat with follow-up tickets. A `defaults { ... }` block
 inside a template is rejected with a helpful error pointing users at
 the per-agent `agent "..." { defaults { ... } }` shape.
 
 Load programmatically via `actor.config.load_config(cwd=..., home=...)` —
 both args default to `Path.cwd()` / `$HOME` so tests can inject temp dirs.
+
+### Lifecycle hooks
+
+A top-level `hooks { }` block declares shell commands that fire around
+actor lifecycle events. Each value runs via `/bin/sh -c`, inheriting the
+caller's env plus `ACTOR_NAME`, `ACTOR_DIR`, `ACTOR_AGENT`, and (when
+set) `ACTOR_SESSION_ID`. Cwd is the actor's worktree.
+
+```kdl
+hooks {
+    on-start   "kubectl config use-context dev"
+    before-run "git fetch --quiet"
+    after-run  "./scripts/notify.sh"
+    on-discard "git diff --quiet && git diff --quiet --staged"
+}
+```
+
+- `on-start` — fires once during `actor new`, after the actor row is
+  recorded, before returning. Non-zero rolls back the row + worktree.
+- `before-run` — fires before every `actor run` (incl. interactive),
+  before the Run row is inserted. Non-zero aborts the run.
+- `after-run` — fires after the run completes and the DB row has been
+  updated with final status. Receives three extra env vars:
+  `ACTOR_RUN_ID`, `ACTOR_EXIT_CODE`, `ACTOR_DURATION_MS`. Non-zero
+  logs a warning but does NOT fail the completed run — there's nothing
+  to roll back.
+- `on-discard` — fires during `actor discard`, after cleanup (running
+  agents stopped), before the DB row is deleted. Non-zero aborts
+  discard unless `actor discard --force` / `-f` is passed. If the
+  worktree is gone, the hook runs from `$HOME` instead and `ACTOR_DIR`
+  still reports the missing path so the script can detect it.
+
+Project hooks override user hooks per event (same merge rule as
+templates).
 
 ## Interactive mode
 
