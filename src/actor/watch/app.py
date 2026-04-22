@@ -95,6 +95,12 @@ class ActorWatchApp(App):
     }
     * {
         scrollbar-background: $foreground 30%;
+        /* Textual's theme defines distinct hover/active track colors
+           that default to a much darker band than our idle track — the
+           track visibly jumps on mouse-over. Pin both to the idle color
+           so only the thumb reacts to hover/drag. */
+        scrollbar-background-hover: $foreground 30%;
+        scrollbar-background-active: $foreground 30%;
     }
     #logs-content {
         padding: 0 1;
