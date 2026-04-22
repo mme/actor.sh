@@ -31,6 +31,11 @@ from .interactive.manager import InteractiveSessionManager
 from .interactive.widget import TerminalWidget
 from .patches import apply_patches
 from .splash import Splash
+from .omarchy_theme import (
+    OMARCHY_THEME_NAME,
+    load_omarchy_theme,
+    omarchy_theme_mtime,
+)
 from .themes import CLAUDE_DARK, CLAUDE_LIGHT
 from .tree import ActorTree
 from .helpers import read_log_entries, compute_diff
@@ -183,7 +188,13 @@ class ActorWatchApp(App):
     def on_ready(self) -> None:
         self.register_theme(CLAUDE_DARK)
         self.register_theme(CLAUDE_LIGHT)
-        self.theme = "claude-dark"
+
+        # Prefer omarchy's palette when we detect it; fall back to the
+        # hardcoded Claude themes otherwise. Live-reload below keeps us
+        # in sync with `omarchy theme set <name>`.
+        self._omarchy_mtime: float | None = None
+        if not self._try_apply_omarchy_theme():
+            self.theme = "claude-dark"
 
         # Apply Claude Code markdown styles to the app console
         self._apply_markdown_styles()
@@ -194,6 +205,46 @@ class ActorWatchApp(App):
         actors, statuses = self._fetch_actors()
         self._update_ui(actors, statuses)
         self.set_interval(2.0, self._poll_actors_async)
+        # Omarchy theme live-reload. Polls mtime; cheap enough that a
+        # 3s cadence is fine and we don't need inotify / platform-specific
+        # machinery. No-op on non-omarchy systems.
+        self.set_interval(3.0, self._poll_omarchy_theme)
+
+    def _try_apply_omarchy_theme(self) -> bool:
+        """If omarchy is present, register + activate its palette and
+        record the file mtime so we can detect future changes.
+        Returns True when the omarchy theme was applied."""
+        theme = load_omarchy_theme()
+        if theme is None:
+            return False
+        self.register_theme(theme)
+        self.theme = OMARCHY_THEME_NAME
+        self._omarchy_mtime = omarchy_theme_mtime()
+        return True
+
+    def _poll_omarchy_theme(self) -> None:
+        """Refresh the active theme if omarchy's colors.toml changed.
+
+        Cheap stat call; returns early when the file isn't there or
+        its mtime matches what we last saw. Malformed reloads keep
+        whatever theme is currently active."""
+        current = omarchy_theme_mtime()
+        if current is None:
+            # File vanished (user uninstalled omarchy or removed the
+            # symlink). Leave whatever theme is active as-is; they can
+            # re-run `actor watch` to fall back cleanly.
+            return
+        if self._omarchy_mtime is not None and current == self._omarchy_mtime:
+            return
+        theme = load_omarchy_theme()
+        if theme is None:
+            return
+        self.register_theme(theme)
+        # Reassigning forces Textual to re-apply styles even when the
+        # theme name is unchanged — we want that because the palette
+        # just shifted.
+        self.theme = OMARCHY_THEME_NAME
+        self._omarchy_mtime = current
 
     def _apply_markdown_styles(self) -> None:
         """Override Rich console markdown styles to match Claude Code."""

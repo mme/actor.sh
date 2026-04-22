@@ -255,6 +255,19 @@ hooks {
 Project hooks override user hooks per event (same merge rule as
 templates).
 
+## Watch theme
+
+The `actor watch` TUI ships with a `claude-dark` / `claude-light` pair
+as the default. If it detects omarchy running locally (presence of
+`~/.config/omarchy/current/theme/colors.toml`), it instead builds a
+Textual theme from that palette and activates it automatically. The
+file's resolved-target mtime is polled every 3s so `omarchy theme set
+<name>` swaps the TUI theme live, no restart needed.
+
+See `src/actor/watch/omarchy_theme.py` for the palette → Textual-slot
+mapping. Malformed TOML logs a warning and keeps whatever theme is
+active rather than crashing the TUI.
+
 ## Interactive mode
 
 Both the CLI and the watch TUI can open a live Claude/Codex session for
