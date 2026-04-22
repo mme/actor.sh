@@ -455,6 +455,13 @@ class ActorWatchApp(App):
         at_bottom = log.scroll_offset.y >= log.max_scroll_y - 1
 
         t = self.current_theme
+        # user_fg mirrors Claude Code's behavior: the user-message text
+        # uses the BASE theme's foreground (not the active theme's,
+        # which may have been flavored by omarchy). Pinning it to the
+        # unflavored base keeps legible contrast against the base-defined
+        # surface color no matter how much the flavor shifts the rest
+        # of the palette.
+        base = CLAUDE_DARK if (t and t.dark) else CLAUDE_LIGHT
         colors = ThemeColors(
             surface=t.surface if t else "#24283B",
             warning=t.warning if t else "#E0AF68",
@@ -462,6 +469,7 @@ class ActorWatchApp(App):
             success_color=t.success if t else "#4EBA65",
             error_color=t.error if t else "#FF6B80",
             inactive="#999999" if (t and t.dark) else "#666666",
+            user_fg=base.foreground,
         )
         render_log_entries(log, entries, colors)
 
