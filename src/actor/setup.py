@@ -16,8 +16,19 @@ from pathlib import Path
 from . import __version__
 from .errors import ActorError
 
-SUPPORTED_HOSTS = ("claude-code",)
+SUPPORTED_HOSTS = ("claude-code", "omarchy")
 SUPPORTED_SCOPES = ("user", "project", "local")
+
+# Sentinel markers used when we edit ~/.config/omarchy/hooks/theme-set.
+# Kept stable so uninstall can surgically remove only our block even if
+# the user has other content in the hook file.
+_OMARCHY_HOOK_BEGIN = "# BEGIN actor-sh (managed by `actor setup --for omarchy`)"
+_OMARCHY_HOOK_END = "# END actor-sh"
+_OMARCHY_HOOK_BODY = (
+    '# Reload any running `actor watch` TUI so its omarchy-blended theme\n'
+    '# picks up the new palette without restart.\n'
+    'pkill -SIGUSR2 -f "actor watch" 2>/dev/null || true'
+)
 _CLAUDE_MCP_TIMEOUT_SEC = 30
 # Skill name is used as a filesystem path segment; reject anything that
 # could escape the target parent dir or produce nonsense paths.
@@ -213,13 +224,104 @@ def _claude_mcp_add(name: str, scope: str, for_host: str) -> None:
         raise ActorError(f"`claude mcp add` failed: {stderr}")
 
 
+def _omarchy_hook_path() -> Path:
+    return Path.home() / ".config" / "omarchy" / "hooks" / "theme-set"
+
+
+def _strip_managed_block(text: str) -> str:
+    """Remove any existing actor-sh managed block from a hook file.
+
+    Lets setup stay idempotent: re-running replaces our block instead of
+    appending a duplicate. Also the basis for uninstall."""
+    begin = text.find(_OMARCHY_HOOK_BEGIN)
+    if begin == -1:
+        return text
+    end = text.find(_OMARCHY_HOOK_END, begin)
+    if end == -1:
+        # Marker opened but never closed (edited by hand). Don't touch it.
+        return text
+    end = text.find("\n", end)
+    if end == -1:
+        end = len(text)
+    else:
+        end += 1
+    # Also strip a single trailing blank line we may have written before it.
+    head = text[:begin].rstrip("\n")
+    tail = text[end:]
+    if head and tail:
+        return head + "\n\n" + tail.lstrip("\n")
+    return (head + "\n" + tail.lstrip("\n")).lstrip("\n")
+
+
+def _setup_omarchy(*, uninstall: bool) -> str:
+    """Install (or remove) the theme-set hook fragment that SIGUSR2s any
+    running actor-watch TUI so its omarchy-blended theme reloads on the
+    spot. Polling still works without this; the hook is an opt-in upgrade
+    from 3s latency to instant."""
+    if not (Path.home() / ".config" / "omarchy").is_dir():
+        raise ActorError(
+            "omarchy not detected (~/.config/omarchy/ is missing). "
+            "`actor setup --for omarchy` only makes sense on a host running "
+            "omarchy."
+        )
+
+    hook_path = _omarchy_hook_path()
+    existed = hook_path.is_file()
+    existing = hook_path.read_text() if existed else "#!/bin/bash\n"
+    cleaned = _strip_managed_block(existing)
+
+    if uninstall:
+        if cleaned == existing:
+            return f"actor-sh hook was not installed at {hook_path}; nothing to do."
+        new_text = cleaned
+        action = "removed"
+    else:
+        block = f"{_OMARCHY_HOOK_BEGIN}\n{_OMARCHY_HOOK_BODY}\n{_OMARCHY_HOOK_END}\n"
+        head = cleaned.rstrip("\n")
+        if head:
+            new_text = head + "\n\n" + block
+        else:
+            new_text = "#!/bin/bash\n\n" + block
+        if new_text == existing:
+            return f"actor-sh hook already installed at {hook_path}; nothing to do."
+        action = "installed" if not existed or "_OMARCHY_HOOK_BEGIN" not in existing else "refreshed"
+
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text(new_text)
+    try:
+        hook_path.chmod(0o755)
+    except OSError as e:
+        print(
+            f"[setup] warning: wrote {hook_path} but could not chmod +x: {e}",
+            file=sys.stderr,
+        )
+
+    verb = {
+        "installed": "installed",
+        "refreshed": "refreshed",
+        "removed": "removed",
+    }[action]
+    return (
+        f"actor-sh omarchy theme-set hook {verb} at {hook_path}. "
+        "Change the omarchy theme to test; any running `actor watch` should "
+        "re-theme instantly."
+    )
+
+
 def cmd_setup(
     *,
     for_host: str,
     scope: str,
     name: str,
+    uninstall: bool = False,
 ) -> str:
     _validate_host(for_host)
+    if for_host == "omarchy":
+        return _setup_omarchy(uninstall=uninstall)
+    if uninstall:
+        raise ActorError(
+            f"--uninstall is only supported for --for omarchy right now."
+        )
     _validate_scope(scope)
     _validate_name(name)
 

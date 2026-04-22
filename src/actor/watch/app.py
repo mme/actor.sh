@@ -32,8 +32,7 @@ from .interactive.widget import TerminalWidget
 from .patches import apply_patches
 from .splash import Splash
 from .omarchy_theme import (
-    OMARCHY_THEME_NAME,
-    load_omarchy_theme,
+    apply_omarchy_flavor,
     omarchy_theme_mtime,
 )
 from .themes import CLAUDE_DARK, CLAUDE_LIGHT
@@ -196,6 +195,14 @@ class ActorWatchApp(App):
         if not self._try_apply_omarchy_theme():
             self.theme = "claude-dark"
 
+        # SIGUSR2 → re-read palette NOW. Used by the optional
+        # `~/.config/omarchy/hooks/theme-set` hook installed via
+        # `actor setup --for omarchy` to get instant theme swaps (the
+        # 3s interval below is the no-setup fallback). Unsupported on
+        # Windows / in contexts without a running loop — silent skip;
+        # polling still works.
+        self._install_sigusr2_handler()
+
         # Apply Claude Code markdown styles to the app console
         self._apply_markdown_styles()
 
@@ -210,15 +217,30 @@ class ActorWatchApp(App):
         # machinery. No-op on non-omarchy systems.
         self.set_interval(3.0, self._poll_omarchy_theme)
 
+    def _install_sigusr2_handler(self) -> None:
+        """Wire SIGUSR2 into the asyncio loop so the hook installed via
+        `actor setup --for omarchy` can push-notify us on theme change.
+        Returns silently when the platform or event-loop state doesn't
+        support signal handlers (e.g. Windows, non-main thread)."""
+        try:
+            import asyncio
+            import signal
+            loop = asyncio.get_running_loop()
+            loop.add_signal_handler(signal.SIGUSR2, self._poll_omarchy_theme)
+        except (NotImplementedError, RuntimeError, ValueError):
+            # Polling covers us; no need to surface this.
+            pass
+
     def _try_apply_omarchy_theme(self) -> bool:
-        """If omarchy is present, register + activate its palette and
-        record the file mtime so we can detect future changes.
-        Returns True when the omarchy theme was applied."""
-        theme = load_omarchy_theme()
-        if theme is None:
+        """If omarchy is present, flavor CLAUDE_DARK with its palette
+        and register the result under the same name ('claude-dark') so
+        no extra picker entry appears. Returns True when omarchy
+        affected the rendered theme."""
+        flavored = apply_omarchy_flavor(CLAUDE_DARK)
+        if flavored is None:
             return False
-        self.register_theme(theme)
-        self.theme = OMARCHY_THEME_NAME
+        self.register_theme(flavored)
+        self.theme = "claude-dark"
         self._omarchy_mtime = omarchy_theme_mtime()
         return True
 
@@ -236,14 +258,14 @@ class ActorWatchApp(App):
             return
         if self._omarchy_mtime is not None and current == self._omarchy_mtime:
             return
-        theme = load_omarchy_theme()
-        if theme is None:
+        flavored = apply_omarchy_flavor(CLAUDE_DARK)
+        if flavored is None:
             return
-        self.register_theme(theme)
+        self.register_theme(flavored)
         # Reassigning forces Textual to re-apply styles even when the
         # theme name is unchanged — we want that because the palette
         # just shifted.
-        self.theme = OMARCHY_THEME_NAME
+        self.theme = "claude-dark"
         self._omarchy_mtime = current
 
     def _apply_markdown_styles(self) -> None:

@@ -1,4 +1,4 @@
-"""Omarchy palette → Textual theme mapping."""
+"""Omarchy palette → hybrid Textual theme."""
 from __future__ import annotations
 
 import io
@@ -7,13 +7,34 @@ import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 
+from textual.theme import Theme
+
 from actor.watch.omarchy_theme import (
-    OMARCHY_THEME_NAME,
+    _hex,
     _is_dark,
     _shift_toward_foreground,
-    load_omarchy_theme,
+    apply_omarchy_flavor,
     omarchy_colors_path,
     omarchy_theme_mtime,
+)
+
+
+# A minimal base theme used to exercise the flavor logic without pulling
+# in CLAUDE_DARK's hex values (keeps assertions about what survived vs.
+# what the omarchy palette overrode unambiguous).
+_BASE = Theme(
+    name="test-base",
+    primary="#000001",
+    secondary="#000002",
+    accent="#000003",
+    warning="#000004",
+    error="#000005",
+    success="#000006",
+    foreground="#111111",
+    background="#222222",
+    surface="#333333",
+    panel="#444444",
+    dark=True,
 )
 
 
@@ -50,80 +71,76 @@ color5 = "#721dbd"
 """
 
 
-class TestLoadOmarchyTheme(unittest.TestCase):
+class TestApplyOmarchyFlavor(unittest.TestCase):
 
     def test_missing_file_returns_none(self):
         with tempfile.TemporaryDirectory() as home:
-            self.assertIsNone(load_omarchy_theme(home=Path(home)))
+            self.assertIsNone(apply_omarchy_flavor(_BASE, home=Path(home)))
 
-    def test_dark_palette_maps_to_theme(self):
+    def test_overrides_only_foreground(self):
         with tempfile.TemporaryDirectory() as home:
             _write_palette(Path(home), _DARK_PALETTE)
-            theme = load_omarchy_theme(home=Path(home))
-        self.assertIsNotNone(theme)
-        assert theme is not None
-        self.assertEqual(theme.name, OMARCHY_THEME_NAME)
-        self.assertEqual(theme.primary, "#7aa2f7")
-        self.assertEqual(theme.accent, "#7aa2f7")
-        self.assertEqual(theme.secondary, "#ad8ee6")  # color5
-        self.assertEqual(theme.error, "#f7768e")      # color1
-        self.assertEqual(theme.success, "#9ece6a")    # color2
-        self.assertEqual(theme.warning, "#e0af68")    # color3
-        self.assertEqual(theme.foreground, "#a9b1d6")
-        self.assertEqual(theme.background, "#1a1b26")
-        self.assertEqual(theme.panel, "#32344a")      # color0
-        self.assertTrue(theme.dark)
+            out = apply_omarchy_flavor(_BASE, home=Path(home))
+        self.assertIsNotNone(out)
+        assert out is not None
+        # FG swapped in from the palette…
+        self.assertEqual(out.foreground, "#a9b1d6")
+        # …every other slot is untouched from the base.
+        self.assertEqual(out.primary, "#000001")
+        self.assertEqual(out.secondary, "#000002")
+        self.assertEqual(out.accent, "#000003")
+        self.assertEqual(out.warning, "#000004")
+        self.assertEqual(out.error, "#000005")
+        self.assertEqual(out.success, "#000006")
+        self.assertEqual(out.background, "#222222")
+        self.assertEqual(out.surface, "#333333")
+        self.assertEqual(out.panel, "#444444")
+        self.assertEqual(out.dark, True)
+        # Keeps the base's name so picker entries don't multiply.
+        self.assertEqual(out.name, _BASE.name)
 
-    def test_light_palette_detects_dark_false(self):
+    def test_light_palette_still_only_touches_foreground(self):
         with tempfile.TemporaryDirectory() as home:
             _write_palette(Path(home), _LIGHT_PALETTE)
-            theme = load_omarchy_theme(home=Path(home))
-        assert theme is not None
-        self.assertFalse(theme.dark)
+            out = apply_omarchy_flavor(_BASE, home=Path(home))
+        assert out is not None
+        self.assertEqual(out.foreground, "#222222")
+        # `dark` stays as base had it (we're not deriving it from the
+        # omarchy BG today — that'd contradict "FG only" scope).
+        self.assertTrue(out.dark)
 
     def test_malformed_toml_returns_none_and_warns(self):
         with tempfile.TemporaryDirectory() as home:
             _write_palette(Path(home), "this = isn't valid TOML\nno no no")
             buf = io.StringIO()
             with redirect_stderr(buf):
-                result = load_omarchy_theme(home=Path(home))
+                result = apply_omarchy_flavor(_BASE, home=Path(home))
         self.assertIsNone(result)
         self.assertIn("warning", buf.getvalue().lower())
 
-    def test_missing_key_falls_back_silently(self):
-        # A palette with only the strictly-required-to-render keys; the
-        # rest should fall back to safe defaults without raising.
+    def test_missing_foreground_key_falls_back_to_base(self):
         with tempfile.TemporaryDirectory() as home:
-            _write_palette(Path(home), 'background = "#000000"\nforeground = "#ffffff"\n')
-            theme = load_omarchy_theme(home=Path(home))
-        self.assertIsNotNone(theme)
-        assert theme is not None
-        # Fallback accent (from _DARK_PALETTE's typical tokyonight hue).
-        self.assertEqual(theme.accent, "#7aa2f7")
+            _write_palette(Path(home), 'background = "#000000"\n')
+            out = apply_omarchy_flavor(_BASE, home=Path(home))
+        assert out is not None
+        self.assertEqual(out.foreground, _BASE.foreground)
 
     def test_non_string_value_rejected_as_warning(self):
         with tempfile.TemporaryDirectory() as home:
-            _write_palette(Path(home), "background = 42\n")
+            _write_palette(Path(home), "foreground = 42\n")
             buf = io.StringIO()
             with redirect_stderr(buf):
-                result = load_omarchy_theme(home=Path(home))
+                result = apply_omarchy_flavor(_BASE, home=Path(home))
         self.assertIsNone(result)
         self.assertIn("malformed", buf.getvalue().lower())
 
     def test_hex_without_hash_rejected(self):
         with tempfile.TemporaryDirectory() as home:
-            _write_palette(Path(home), 'background = "1a1b26"\n')
+            _write_palette(Path(home), 'foreground = "a9b1d6"\n')
             buf = io.StringIO()
             with redirect_stderr(buf):
-                result = load_omarchy_theme(home=Path(home))
+                result = apply_omarchy_flavor(_BASE, home=Path(home))
         self.assertIsNone(result)
-
-    def test_three_digit_hex_normalized_to_six(self):
-        # Spot-check via the internal helper — exposed for this exact
-        # reason. Short-form hex is expanded to full-form for Textual.
-        from actor.watch.omarchy_theme import _hex
-        out = _hex({"k": "#abc"}, "k", "#000000")
-        self.assertEqual(out, "#aabbcc")
 
 
 class TestOmarchyThemeMtime(unittest.TestCase):
@@ -141,14 +158,15 @@ class TestOmarchyThemeMtime(unittest.TestCase):
         self.assertGreater(mtime, 0)
 
     def test_symlink_target_mtime_used(self):
-        # Simulate omarchy's symlink shape: the real colors.toml lives
-        # inside a theme directory; `current/theme` is a symlink to it.
+        # Mirror omarchy's on-disk shape: `current/theme` is a symlink
+        # to the active theme directory. Resolving must reach the target
+        # so an `omarchy theme set X` flip (new symlink target) is
+        # observable as a different mtime.
         with tempfile.TemporaryDirectory() as home:
             home_path = Path(home)
             themes_dir = home_path / ".config/omarchy/themes/tokyonight"
             themes_dir.mkdir(parents=True)
             (themes_dir / "colors.toml").write_text(_DARK_PALETTE)
-            # Build the symlink chain that omarchy uses.
             current = home_path / ".config/omarchy/current"
             current.mkdir()
             (current / "theme").symlink_to(themes_dir)
@@ -173,9 +191,12 @@ class TestOmarchyHelpers(unittest.TestCase):
         self.assertFalse(_is_dark("#f5f5f5"))
 
     def test_shift_toward_foreground_moves_values(self):
-        # 50% mix of pure black + pure white = mid-gray (7f or 80).
         out = _shift_toward_foreground("#000000", "#ffffff", 0.5)
         self.assertIn(out, ("#7f7f7f", "#808080"))
+
+    def test_three_digit_hex_normalized_to_six(self):
+        out = _hex({"k": "#abc"}, "k", "#000000")
+        self.assertEqual(out, "#aabbcc")
 
 
 if __name__ == "__main__":

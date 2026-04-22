@@ -257,16 +257,28 @@ templates).
 
 ## Watch theme
 
-The `actor watch` TUI ships with a `claude-dark` / `claude-light` pair
-as the default. If it detects omarchy running locally (presence of
-`~/.config/omarchy/current/theme/colors.toml`), it instead builds a
-Textual theme from that palette and activates it automatically. The
-file's resolved-target mtime is polled every 3s so `omarchy theme set
-<name>` swaps the TUI theme live, no restart needed.
+The `actor watch` TUI ships with `claude-dark` / `claude-light`. If it
+detects omarchy running locally (presence of
+`~/.config/omarchy/current/theme/colors.toml`), it **flavors** the
+claude-dark theme with omarchy's foreground color — the brand slots
+(primary / secondary / accent / warning / error / success / background /
+surface / panel) stay as claude-dark defines them, so the app still
+reads as an "Actor.sh" TUI but its body text matches the rest of the
+user's desktop. Today only the foreground slot is overridden; growing
+this to cover more slots is a one-line-per-slot extension.
 
-See `src/actor/watch/omarchy_theme.py` for the palette → Textual-slot
-mapping. Malformed TOML logs a warning and keeps whatever theme is
-active rather than crashing the TUI.
+**Live reload:** every 3 seconds we re-stat the resolved-target mtime of
+`colors.toml`. If it changed (e.g. the user ran `omarchy theme set
+<name>`), we rebuild the flavor and re-register under the same theme
+name. For instant updates, `actor setup --for omarchy` installs a
+one-line fragment into `~/.config/omarchy/hooks/theme-set` that sends
+`SIGUSR2` to any running `actor watch`, triggering an immediate reload.
+The SIGUSR2 handler is wired unconditionally — the setup command only
+adds the hook that sends the signal.
+
+See `src/actor/watch/omarchy_theme.py` for the flavor logic. Malformed
+TOML logs a warning and keeps whatever theme is active rather than
+crashing the TUI.
 
 ## Interactive mode
 

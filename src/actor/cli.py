@@ -254,20 +254,23 @@ Examples:
     # -- setup --
     p_setup = sub.add_parser(
         "setup",
-        help="Install or reinstall the actor skill + register the MCP with a coding agent",
+        help="Install/reinstall integrations: the actor skill + MCP with a coding agent, or the omarchy theme-set hook",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
   actor setup --for claude-code                     User-wide install
   actor setup --for claude-code --scope project     Project-local install
   actor setup --for claude-code --name actor-dev    Register under a different name
+  actor setup --for omarchy                         Install omarchy theme-set hook for instant TUI re-theme
+  actor setup --for omarchy --uninstall             Remove the omarchy hook
 
 'setup' is idempotent — safe to re-run. For a lightweight refresh of
 just the skill files after upgrading actor-sh, use 'actor update'.""",
     )
-    p_setup.add_argument("--for", dest="for_host", required=True, metavar="HOST", help="Coding agent host (currently supported: claude-code)")
-    p_setup.add_argument("--scope", default="user", choices=["user", "project", "local"], help="Where to install (default: user)")
-    p_setup.add_argument("--name", default="actor", help="Name to register the MCP under (default: actor)")
+    p_setup.add_argument("--for", dest="for_host", required=True, metavar="HOST", help="Integration target (claude-code, omarchy)")
+    p_setup.add_argument("--scope", default="user", choices=["user", "project", "local"], help="Where to install (default: user). Ignored for --for omarchy.")
+    p_setup.add_argument("--name", default="actor", help="Name to register the MCP under (default: actor). Ignored for --for omarchy.")
+    p_setup.add_argument("--uninstall", action="store_true", help="Remove a previously installed integration (currently only supported for --for omarchy)")
 
     # -- update --
     p_update = sub.add_parser(
@@ -349,6 +352,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 for_host=args.for_host,
                 scope=args.scope,
                 name=args.name,
+                uninstall=args.uninstall,
             )
             print(msg)
         except ActorError as e:

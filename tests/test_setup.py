@@ -311,5 +311,121 @@ class SetupVersionAssertionTests(unittest.TestCase):
                 self.assertEqual(_parse_deployed_version(skill.read_text()), __version__)
 
 
+class SetupOmarchyTests(unittest.TestCase):
+    """`actor setup --for omarchy` — install / refresh / uninstall the
+    theme-set hook fragment."""
+
+    def _home_with_omarchy(self, tmp: str) -> Path:
+        home = Path(tmp)
+        (home / ".config" / "omarchy").mkdir(parents=True)
+        return home
+
+    def test_install_creates_hook_with_sentinel_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = self._home_with_omarchy(tmp)
+            with patch.dict(os.environ, {"HOME": str(home)}):
+                msg = cmd_setup(
+                    for_host="omarchy", scope="user", name="actor",
+                    uninstall=False,
+                )
+            self.assertIn("installed", msg.lower())
+            hook = home / ".config" / "omarchy" / "hooks" / "theme-set"
+            self.assertTrue(hook.is_file())
+            body = hook.read_text()
+            self.assertIn("BEGIN actor-sh", body)
+            self.assertIn("END actor-sh", body)
+            self.assertIn("pkill -SIGUSR2", body)
+            self.assertTrue(hook.stat().st_mode & 0o111)
+
+    def test_install_preserves_existing_user_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = self._home_with_omarchy(tmp)
+            hook = home / ".config" / "omarchy" / "hooks" / "theme-set"
+            hook.parent.mkdir(parents=True)
+            hook.write_text("#!/bin/bash\necho custom-user-line\n")
+            with patch.dict(os.environ, {"HOME": str(home)}):
+                cmd_setup(
+                    for_host="omarchy", scope="user", name="actor",
+                    uninstall=False,
+                )
+            body = hook.read_text()
+            self.assertIn("echo custom-user-line", body)
+            self.assertIn("BEGIN actor-sh", body)
+
+    def test_install_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = self._home_with_omarchy(tmp)
+            with patch.dict(os.environ, {"HOME": str(home)}):
+                cmd_setup(
+                    for_host="omarchy", scope="user", name="actor",
+                    uninstall=False,
+                )
+                msg2 = cmd_setup(
+                    for_host="omarchy", scope="user", name="actor",
+                    uninstall=False,
+                )
+            self.assertIn("nothing to do", msg2.lower())
+            hook = home / ".config" / "omarchy" / "hooks" / "theme-set"
+            self.assertEqual(hook.read_text().count("BEGIN actor-sh"), 1)
+
+    def test_uninstall_removes_only_our_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = self._home_with_omarchy(tmp)
+            hook = home / ".config" / "omarchy" / "hooks" / "theme-set"
+            hook.parent.mkdir(parents=True)
+            hook.write_text("#!/bin/bash\necho before\n")
+            with patch.dict(os.environ, {"HOME": str(home)}):
+                cmd_setup(
+                    for_host="omarchy", scope="user", name="actor",
+                    uninstall=False,
+                )
+                # Append a user line after our block, then uninstall.
+                body_after_install = hook.read_text() + "\necho after\n"
+                hook.write_text(body_after_install)
+                cmd_setup(
+                    for_host="omarchy", scope="user", name="actor",
+                    uninstall=True,
+                )
+            final = hook.read_text()
+            self.assertIn("echo before", final)
+            self.assertIn("echo after", final)
+            self.assertNotIn("BEGIN actor-sh", final)
+            self.assertNotIn("pkill -SIGUSR2", final)
+
+    def test_uninstall_noop_when_not_installed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = self._home_with_omarchy(tmp)
+            with patch.dict(os.environ, {"HOME": str(home)}):
+                msg = cmd_setup(
+                    for_host="omarchy", scope="user", name="actor",
+                    uninstall=True,
+                )
+            self.assertIn("nothing to do", msg.lower())
+
+    def test_errors_when_omarchy_not_installed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # No .config/omarchy/ directory created.
+            with patch.dict(os.environ, {"HOME": tmp}):
+                with self.assertRaises(ActorError) as ctx:
+                    cmd_setup(
+                        for_host="omarchy", scope="user", name="actor",
+                        uninstall=False,
+                    )
+            self.assertIn("not detected", str(ctx.exception).lower())
+
+
+class SetupUninstallGuardTests(unittest.TestCase):
+
+    def test_uninstall_not_supported_for_claude_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"HOME": tmp}):
+                with self.assertRaises(ActorError) as ctx:
+                    cmd_setup(
+                        for_host="claude-code", scope="user", name="actor",
+                        uninstall=True,
+                    )
+            self.assertIn("uninstall", str(ctx.exception).lower())
+
+
 if __name__ == "__main__":
     unittest.main()

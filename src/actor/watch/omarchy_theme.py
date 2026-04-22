@@ -1,4 +1,4 @@
-"""Load the omarchy palette (if present) as a Textual theme.
+"""Blend the omarchy palette (if present) onto a base Textual theme.
 
 Omarchy is a Linux desktop setup that manages a coordinated color palette
 across terminal emulators, editors, and window managers. When a user
@@ -6,26 +6,26 @@ switches themes via `omarchy theme set <name>`, the symlink at
 `~/.config/omarchy/current/theme` flips to point at the new theme
 directory; its `colors.toml` holds the shared hex palette.
 
-This module detects that file, builds a Textual `Theme`, and exposes a
-way to re-read it so callers (the watch TUI) can poll for theme changes
-and hot-swap.
+This module detects that file and returns a *flavored* variant of a
+supplied base theme — today only the foreground slot is pulled from
+omarchy, keeping every brand/semantic color from the base intact. That
+mirrors what Claude Code ends up looking like on omarchy (unstyled text
+follows the terminal's default FG; everything else stays branded) and
+avoids the "TUI looks like a totally different app" outcome a pure
+palette swap would produce.
 
-Non-omarchy users never touch this — `load_omarchy_theme()` just returns
-`None` when the file isn't there. Malformed input is also swallowed with
-a warning so a broken palette never takes down the TUI.
+Non-omarchy users never touch this — `apply_omarchy_flavor()` returns
+the base unchanged when the file isn't there. Malformed input is
+swallowed with a warning so a broken palette never takes down the TUI.
 """
 from __future__ import annotations
 
-import os
 import sys
 import tomllib
 from pathlib import Path
 from typing import Dict, Optional
 
 from textual.theme import Theme
-
-
-OMARCHY_THEME_NAME = "omarchy"
 
 
 def omarchy_colors_path(home: Optional[Path] = None) -> Path:
@@ -48,18 +48,37 @@ def omarchy_theme_mtime(home: Optional[Path] = None) -> Optional[float]:
         return None
 
 
-def load_omarchy_theme(home: Optional[Path] = None) -> Optional[Theme]:
-    """Parse the active omarchy colors.toml into a Textual Theme.
+def apply_omarchy_flavor(
+    base: Theme, home: Optional[Path] = None,
+) -> Optional[Theme]:
+    """Return a variant of `base` with environment colors pulled from
+    omarchy's active palette. Returns None when omarchy isn't present
+    or the palette file is unreadable / malformed.
 
-    Returns None if the file isn't present or can't be parsed. A parse
-    failure is reported on stderr so users can diagnose but never crashes
-    the TUI."""
+    Scope is intentionally small — just the foreground today. Growing
+    this to cover background / surface / panel / semantic slots is a
+    one-line-per-slot extension once we've lived with the FG override
+    for a bit."""
+    data = _load_palette(home)
+    if data is None:
+        return None
+    try:
+        return _flavor(base, data)
+    except (KeyError, ValueError, TypeError) as e:
+        print(
+            f"warning: omarchy palette is malformed: {e}",
+            file=sys.stderr,
+        )
+        return None
+
+
+def _load_palette(home: Optional[Path]) -> Optional[Dict[str, object]]:
     path = omarchy_colors_path(home)
     if not path.is_file():
         return None
     try:
         raw = path.read_bytes()
-        data = tomllib.loads(raw.decode("utf-8"))
+        return tomllib.loads(raw.decode("utf-8"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         print(
             f"warning: could not read omarchy palette at {path}: {e}",
@@ -67,49 +86,30 @@ def load_omarchy_theme(home: Optional[Path] = None) -> Optional[Theme]:
         )
         return None
 
-    try:
-        return _build_theme(data)
-    except (KeyError, ValueError, TypeError) as e:
-        print(
-            f"warning: omarchy palette at {path} is malformed: {e}",
-            file=sys.stderr,
-        )
-        return None
 
+def _flavor(base: Theme, data: Dict[str, object]) -> Theme:
+    """Overlay omarchy values onto `base`. Keep the base's name so it
+    shows up under its existing picker entry (e.g. 'claude-dark') — the
+    user doesn't see a separate 'omarchy' item.
 
-def _build_theme(data: Dict[str, object]) -> Theme:
-    """Map the omarchy palette onto Textual's theme slots.
-
-    Missing keys fall back to values that render safely on most
-    backgrounds. Callers should prefer a complete palette — the
-    fallbacks exist so a partial/experimental colors.toml doesn't fail
-    outright."""
-    background = _hex(data, "background", "#1a1b26")
-    foreground = _hex(data, "foreground", "#a9b1d6")
-    accent = _hex(data, "accent", "#7aa2f7")
-
-    # 16-slot ANSI palette — omarchy always provides these but the
-    # fallbacks keep parsing robust for any partial config.
-    red = _hex(data, "color1", "#f7768e")
-    green = _hex(data, "color2", "#9ece6a")
-    yellow = _hex(data, "color3", "#e0af68")
-    magenta = _hex(data, "color5", "#ad8ee6")
-    black = _hex(data, "color0", "#32344a")
-
-    dark = _is_dark(background)
+    Today only the foreground is overridden; every other slot stays as
+    `base` had it. We recompute `dark` from the overridden luminance in
+    case omarchy picks a light-mode theme while base is dark (or vice
+    versa) — keeps widget contrast logic correct."""
+    foreground = _hex(data, "foreground", base.foreground)
     return Theme(
-        name=OMARCHY_THEME_NAME,
-        primary=accent,
-        secondary=magenta,
-        accent=accent,
-        warning=yellow,
-        error=red,
-        success=green,
+        name=base.name,
+        primary=base.primary,
+        secondary=base.secondary,
+        accent=base.accent,
+        warning=base.warning,
+        error=base.error,
+        success=base.success,
         foreground=foreground,
-        background=background,
-        surface=_shift_toward_foreground(background, foreground, 0.08),
-        panel=black,
-        dark=dark,
+        background=base.background,
+        surface=base.surface,
+        panel=base.panel,
+        dark=base.dark,
     )
 
 
