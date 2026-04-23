@@ -7,7 +7,7 @@ from pathlib import Path
 from rich.text import Text
 from rich.theme import Theme as RichTheme
 
-from textual import work
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -111,6 +111,19 @@ class ActorWatchApp(App):
     .underline--bar {
         background: $foreground 30%;
     }
+    /* Decorate the active tab when anything inside the detail panel
+       has focus — that's the "this pane is where your input goes"
+       signal. Focus can sit on Tabs itself (arrow-key navigation) OR
+       on the tab's content widget (RichLog, etc.) once the user
+       drills in, so :focus-within is the right scope. Use the same
+       reverse video the focused tree cursor does: $primary bg with
+       theme $background text. Arrow prefix is added in Python (see
+       _refresh_tab_arrows) because Textual CSS has no ::before. */
+    #detail-panel:focus-within Tab.-active {
+        background: $primary;
+        color: $background;
+        text-style: bold;
+    }
     * {
         scrollbar-background: $foreground 30%;
         /* Textual's theme defines distinct hover/active track colors
@@ -121,7 +134,6 @@ class ActorWatchApp(App):
         scrollbar-background-active: $foreground 30%;
     }
     #logs-content {
-        padding: 0 1;
         scrollbar-size-horizontal: 0;
     }
     #info-content {
@@ -153,7 +165,7 @@ class ActorWatchApp(App):
         Binding("a", "focus_actors", "Actors"),
         Binding("p", "command_palette", "Palette"),
         Binding("i", "enter_interactive", "Interactive"),
-        Binding("l", "show_tab('logs')", "Logs"),
+        Binding("l", "show_tab('logs')", "Live"),
         Binding("d", "show_tab('diff')", "Diff"),
         Binding("question_mark", "show_tab('info')", "Info"),
         # Enter is handled by the Tree's NodeSelected message, not an app
@@ -167,7 +179,26 @@ class ActorWatchApp(App):
     _prev_statuses: dict[str, Status] = {}
     _current_actors: list[Actor] = []
     _diff_loaded_for: str | None = None
+
+    # Base labels for each tab (without the arrow prefix). Kept separate
+    # from the rendered tab.label so we can re-apply the "active +
+    # focused → arrow" decoration whenever focus moves or the active
+    # tab changes.
+    _tab_base_labels: dict[str, str] = {
+        "logs": "LIVE",
+        "diff": "DIFF",
+        "info": "INFO",
+        "interactive": "INTERACTIVE",
+    }
     _splash_active: bool = False
+
+    # False until on_ready finishes wiring up the initial state. While
+    # False, TabActivated messages (fired during initial mount) don't
+    # push focus into the detail pane — we want the actor tree to
+    # start with focus instead of whatever content widget the default
+    # active tab would otherwise claim. Named with the "tabs" prefix
+    # because `_ready` is taken by Textual's App internals.
+    _tabs_ready: bool = False
 
     def __init__(self, animate: bool = True) -> None:
         super().__init__()
@@ -196,11 +227,11 @@ class ActorWatchApp(App):
                     # Interactive tab is added dynamically via
                     # _sync_detail_view when the selected actor has a
                     # live session; removed again when the session ends.
-                    with TabPane("Logs", id="logs"):
+                    with TabPane("LIVE", id="logs"):
                         yield RichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False)
-                    with TabPane("Diff", id="diff"):
+                    with TabPane("DIFF", id="diff"):
                         yield VerticalScroll(id="diff-scroll")
-                    with TabPane("Info", id="info"):
+                    with TabPane("INFO", id="info"):
                         yield VerticalScroll(
                             Static("Select an actor", id="info-content"),
                             DataTable(id="runs-table"),
@@ -241,6 +272,19 @@ class ActorWatchApp(App):
         # 3s cadence is fine and we don't need inotify / platform-specific
         # machinery. No-op on non-omarchy systems.
         self.set_interval(3.0, self._poll_omarchy_theme)
+
+        # Start with focus on the actor tree. call_after_refresh so
+        # the focus call runs AFTER any pending focus-changes queued
+        # during compose/mount (TabbedContent's initial tab activation
+        # can sneak focus onto a content widget otherwise).
+        def _initial_focus() -> None:
+            try:
+                self.query_one(ActorTree).focus()
+            except Exception:
+                pass
+            self._tabs_ready = True
+            self._refresh_tab_arrows()
+        self.call_after_refresh(_initial_focus)
 
     def _install_sigusr2_handler(self) -> None:
         """Wire SIGUSR2 into the asyncio loop so the hook installed via
@@ -550,12 +594,63 @@ class ActorWatchApp(App):
             self.call_from_thread(self._set_diff_text, f"Diff error: {e}")
 
     def _update_diff_tab_label(self, added: int = 0, removed: int = 0) -> None:
-        tabs = self.query_one("#tabs", TabbedContent)
-        tab = tabs.get_tab("diff")
         if added or removed:
-            tab.label = f"Diff (±{added + removed})"
+            base = f"DIFF (±{added + removed})"
         else:
-            tab.label = "Diff"
+            base = "DIFF"
+        self._tab_base_labels["diff"] = base
+        self._refresh_tab_arrows()
+
+    def _refresh_tab_arrows(self) -> None:
+        """Prefix the currently-active tab with `→` while any
+        descendant of the detail panel has focus (tabs bar, the
+        active tab's content, etc.). Matches the focus-gated
+        reverse-video override in CSS. Safe to call before compose
+        finishes."""
+        try:
+            tabbed = self.query_one("#tabs", TabbedContent)
+            detail = self.query_one("#detail-panel")
+        except Exception:
+            return
+        focused = detail.has_focus_within
+        active_id = tabbed.active
+        for tab_id, base in self._tab_base_labels.items():
+            try:
+                tab = tabbed.get_tab(tab_id)
+            except Exception:
+                continue  # e.g. interactive tab isn't mounted right now
+            if tab is None:
+                continue
+            if tab_id == active_id and focused:
+                tab.label = f"→ {base}"
+            else:
+                tab.label = base
+
+    def on_tabbed_content_tab_activated(self, event) -> None:
+        # TabbedContent fires TabActivated on mount for the default
+        # tab; suppress the focus-push until we're fully ready so the
+        # tree (not the default tab's content) carries the initial
+        # focus. After ready, push focus into the active tab's
+        # content widget so the user can immediately scroll /
+        # interact, and so our #detail-panel:focus-within highlight
+        # fires on mouse clicks too.
+        if self._tabs_ready:
+            self._focus_detail_content()
+        self._refresh_tab_arrows()
+
+    @on(events.Click, "#tabs Tabs, #tabs Tab")
+    def _on_tabs_click(self, event: events.Click) -> None:
+        # Any click landing inside the Tabs bar — whether on a
+        # different tab (triggering TabActivated) or on the
+        # already-active tab (which wouldn't) — should end with focus
+        # on the active tab's content, matching the keyboard path.
+        self._focus_detail_content()
+
+    def on_descendant_focus(self, event) -> None:
+        self._refresh_tab_arrows()
+
+    def on_descendant_blur(self, event) -> None:
+        self._refresh_tab_arrows()
 
     def _set_diff_text(self, text: str) -> None:
         scroll = self.query_one("#diff-scroll", VerticalScroll)
@@ -643,7 +738,7 @@ class ActorWatchApp(App):
             tabs.remove_pane("interactive")
 
         # add_pane is async — it schedules the mount but we can proceed.
-        new_pane = TabPane("Interactive", info.widget, id="interactive")
+        new_pane = TabPane("INTERACTIVE", info.widget, id="interactive")
         tabs.add_pane(new_pane, before="logs")
         self._interactive_active = actor.name
 
