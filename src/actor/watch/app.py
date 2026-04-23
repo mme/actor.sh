@@ -520,6 +520,20 @@ class ActorWatchApp(App):
     def _set_logs(self, actor_name: str, entries: list) -> None:
         log = self.query_one("#logs-content", RichLog)
 
+        # TabbedContent hides non-active panes via display:none, which
+        # collapses RichLog to zero width. Writing renderables to a
+        # zero-width RichLog still caches line segments — at zero
+        # width — so when the user later activates the LIVE tab the
+        # first paint is the collapsed cache, visibly shrunken,
+        # immediately followed by a re-render at the real width.
+        # Stash entries but skip the render while we can't draw the
+        # real layout; _flush_pending_logs re-invokes us once LIVE
+        # is actually visible.
+        if log.size.width == 0:
+            self._last_log_actor = actor_name
+            self._last_log_entries = entries
+            return
+
         actor_changed = actor_name != self._last_log_actor
         if not actor_changed and len(entries) == self._last_log_count and log.size.width == self._last_log_width:
             return
@@ -637,6 +651,32 @@ class ActorWatchApp(App):
         if self._tabs_ready:
             self._focus_detail_content()
         self._refresh_tab_arrows()
+        # LIVE just became visible. Its RichLog was width-0 while
+        # hidden and we skipped render passes — flush now so the
+        # first paint sees real content at the real width instead
+        # of a stale/empty cache that then gets corrected.
+        self._flush_pending_logs_if_visible()
+
+    def _flush_pending_logs_if_visible(self) -> None:
+        """Re-run the logs renderer once LIVE has a non-zero width,
+        using whatever entries were stashed while hidden. Call after
+        layout can assign the RichLog its real width (post
+        TabActivated + post call_after_refresh is a safe time)."""
+        if not self._last_log_entries or self._last_log_actor is None:
+            return
+        def _attempt() -> None:
+            try:
+                log = self.query_one("#logs-content", RichLog)
+            except Exception:
+                return
+            if log.size.width == 0:
+                return
+            # Force a re-render by invalidating the width cache, then
+            # replay through _set_logs so the skip-fast-path doesn't
+            # short-circuit.
+            self._last_log_width = -1
+            self._set_logs(self._last_log_actor, self._last_log_entries)
+        self.call_after_refresh(_attempt)
 
     @on(events.Click, "#tabs Tabs, #tabs Tab")
     def _on_tabs_click(self, event: events.Click) -> None:

@@ -9,11 +9,12 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from ..errors import ActorError
 from ..interfaces import Agent, LogEntry, LogEntryKind
 from ..types import ActorConfig
+from ._jsonl import split_complete_lines
 
 
 class _CodexChild:
@@ -203,12 +204,49 @@ class CodexAgent(Agent):
         rollout_path = self._find_rollout_path(session_id)
         if rollout_path is None:
             return []
-
         try:
             content = rollout_path.read_text()
         except FileNotFoundError:
             return []
+        return self._parse_entries(content)
 
+    def read_logs_since(
+        self, dir: Path, session_id: str, cursor: Any = None,
+    ) -> Tuple[List[LogEntry], Any]:
+        """Byte-offset cursor tail read against the Codex rollout file.
+        Same semantics as ClaudeAgent.read_logs_since — see that
+        docstring for cursor behavior."""
+        rollout_path = self._find_rollout_path(session_id)
+        if rollout_path is None:
+            return [], cursor
+        try:
+            size = rollout_path.stat().st_size
+        except (FileNotFoundError, OSError):
+            return [], cursor
+
+        if isinstance(cursor, int) and 0 <= cursor <= size:
+            offset = cursor
+        else:
+            offset = 0
+
+        try:
+            with open(rollout_path, "rb") as f:
+                f.seek(offset)
+                data = f.read()
+        except OSError:
+            return [], cursor
+
+        text, cursor_advance = split_complete_lines(data)
+        if cursor_advance is None:
+            return [], cursor
+        new_cursor = offset + cursor_advance
+        return self._parse_entries(text), new_cursor
+
+    @staticmethod
+    def _parse_entries(content: str) -> List[LogEntry]:
+        """Parse Codex JSONL text into LogEntry instances. Shared
+        between the full-read path (``read_logs``) and the streaming
+        tail path (``read_logs_since``)."""
         entries: List[LogEntry] = []
         for line in content.splitlines():
             line = line.strip()
@@ -218,55 +256,61 @@ class CodexAgent(Agent):
                 v = json.loads(line)
             except json.JSONDecodeError:
                 continue
-
-            top_type = v.get("type")
-            payload = v.get("payload", {})
-
-            if top_type == "event_msg":
-                msg_type = payload.get("type")
-                if msg_type == "agent_message":
-                    text = payload.get("message", "")
-                    if isinstance(text, str) and text:
-                        entries.append(LogEntry(
-                            kind=LogEntryKind.ASSISTANT,
-                            text=text,
-                        ))
-                elif msg_type == "user_message":
-                    text = payload.get("message", "")
-                    if isinstance(text, str) and text:
-                        entries.append(LogEntry(
-                            kind=LogEntryKind.USER,
-                            text=text,
-                        ))
-                elif msg_type == "exec_command":
-                    cmd = payload.get("command", {})
-                    cmd_str = cmd.get("command", "") if isinstance(cmd, dict) else ""
-                    if isinstance(cmd_str, str) and cmd_str:
-                        entries.append(LogEntry(
-                            kind=LogEntryKind.TOOL_USE,
-                            name="shell",
-                            input=cmd_str,
-                        ))
-                elif msg_type == "exec_command_output":
-                    output = payload.get("output", "")
-                    if isinstance(output, str) and output:
-                        entries.append(LogEntry(
-                            kind=LogEntryKind.TOOL_RESULT,
-                            content=output,
-                        ))
-            elif top_type == "response_item":
-                item_type = payload.get("type")
-                if item_type == "reasoning":
-                    summaries = payload.get("summary", [])
-                    for s in summaries:
-                        text = s.get("text", "") if isinstance(s, dict) else ""
-                        if isinstance(text, str) and text:
-                            entries.append(LogEntry(
-                                kind=LogEntryKind.THINKING,
-                                text=text,
-                            ))
-
+            entries.extend(CodexAgent._parse_log_dict(v))
         return entries
+
+    @staticmethod
+    def _parse_log_dict(v: dict) -> List[LogEntry]:
+        """Parse one decoded Codex JSONL record into zero or more
+        LogEntry instances."""
+        out: List[LogEntry] = []
+        top_type = v.get("type")
+        payload = v.get("payload", {})
+
+        if top_type == "event_msg":
+            msg_type = payload.get("type")
+            if msg_type == "agent_message":
+                text = payload.get("message", "")
+                if isinstance(text, str) and text:
+                    out.append(LogEntry(
+                        kind=LogEntryKind.ASSISTANT,
+                        text=text,
+                    ))
+            elif msg_type == "user_message":
+                text = payload.get("message", "")
+                if isinstance(text, str) and text:
+                    out.append(LogEntry(
+                        kind=LogEntryKind.USER,
+                        text=text,
+                    ))
+            elif msg_type == "exec_command":
+                cmd = payload.get("command", {})
+                cmd_str = cmd.get("command", "") if isinstance(cmd, dict) else ""
+                if isinstance(cmd_str, str) and cmd_str:
+                    out.append(LogEntry(
+                        kind=LogEntryKind.TOOL_USE,
+                        name="shell",
+                        input=cmd_str,
+                    ))
+            elif msg_type == "exec_command_output":
+                output = payload.get("output", "")
+                if isinstance(output, str) and output:
+                    out.append(LogEntry(
+                        kind=LogEntryKind.TOOL_RESULT,
+                        content=output,
+                    ))
+        elif top_type == "response_item":
+            item_type = payload.get("type")
+            if item_type == "reasoning":
+                summaries = payload.get("summary", [])
+                for s in summaries:
+                    text = s.get("text", "") if isinstance(s, dict) else ""
+                    if isinstance(text, str) and text:
+                        out.append(LogEntry(
+                            kind=LogEntryKind.THINKING,
+                            text=text,
+                        ))
+        return out
 
     def interactive_argv(self, session_id: str, config: ActorConfig) -> List[str]:
         # Propagate agent flags so interactive sessions honor the same

@@ -911,88 +911,11 @@ def claude_session_file_path(dir_path, session_id: str) -> str:
 def claude_read_logs(path: str) -> List[LogEntry]:
     """Read Claude JSONL logs from a file path, returning LogEntry objects.
 
-    This is a standalone function that wraps the JSONL parsing logic
-    from ClaudeAgent.read_logs for direct file-path-based testing.
-    """
+    Thin wrapper around ``ClaudeAgent._parse_entries`` for direct
+    file-path-based testing — exists so tests can parse without
+    constructing a ClaudeAgent or a session directory structure."""
     try:
         content = Path(path).read_text()
     except FileNotFoundError:
         return []
-
-    entries: List[LogEntry] = []
-    for line in content.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            v = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        msg_type = v.get("type")
-        if not isinstance(msg_type, str):
-            continue
-
-        timestamp = v.get("timestamp")
-        ts: Optional[str] = timestamp if isinstance(timestamp, str) else None
-
-        message = v.get("message")
-        if message is None:
-            continue
-
-        if msg_type == "user":
-            content_val = message.get("content")
-            if isinstance(content_val, str):
-                entries.append(LogEntry(
-                    kind=LogEntryKind.USER,
-                    timestamp=ts,
-                    text=content_val,
-                ))
-            elif isinstance(content_val, list):
-                for item in content_val:
-                    if isinstance(item, dict) and item.get("type") == "tool_result":
-                        c = item.get("content", "")
-                        if isinstance(c, str):
-                            text = c
-                        else:
-                            text = json.dumps(c) if c is not None else ""
-                        entries.append(LogEntry(
-                            kind=LogEntryKind.TOOL_RESULT,
-                            timestamp=ts,
-                            content=text,
-                        ))
-        elif msg_type == "assistant":
-            content_arr = message.get("content")
-            if isinstance(content_arr, list):
-                for block in content_arr:
-                    if not isinstance(block, dict):
-                        continue
-                    block_type = block.get("type")
-                    if block_type == "text":
-                        text = block.get("text")
-                        if isinstance(text, str):
-                            entries.append(LogEntry(
-                                kind=LogEntryKind.ASSISTANT,
-                                timestamp=ts,
-                                text=text,
-                            ))
-                    elif block_type == "thinking":
-                        text = block.get("thinking")
-                        if isinstance(text, str):
-                            entries.append(LogEntry(
-                                kind=LogEntryKind.THINKING,
-                                timestamp=ts,
-                                text=text,
-                            ))
-                    elif block_type == "tool_use":
-                        name = block.get("name", "unknown")
-                        inp = block.get("input")
-                        inp_str = json.dumps(inp) if inp is not None else ""
-                        entries.append(LogEntry(
-                            kind=LogEntryKind.TOOL_USE,
-                            timestamp=ts,
-                            name=name,
-                            input=inp_str,
-                        ))
-
-    return entries
+    return ClaudeAgent._parse_entries(content)
