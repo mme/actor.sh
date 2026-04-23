@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 from rich.padding import Padding
 from rich.text import Text
 
@@ -14,23 +16,89 @@ from .render_user import render_user
 from .types import ThemeColors
 
 
+# Callable returning True when the build should abort. Builders check
+# between entries; the default never cancels, so synchronous callers
+# can ignore this entirely.
+CancelCheck = Callable[[], bool]
+
+
+def _never_cancelled() -> bool:
+    return False
+
+
 def render_log_entries(log: RichLog, entries: list, colors: ThemeColors) -> None:
-    """Full rerender of all log entries. Clears the widget first.
+    """Synchronous full rerender — kept for tests and any caller that
+    doesn't want to deal with the two-phase build/apply dance.
 
-    Used when the actor changed, width changed, or the incoming entry
-    list diverges from what's already in the log (e.g. a tool_result
-    landed that pairs with a tool_use we already rendered without
-    one). For the common "growing tail" case, prefer
-    append_log_entries instead — it scales with the delta rather than
-    the total."""
-    log.clear()
+    The watch app uses `build_log_renderables` + `apply_log_renderables`
+    directly so the expensive markdown/table construction runs off the
+    main thread."""
+    renderables = build_log_renderables(entries, colors)
+    if renderables is None:
+        return  # unreachable with the default never-cancel check
+    apply_log_renderables(log, renderables)
 
+
+class _BufferingLog:
+    """Collects ``log.write`` calls into a list for later replay.
+
+    The per-entry renderers (render_user / render_assistant / render_tool
+    / _render_thinking) write directly into whatever log-like object
+    they're given. Pointing them at this buffer moves the entire
+    build — markdown parsing, Table construction, Text assembly — off
+    the main thread; the main thread then replays the captured writes
+    onto the real RichLog. No Textual widget state is mutated here,
+    which is what makes the off-thread build safe."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, dict]] = []
+
+    def write(self, content: object, **kwargs) -> "_BufferingLog":
+        self.calls.append((content, kwargs))
+        return self
+
+
+def build_log_renderables(
+    entries: list,
+    colors: ThemeColors,
+    is_cancelled: CancelCheck = _never_cancelled,
+) -> list[tuple[object, dict]] | None:
+    """Render `entries` into a list of ``(renderable, kwargs)`` tuples
+    without touching any widget. Safe to call from a worker thread.
+
+    Same layout logic as the synchronous full rerender — including
+    tool-pair resolution and blank-line separators — just writing to
+    `_BufferingLog` instead of a RichLog.
+
+    Returns None when `is_cancelled()` flips True mid-build. The
+    caller (worker) takes that as a signal to drop its result and
+    return silently — a newer build is running and will own the apply.
+    """
+    if is_cancelled():
+        return None
+    buf = _BufferingLog()
     if not entries:
-        log.write(Text("No logs yet", style="dim"))
-        return
-
+        buf.write(Text("No logs yet", style="dim"))
+        return buf.calls
     tool_results = _pair_tools(entries)
-    _write_range(log, entries, 0, tool_results, colors, already_rendered=False)
+    _write_range(
+        buf, entries, 0, tool_results, colors,
+        already_rendered=False, is_cancelled=is_cancelled,
+    )
+    if is_cancelled():
+        return None
+    return buf.calls
+
+
+def apply_log_renderables(
+    log: RichLog, renderables: list[tuple[object, dict]],
+) -> None:
+    """Commit buffered renderables from `build_log_renderables` onto a
+    real RichLog. Must run on the main thread — `clear` and `write`
+    mutate widget state that the compositor reads."""
+    log.clear()
+    for content, kwargs in renderables:
+        log.write(content, **kwargs)
 
 
 def append_log_entries(
@@ -81,14 +149,22 @@ def _write_range(
     tool_results: dict[int, object],
     colors: ThemeColors,
     already_rendered: bool,
+    is_cancelled: CancelCheck = _never_cancelled,
 ) -> None:
     """Write entries[start_idx:] to the log, dispatching each kind to
     its dedicated renderer. `already_rendered` tells us whether the
     log already has output above us (so the first write in THIS pass
     needs a leading blank separator) or whether we're starting
-    fresh."""
+    fresh.
+
+    Cancellation is checked before each entry — a cooperative signal
+    from the worker when a newer build has superseded this one. On
+    cancel the function just returns; whatever was buffered so far
+    will be discarded by the caller."""
     first_this_pass = True
     for idx in range(start_idx, len(entries)):
+        if is_cancelled():
+            return
         entry = entries[idx]
         if entry.kind == LogEntryKind.TOOL_RESULT:
             continue

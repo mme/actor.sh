@@ -40,7 +40,11 @@ from .omarchy_theme import (
 from .themes import CLAUDE_DARK, CLAUDE_LIGHT
 from .tree import ActorTree
 from .helpers import compute_diff, read_log_entries_since
-from .log_renderer import append_log_entries, render_log_entries
+from .log_renderer import (
+    append_log_entries,
+    apply_log_renderables,
+    build_log_renderables,
+)
 from .types import ThemeColors
 
 # Apply patches at import time
@@ -536,6 +540,22 @@ class ActorWatchApp(App):
     _last_log_width: int = 0
     _last_log_entries: list = []
 
+    # Full-rebuild builds run in a worker thread. `_log_build_token`
+    # increments on every kick-off; the worker's apply callback is a
+    # no-op if a newer build has started in the meantime. `_pending`
+    # is True while a build is in flight — guards append-path
+    # decisions (which assume the widget reflects committed state) and
+    # gates the 300ms placeholder. `_target_*` records what the
+    # in-flight build is aiming at so that a follow-up _set_logs call
+    # carrying the same entries (e.g. a 2s poll with no new activity)
+    # can short-circuit instead of endlessly re-kicking and starving
+    # the build of a chance to commit.
+    _log_build_token: int = 0
+    _log_build_pending: bool = False
+    _log_build_target_actor: str | None = None
+    _log_build_target_count: int = 0
+    _log_build_target_width: int = 0
+
     def on_resize(self) -> None:
         log = self.query_one("#logs-content", RichLog)
         if log.size.width != self._last_log_width and self._last_log_entries:
@@ -572,15 +592,28 @@ class ActorWatchApp(App):
 
         actor_changed = actor_name != self._last_log_actor
         width_changed = log.size.width != self._last_log_width
-        if not actor_changed and not width_changed and len(entries) == self._last_log_count:
+        # Nothing-changed shortcut. When a full build is in flight the
+        # "committed" baseline is `_last_log_*`, but the meaningful
+        # baseline for skipping is the in-flight build's TARGET — if
+        # this call carries the same actor/entries/width the build is
+        # already working on, re-kicking would only cancel its own
+        # progress. Compare against target while pending; against
+        # committed state otherwise.
+        if self._log_build_pending:
+            if (
+                actor_name == self._log_build_target_actor
+                and log.size.width == self._log_build_target_width
+                and len(entries) == self._log_build_target_count
+            ):
+                return
+        elif (
+            not actor_changed
+            and not width_changed
+            and len(entries) == self._last_log_count
+        ):
             return
 
         prior_count = self._last_log_count
-        self._last_log_actor = actor_name
-        self._last_log_count = len(entries)
-        self._last_log_width = log.size.width
-        self._last_log_entries = entries
-
         at_bottom = log.scroll_offset.y >= log.max_scroll_y - 1
 
         t = self.current_theme
@@ -602,6 +635,8 @@ class ActorWatchApp(App):
         )
 
         # Append vs full rerender. Conditions for the cheap append path:
+        #   - no full build currently in flight (committed state
+        #     matches the widget)
         #   - same actor (prior_count + entries refer to the same stream)
         #   - same width (RichLog's cached segments are width-specific)
         #   - entry list only grew (prior_count <= new_count)
@@ -610,16 +645,114 @@ class ActorWatchApp(App):
         #     is append-only, we can't patch the old tool's rendered
         #     row in place, so we fall back to a full rerender)
         can_append = (
-            not actor_changed
+            not self._log_build_pending
+            and not actor_changed
             and not width_changed
             and 0 <= prior_count <= len(entries)
             and not self._tail_has_tool_result(entries, prior_count)
         )
         if can_append:
             append_log_entries(log, entries, prior_count, colors)
+            self._last_log_actor = actor_name
+            self._last_log_count = len(entries)
+            self._last_log_width = log.size.width
+            self._last_log_entries = entries
+            if at_bottom:
+                log.scroll_end(animate=False)
         else:
-            render_log_entries(log, entries, colors)
+            self._kick_off_full_build(
+                actor_name, entries, colors, log.size.width, at_bottom,
+            )
 
+    def _kick_off_full_build(
+        self,
+        actor_name: str,
+        entries: list,
+        colors: ThemeColors,
+        width: int,
+        at_bottom: bool,
+    ) -> None:
+        """Start an off-thread build of the full RichLog content. A
+        300ms timer shows the "Loading logs..." placeholder if the
+        build hasn't committed by then — short builds commit first and
+        the placeholder never flashes."""
+        self._log_build_token += 1
+        self._log_build_pending = True
+        self._log_build_target_actor = actor_name
+        self._log_build_target_count = len(entries)
+        self._log_build_target_width = width
+        token = self._log_build_token
+
+        def _maybe_show_placeholder() -> None:
+            # Fire only if this build is still the latest one AND
+            # hasn't already applied. Any newer kick-off bumps the
+            # token; a committed apply clears the pending flag.
+            if token != self._log_build_token or not self._log_build_pending:
+                return
+            try:
+                log = self.query_one("#logs-content", RichLog)
+            except Exception:
+                return
+            log.clear()
+            log.write(Text("Loading logs...", style="dim"))
+
+        self.set_timer(0.3, _maybe_show_placeholder)
+        self._build_log_worker(
+            token, actor_name, entries, colors, width, at_bottom,
+        )
+
+    @work(thread=True, exclusive=True, group="log_build")
+    def _build_log_worker(
+        self,
+        token: int,
+        actor_name: str,
+        entries: list,
+        colors: ThemeColors,
+        width: int,
+        at_bottom: bool,
+    ) -> None:
+        # Cooperative cancel: when a newer build supersedes this one,
+        # `_log_build_token` is already the new value on the main
+        # thread. Check each tick and bail early so we don't keep
+        # burning CPU (or, for the test-harness artificial sleep,
+        # keep sleeping) on output that will be discarded anyway.
+        def is_cancelled() -> bool:
+            return self._log_build_token != token
+
+        renderables = build_log_renderables(entries, colors, is_cancelled)
+        if renderables is None:
+            # Cancelled mid-build; the newer worker owns the apply.
+            return
+        self.call_from_thread(
+            self._apply_log_build,
+            token, actor_name, entries, renderables, width, at_bottom,
+        )
+
+    def _apply_log_build(
+        self,
+        token: int,
+        actor_name: str,
+        entries: list,
+        renderables: list,
+        width: int,
+        at_bottom: bool,
+    ) -> None:
+        if token != self._log_build_token:
+            # A newer build kicked off while this one was in the
+            # worker. Discard the stale output — the newer build's
+            # apply will land the correct state.
+            return
+        try:
+            log = self.query_one("#logs-content", RichLog)
+        except Exception:
+            self._log_build_pending = False
+            return
+        apply_log_renderables(log, renderables)
+        self._log_build_pending = False
+        self._last_log_actor = actor_name
+        self._last_log_count = len(entries)
+        self._last_log_width = width
+        self._last_log_entries = entries
         if at_bottom:
             log.scroll_end(animate=False)
 
@@ -726,7 +859,12 @@ class ActorWatchApp(App):
         """Re-run the logs renderer once LIVE has a non-zero width,
         using whatever entries were stashed while hidden. Call after
         layout can assign the RichLog its real width (post
-        TabActivated + post call_after_refresh is a safe time)."""
+        TabActivated + post call_after_refresh is a safe time).
+
+        `_set_logs`'s own skip shortcut handles the common "user
+        switched away and back, nothing changed" case — we just
+        replay; it returns early when the committed state already
+        matches the stashed state."""
         if not self._last_log_entries or self._last_log_actor is None:
             return
         def _attempt() -> None:
@@ -736,10 +874,6 @@ class ActorWatchApp(App):
                 return
             if log.size.width == 0:
                 return
-            # Force a re-render by invalidating the width cache, then
-            # replay through _set_logs so the skip-fast-path doesn't
-            # short-circuit.
-            self._last_log_width = -1
             self._set_logs(self._last_log_actor, self._last_log_entries)
         self.call_after_refresh(_attempt)
 
