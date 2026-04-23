@@ -39,7 +39,7 @@ from .omarchy_theme import (
 from .themes import CLAUDE_DARK, CLAUDE_LIGHT
 from .tree import ActorTree
 from .helpers import compute_diff, read_log_entries_since
-from .log_renderer import render_log_entries
+from .log_renderer import append_log_entries, render_log_entries
 from .types import ThemeColors
 
 # Apply patches at import time
@@ -563,8 +563,11 @@ class ActorWatchApp(App):
             return
 
         actor_changed = actor_name != self._last_log_actor
-        if not actor_changed and len(entries) == self._last_log_count and log.size.width == self._last_log_width:
+        width_changed = log.size.width != self._last_log_width
+        if not actor_changed and not width_changed and len(entries) == self._last_log_count:
             return
+
+        prior_count = self._last_log_count
         self._last_log_actor = actor_name
         self._last_log_count = len(entries)
         self._last_log_width = log.size.width
@@ -589,10 +592,36 @@ class ActorWatchApp(App):
             inactive="#999999" if (t and t.dark) else "#666666",
             user_fg=base.foreground,
         )
-        render_log_entries(log, entries, colors)
+
+        # Append vs full rerender. Conditions for the cheap append path:
+        #   - same actor (prior_count + entries refer to the same stream)
+        #   - same width (RichLog's cached segments are width-specific)
+        #   - entry list only grew (prior_count <= new_count)
+        #   - the new tail contains no tool_result (if it did, it might
+        #     pair with a tool_use we already wrote to the log — RichLog
+        #     is append-only, we can't patch the old tool's rendered
+        #     row in place, so we fall back to a full rerender)
+        can_append = (
+            not actor_changed
+            and not width_changed
+            and 0 <= prior_count <= len(entries)
+            and not self._tail_has_tool_result(entries, prior_count)
+        )
+        if can_append:
+            append_log_entries(log, entries, prior_count, colors)
+        else:
+            render_log_entries(log, entries, colors)
 
         if at_bottom:
             log.scroll_end(animate=False)
+
+    @staticmethod
+    def _tail_has_tool_result(entries: list, prior_count: int) -> bool:
+        from ..interfaces import LogEntryKind
+        for i in range(prior_count, len(entries)):
+            if entries[i].kind == LogEntryKind.TOOL_RESULT:
+                return True
+        return False
 
     # -- Diff ----------------------------------------------------------------
 
