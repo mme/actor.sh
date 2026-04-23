@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from rich.text import Text
@@ -505,12 +506,22 @@ class ActorWatchApp(App):
     def _refresh_logs(self, actor: Actor) -> None:
         # Cursor-based tail read: only the bytes added since last poll
         # are re-parsed. On actor change the cursor will be None so
-        # we get a full read. See read_log_entries_since for the
-        # contract.
-        cursor = self._log_cursors.get(actor.name)
-        new_entries, next_cursor = read_log_entries_since(actor, cursor)
+        # we get a full read.
+        #
+        # Serialize under _log_lock so two polls firing in quick
+        # succession can't both read from the same pre-update cursor.
+        # @work(exclusive=True) only sets a cancel flag the worker
+        # must check; synchronous disk I/O won't. The lock both
+        # gates the read and scopes the cursor update, so by the
+        # time the next worker takes the lock it sees the advanced
+        # cursor and skips already-read bytes.
+        with self._log_lock:
+            cursor = self._log_cursors.get(actor.name)
+            new_entries, next_cursor = read_log_entries_since(actor, cursor)
+            if next_cursor is not None:
+                self._log_cursors[actor.name] = next_cursor
         self.call_from_thread(
-            self._append_logs, actor.name, new_entries, next_cursor,
+            self._append_logs, actor.name, new_entries,
         )
 
     # Accumulated log entries + read-cursor kept per-actor so switching
@@ -518,6 +529,7 @@ class ActorWatchApp(App):
     # back. Entries survive for the TUI session lifetime.
     _log_entries_by_actor: dict[str, list] = {}
     _log_cursors: dict[str, object] = {}
+    _log_lock = threading.Lock()
 
     _last_log_actor: str | None = None
     _last_log_count: int = 0
@@ -530,19 +542,15 @@ class ActorWatchApp(App):
             self._last_log_count = 0
             self._set_logs(self._last_log_actor, self._last_log_entries)
 
-    def _append_logs(self, actor_name: str, new_entries: list, next_cursor) -> None:
-        """Thread-safe entry-point called from _refresh_logs worker.
-
-        Appends the newly-read tail to this actor's accumulated log,
-        stores the next cursor, and hands the full list to _set_logs.
-        Keeping the accumulation separate from the render stage lets
-        _set_logs continue to make its own "did anything change"
-        decision using entry count + width."""
+    def _append_logs(self, actor_name: str, new_entries: list) -> None:
+        """Main-thread callback from _refresh_logs worker. The cursor
+        was already advanced by the worker under _log_lock, so here we
+        just extend the bucket and run the render. Mutating the bucket
+        (shared only with main thread) is safe; the cursor dict is
+        worker-written under the lock so we don't touch it here."""
         bucket = self._log_entries_by_actor.setdefault(actor_name, [])
         if new_entries:
             bucket.extend(new_entries)
-        if next_cursor is not None:
-            self._log_cursors[actor_name] = next_cursor
         self._set_logs(actor_name, bucket)
 
     def _set_logs(self, actor_name: str, entries: list) -> None:
