@@ -140,6 +140,14 @@ class ActorWatchApp(App):
     }
     #logs-content {
         scrollbar-size-horizontal: 0;
+        /* Hide the track on the LIVE pane — only the thumb remains
+           visible as a floating indicator. `ansi_default` makes the
+           track blend into whatever the terminal's background is,
+           overriding the 30%-fg track color we apply globally via
+           `*`. */
+        scrollbar-background: ansi_default;
+        scrollbar-background-hover: ansi_default;
+        scrollbar-background-active: ansi_default;
     }
     #info-content {
         padding: 1;
