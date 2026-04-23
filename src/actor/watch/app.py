@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from rich.text import Text
 from rich.theme import Theme as RichTheme
 
-from textual import work
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -16,6 +17,7 @@ from textual.widgets import (
     Footer,
     Header,
     RichLog,
+    Rule,
     Static,
     TabbedContent,
     TabPane,
@@ -37,8 +39,12 @@ from .omarchy_theme import (
 )
 from .themes import CLAUDE_DARK, CLAUDE_LIGHT
 from .tree import ActorTree
-from .helpers import read_log_entries, compute_diff
-from .log_renderer import render_log_entries
+from .helpers import compute_diff, read_log_entries_since
+from .log_renderer import (
+    append_log_entries,
+    apply_log_renderables,
+    build_log_renderables,
+)
 from .types import ThemeColors
 
 # Apply patches at import time
@@ -56,16 +62,31 @@ class ActorWatchApp(App):
     }
     #actor-panel {
         width: 33;
-        /* Dim separator when unfocused so the two panels are visually
-           distinct even when focus is outside the app (modal open,
-           command palette, OS-level blur). Same round shape as the
-           focused state so there's no layout jitter on transition. */
-        border: round $foreground 30%;
-        padding: 0 1;
+        /* No horizontal padding on the panel itself so #actors-underline
+           can span edge-to-edge and visually continue the tab underline
+           from the detail panel. Bottom padding keeps the tree off the
+           bottom edge; the ACTORS label and the tree carry their own
+           horizontal insets. */
+        padding: 0 0 1 0;
         background: ansi_default;
     }
     #actor-panel:focus-within {
-        border: round $primary;
+        /* intentionally empty for now */
+    }
+    #actors-label {
+        color: $foreground 60%;
+        text-style: bold;
+        padding: 0 1;
+    }
+    #actors-underline {
+        /* Match the tab underline: heavy horizontal (━), 30%-fg color,
+           no margin so it sits flush between label and tree. */
+        height: 1;
+        margin: 0;
+        color: $foreground 30%;
+    }
+    ActorTree {
+        padding-left: 1;
     }
     #app-header {
         display: none;
@@ -85,20 +106,48 @@ class ActorWatchApp(App):
     }
     #detail-panel {
         width: 1fr;
-        border: round $foreground 30%;
+        /* Experimental: no border; separator lives on #actor-panel's
+           border-right. :focus-within kept as a scaffold (see note
+           on #actor-panel). */
     }
     #detail-panel:focus-within {
-        border: round $primary;
+        /* intentionally empty for now */
     }
     .underline--bar {
         background: $foreground 30%;
     }
+    /* Decorate the active tab when anything inside the detail panel
+       has focus — that's the "this pane is where your input goes"
+       signal. Focus can sit on Tabs itself (arrow-key navigation) OR
+       on the tab's content widget (RichLog, etc.) once the user
+       drills in, so :focus-within is the right scope. Use the same
+       reverse video the focused tree cursor does: $primary bg with
+       theme $background text. Arrow prefix is added in Python (see
+       _refresh_tab_arrows) because Textual CSS has no ::before. */
+    #detail-panel:focus-within Tab.-active {
+        background: $primary;
+        color: $background;
+        text-style: bold;
+    }
     * {
         scrollbar-background: $foreground 30%;
+        /* Textual's theme defines distinct hover/active track colors
+           that default to a much darker band than our idle track — the
+           track visibly jumps on mouse-over. Pin both to the idle color
+           so only the thumb reacts to hover/drag. */
+        scrollbar-background-hover: $foreground 30%;
+        scrollbar-background-active: $foreground 30%;
     }
     #logs-content {
-        padding: 0 1;
-        scrollbar-size: 0 0;
+        scrollbar-size-horizontal: 0;
+        /* Hide the track on the LIVE pane — only the thumb remains
+           visible as a floating indicator. `ansi_default` makes the
+           track blend into whatever the terminal's background is,
+           overriding the 30%-fg track color we apply globally via
+           `*`. */
+        scrollbar-background: ansi_default;
+        scrollbar-background-hover: ansi_default;
+        scrollbar-background-active: ansi_default;
     }
     #info-content {
         padding: 1;
@@ -118,6 +167,15 @@ class ActorWatchApp(App):
     #splash.-active, #main-layout.-active {
         display: block;
     }
+    /* Toast notifications appear at the top-right instead of
+       Textual's default bottom-right. Bottom-right collides with the
+       status bar / footer and with scrollbar thumbs in the LIVE pane;
+       top-right stays clear and matches where most terminal apps
+       surface transient info. */
+    ToastRack {
+        dock: top;
+        align: right top;
+    }
     """
 
     BINDINGS = [
@@ -129,7 +187,7 @@ class ActorWatchApp(App):
         Binding("a", "focus_actors", "Actors"),
         Binding("p", "command_palette", "Palette"),
         Binding("i", "enter_interactive", "Interactive"),
-        Binding("l", "show_tab('logs')", "Logs"),
+        Binding("l", "show_tab('logs')", "Live"),
         Binding("d", "show_tab('diff')", "Diff"),
         Binding("question_mark", "show_tab('info')", "Info"),
         # Enter is handled by the Tree's NodeSelected message, not an app
@@ -143,7 +201,26 @@ class ActorWatchApp(App):
     _prev_statuses: dict[str, Status] = {}
     _current_actors: list[Actor] = []
     _diff_loaded_for: str | None = None
+
+    # Base labels for each tab (without the arrow prefix). Kept separate
+    # from the rendered tab.label so we can re-apply the "active +
+    # focused → arrow" decoration whenever focus moves or the active
+    # tab changes.
+    _tab_base_labels: dict[str, str] = {
+        "logs": "LIVE",
+        "diff": "DIFF",
+        "info": "INFO",
+        "interactive": "INTERACTIVE",
+    }
     _splash_active: bool = False
+
+    # False until on_ready finishes wiring up the initial state. While
+    # False, TabActivated messages (fired during initial mount) don't
+    # push focus into the detail pane — we want the actor tree to
+    # start with focus instead of whatever content widget the default
+    # active tab would otherwise claim. Named with the "tabs" prefix
+    # because `_ready` is taken by Textual's App internals.
+    _tabs_ready: bool = False
 
     def __init__(self, animate: bool = True) -> None:
         super().__init__()
@@ -162,20 +239,21 @@ class ActorWatchApp(App):
         return True
 
     def compose(self) -> ComposeResult:
-        yield Header(id="app-header")
         with Horizontal(id="main-layout"):
             with Vertical(id="actor-panel"):
+                yield Static("ACTORS", id="actors-label")
+                yield Rule(line_style="heavy", id="actors-underline")
                 yield ActorTree()
             with Vertical(id="detail-panel"):
                 with TabbedContent(id="tabs"):
                     # Interactive tab is added dynamically via
                     # _sync_detail_view when the selected actor has a
                     # live session; removed again when the session ends.
-                    with TabPane("Logs", id="logs"):
+                    with TabPane("LIVE", id="logs"):
                         yield RichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False)
-                    with TabPane("Diff", id="diff"):
+                    with TabPane("DIFF", id="diff"):
                         yield VerticalScroll(id="diff-scroll")
-                    with TabPane("Info", id="info"):
+                    with TabPane("INFO", id="info"):
                         yield VerticalScroll(
                             Static("Select an actor", id="info-content"),
                             DataTable(id="runs-table"),
@@ -216,6 +294,19 @@ class ActorWatchApp(App):
         # 3s cadence is fine and we don't need inotify / platform-specific
         # machinery. No-op on non-omarchy systems.
         self.set_interval(3.0, self._poll_omarchy_theme)
+
+        # Start with focus on the actor tree. call_after_refresh so
+        # the focus call runs AFTER any pending focus-changes queued
+        # during compose/mount (TabbedContent's initial tab activation
+        # can sneak focus onto a content widget otherwise).
+        def _initial_focus() -> None:
+            try:
+                self.query_one(ActorTree).focus()
+            except Exception:
+                pass
+            self._tabs_ready = True
+            self._refresh_tab_arrows()
+        self.call_after_refresh(_initial_focus)
 
     def _install_sigusr2_handler(self) -> None:
         """Wire SIGUSR2 into the asyncio loop so the hook installed via
@@ -362,17 +453,14 @@ class ActorWatchApp(App):
 
         main = self.query_one("#main-layout")
         splash = self.query_one("#splash")
-        header = self.query_one("#app-header")
         was_splash = self._splash_active
         self._splash_active = not actors
         if self._splash_active:
             main.set_class(False, "-active")
             splash.set_class(True, "-active")
-            header.set_class(False, "-active")
         else:
             main.set_class(True, "-active")
             splash.set_class(False, "-active")
-            header.set_class(True, "-active")
         if was_splash != self._splash_active:
             self.refresh_bindings()
 
@@ -437,13 +525,53 @@ class ActorWatchApp(App):
 
     @work(thread=True, exclusive=True, group="logs")
     def _refresh_logs(self, actor: Actor) -> None:
-        entries = read_log_entries(actor)
-        self.call_from_thread(self._set_logs, actor.name, entries)
+        # Cursor-based tail read: only the bytes added since last poll
+        # are re-parsed. On actor change the cursor will be None so
+        # we get a full read.
+        #
+        # Serialize under _log_lock so two polls firing in quick
+        # succession can't both read from the same pre-update cursor.
+        # @work(exclusive=True) only sets a cancel flag the worker
+        # must check; synchronous disk I/O won't. The lock both
+        # gates the read and scopes the cursor update, so by the
+        # time the next worker takes the lock it sees the advanced
+        # cursor and skips already-read bytes.
+        with self._log_lock:
+            cursor = self._log_cursors.get(actor.name)
+            new_entries, next_cursor = read_log_entries_since(actor, cursor)
+            if next_cursor is not None:
+                self._log_cursors[actor.name] = next_cursor
+        self.call_from_thread(
+            self._append_logs, actor.name, new_entries,
+        )
+
+    # Accumulated log entries + read-cursor kept per-actor so switching
+    # actors doesn't force a re-parse from byte 0 when the user comes
+    # back. Entries survive for the TUI session lifetime.
+    _log_entries_by_actor: dict[str, list] = {}
+    _log_cursors: dict[str, object] = {}
+    _log_lock = threading.Lock()
 
     _last_log_actor: str | None = None
     _last_log_count: int = 0
     _last_log_width: int = 0
     _last_log_entries: list = []
+
+    # Full-rebuild builds run in a worker thread. `_log_build_token`
+    # increments on every kick-off; the worker's apply callback is a
+    # no-op if a newer build has started in the meantime. `_pending`
+    # is True while a build is in flight — guards append-path
+    # decisions (which assume the widget reflects committed state) and
+    # gates the 300ms placeholder. `_target_*` records what the
+    # in-flight build is aiming at so that a follow-up _set_logs call
+    # carrying the same entries (e.g. a 2s poll with no new activity)
+    # can short-circuit instead of endlessly re-kicking and starving
+    # the build of a chance to commit.
+    _log_build_token: int = 0
+    _log_build_pending: bool = False
+    _log_build_target_actor: str | None = None
+    _log_build_target_count: int = 0
+    _log_build_target_width: int = 0
 
     def on_resize(self) -> None:
         log = self.query_one("#logs-content", RichLog)
@@ -451,17 +579,58 @@ class ActorWatchApp(App):
             self._last_log_count = 0
             self._set_logs(self._last_log_actor, self._last_log_entries)
 
+    def _append_logs(self, actor_name: str, new_entries: list) -> None:
+        """Main-thread callback from _refresh_logs worker. The cursor
+        was already advanced by the worker under _log_lock, so here we
+        just extend the bucket and run the render. Mutating the bucket
+        (shared only with main thread) is safe; the cursor dict is
+        worker-written under the lock so we don't touch it here."""
+        bucket = self._log_entries_by_actor.setdefault(actor_name, [])
+        if new_entries:
+            bucket.extend(new_entries)
+        self._set_logs(actor_name, bucket)
+
     def _set_logs(self, actor_name: str, entries: list) -> None:
         log = self.query_one("#logs-content", RichLog)
 
-        actor_changed = actor_name != self._last_log_actor
-        if not actor_changed and len(entries) == self._last_log_count and log.size.width == self._last_log_width:
+        # TabbedContent hides non-active panes via display:none, which
+        # collapses RichLog to zero width. Writing renderables to a
+        # zero-width RichLog still caches line segments — at zero
+        # width — so when the user later activates the LIVE tab the
+        # first paint is the collapsed cache, visibly shrunken,
+        # immediately followed by a re-render at the real width.
+        # Stash entries but skip the render while we can't draw the
+        # real layout; _flush_pending_logs re-invokes us once LIVE
+        # is actually visible.
+        if log.size.width == 0:
+            self._last_log_actor = actor_name
+            self._last_log_entries = entries
             return
-        self._last_log_actor = actor_name
-        self._last_log_count = len(entries)
-        self._last_log_width = log.size.width
-        self._last_log_entries = entries
 
+        actor_changed = actor_name != self._last_log_actor
+        width_changed = log.size.width != self._last_log_width
+        # Nothing-changed shortcut. When a full build is in flight the
+        # "committed" baseline is `_last_log_*`, but the meaningful
+        # baseline for skipping is the in-flight build's TARGET — if
+        # this call carries the same actor/entries/width the build is
+        # already working on, re-kicking would only cancel its own
+        # progress. Compare against target while pending; against
+        # committed state otherwise.
+        if self._log_build_pending:
+            if (
+                actor_name == self._log_build_target_actor
+                and log.size.width == self._log_build_target_width
+                and len(entries) == self._log_build_target_count
+            ):
+                return
+        elif (
+            not actor_changed
+            and not width_changed
+            and len(entries) == self._last_log_count
+        ):
+            return
+
+        prior_count = self._last_log_count
         at_bottom = log.scroll_offset.y >= log.max_scroll_y - 1
 
         t = self.current_theme
@@ -481,10 +650,136 @@ class ActorWatchApp(App):
             inactive="#999999" if (t and t.dark) else "#666666",
             user_fg=base.foreground,
         )
-        render_log_entries(log, entries, colors)
 
+        # Append vs full rerender. Conditions for the cheap append path:
+        #   - no full build currently in flight (committed state
+        #     matches the widget)
+        #   - same actor (prior_count + entries refer to the same stream)
+        #   - same width (RichLog's cached segments are width-specific)
+        #   - entry list only grew (prior_count <= new_count)
+        #   - the new tail contains no tool_result (if it did, it might
+        #     pair with a tool_use we already wrote to the log — RichLog
+        #     is append-only, we can't patch the old tool's rendered
+        #     row in place, so we fall back to a full rerender)
+        can_append = (
+            not self._log_build_pending
+            and not actor_changed
+            and not width_changed
+            and 0 <= prior_count <= len(entries)
+            and not self._tail_has_tool_result(entries, prior_count)
+        )
+        if can_append:
+            append_log_entries(log, entries, prior_count, colors)
+            self._last_log_actor = actor_name
+            self._last_log_count = len(entries)
+            self._last_log_width = log.size.width
+            self._last_log_entries = entries
+            if at_bottom:
+                log.scroll_end(animate=False)
+        else:
+            self._kick_off_full_build(
+                actor_name, entries, colors, log.size.width, at_bottom,
+            )
+
+    def _kick_off_full_build(
+        self,
+        actor_name: str,
+        entries: list,
+        colors: ThemeColors,
+        width: int,
+        at_bottom: bool,
+    ) -> None:
+        """Start an off-thread build of the full RichLog content. A
+        300ms timer shows the "Loading logs..." placeholder if the
+        build hasn't committed by then — short builds commit first and
+        the placeholder never flashes."""
+        self._log_build_token += 1
+        self._log_build_pending = True
+        self._log_build_target_actor = actor_name
+        self._log_build_target_count = len(entries)
+        self._log_build_target_width = width
+        token = self._log_build_token
+
+        def _maybe_show_placeholder() -> None:
+            # Fire only if this build is still the latest one AND
+            # hasn't already applied. Any newer kick-off bumps the
+            # token; a committed apply clears the pending flag.
+            if token != self._log_build_token or not self._log_build_pending:
+                return
+            try:
+                log = self.query_one("#logs-content", RichLog)
+            except Exception:
+                return
+            log.clear()
+            log.write(Text("Loading logs...", style="dim"))
+
+        self.set_timer(0.3, _maybe_show_placeholder)
+        self._build_log_worker(
+            token, actor_name, entries, colors, width, at_bottom,
+        )
+
+    @work(thread=True, exclusive=True, group="log_build")
+    def _build_log_worker(
+        self,
+        token: int,
+        actor_name: str,
+        entries: list,
+        colors: ThemeColors,
+        width: int,
+        at_bottom: bool,
+    ) -> None:
+        # Cooperative cancel: when a newer build supersedes this one,
+        # `_log_build_token` is already the new value on the main
+        # thread. Check each tick and bail early so we don't keep
+        # burning CPU (or, for the test-harness artificial sleep,
+        # keep sleeping) on output that will be discarded anyway.
+        def is_cancelled() -> bool:
+            return self._log_build_token != token
+
+        renderables = build_log_renderables(entries, colors, is_cancelled)
+        if renderables is None:
+            # Cancelled mid-build; the newer worker owns the apply.
+            return
+        self.call_from_thread(
+            self._apply_log_build,
+            token, actor_name, entries, renderables, width, at_bottom,
+        )
+
+    def _apply_log_build(
+        self,
+        token: int,
+        actor_name: str,
+        entries: list,
+        renderables: list,
+        width: int,
+        at_bottom: bool,
+    ) -> None:
+        if token != self._log_build_token:
+            # A newer build kicked off while this one was in the
+            # worker. Discard the stale output — the newer build's
+            # apply will land the correct state.
+            return
+        try:
+            log = self.query_one("#logs-content", RichLog)
+        except Exception:
+            self._log_build_pending = False
+            return
+        apply_log_renderables(log, renderables)
+        self._log_build_pending = False
+        self._last_log_actor = actor_name
+        self._last_log_count = len(entries)
+        self._last_log_width = width
+        self._last_log_entries = entries
         if at_bottom:
             log.scroll_end(animate=False)
+
+    @staticmethod
+    def _tail_has_tool_result(entries: list, prior_count: int) -> bool:
+        from ..interfaces import LogEntryKind
+        for i in range(prior_count, len(entries)):
+            if entries[i].kind == LogEntryKind.TOOL_RESULT:
+                return True
+        return False
 
     # -- Diff ----------------------------------------------------------------
 
@@ -528,12 +823,90 @@ class ActorWatchApp(App):
             self.call_from_thread(self._set_diff_text, f"Diff error: {e}")
 
     def _update_diff_tab_label(self, added: int = 0, removed: int = 0) -> None:
-        tabs = self.query_one("#tabs", TabbedContent)
-        tab = tabs.get_tab("diff")
         if added or removed:
-            tab.label = f"Diff (±{added + removed})"
+            base = f"DIFF (±{added + removed})"
         else:
-            tab.label = "Diff"
+            base = "DIFF"
+        self._tab_base_labels["diff"] = base
+        self._refresh_tab_arrows()
+
+    def _refresh_tab_arrows(self) -> None:
+        """Prefix the currently-active tab with `→` while any
+        descendant of the detail panel has focus (tabs bar, the
+        active tab's content, etc.). Matches the focus-gated
+        reverse-video override in CSS. Safe to call before compose
+        finishes."""
+        try:
+            tabbed = self.query_one("#tabs", TabbedContent)
+            detail = self.query_one("#detail-panel")
+        except Exception:
+            return
+        focused = detail.has_focus_within
+        active_id = tabbed.active
+        for tab_id, base in self._tab_base_labels.items():
+            try:
+                tab = tabbed.get_tab(tab_id)
+            except Exception:
+                continue  # e.g. interactive tab isn't mounted right now
+            if tab is None:
+                continue
+            if tab_id == active_id and focused:
+                tab.label = f"→ {base}"
+            else:
+                tab.label = base
+
+    def on_tabbed_content_tab_activated(self, event) -> None:
+        # TabbedContent fires TabActivated on mount for the default
+        # tab; suppress the focus-push until we're fully ready so the
+        # tree (not the default tab's content) carries the initial
+        # focus. After ready, push focus into the active tab's
+        # content widget so the user can immediately scroll /
+        # interact, and so our #detail-panel:focus-within highlight
+        # fires on mouse clicks too.
+        if self._tabs_ready:
+            self._focus_detail_content()
+        self._refresh_tab_arrows()
+        # LIVE just became visible. Its RichLog was width-0 while
+        # hidden and we skipped render passes — flush now so the
+        # first paint sees real content at the real width instead
+        # of a stale/empty cache that then gets corrected.
+        self._flush_pending_logs_if_visible()
+
+    def _flush_pending_logs_if_visible(self) -> None:
+        """Re-run the logs renderer once LIVE has a non-zero width,
+        using whatever entries were stashed while hidden. Call after
+        layout can assign the RichLog its real width (post
+        TabActivated + post call_after_refresh is a safe time).
+
+        `_set_logs`'s own skip shortcut handles the common "user
+        switched away and back, nothing changed" case — we just
+        replay; it returns early when the committed state already
+        matches the stashed state."""
+        if not self._last_log_entries or self._last_log_actor is None:
+            return
+        def _attempt() -> None:
+            try:
+                log = self.query_one("#logs-content", RichLog)
+            except Exception:
+                return
+            if log.size.width == 0:
+                return
+            self._set_logs(self._last_log_actor, self._last_log_entries)
+        self.call_after_refresh(_attempt)
+
+    @on(events.Click, "#tabs Tabs, #tabs Tab")
+    def _on_tabs_click(self, event: events.Click) -> None:
+        # Any click landing inside the Tabs bar — whether on a
+        # different tab (triggering TabActivated) or on the
+        # already-active tab (which wouldn't) — should end with focus
+        # on the active tab's content, matching the keyboard path.
+        self._focus_detail_content()
+
+    def on_descendant_focus(self, event) -> None:
+        self._refresh_tab_arrows()
+
+    def on_descendant_blur(self, event) -> None:
+        self._refresh_tab_arrows()
 
     def _set_diff_text(self, text: str) -> None:
         scroll = self.query_one("#diff-scroll", VerticalScroll)
@@ -621,7 +994,7 @@ class ActorWatchApp(App):
             tabs.remove_pane("interactive")
 
         # add_pane is async — it schedules the mount but we can proceed.
-        new_pane = TabPane("Interactive", info.widget, id="interactive")
+        new_pane = TabPane("INTERACTIVE", info.widget, id="interactive")
         tabs.add_pane(new_pane, before="logs")
         self._interactive_active = actor.name
 

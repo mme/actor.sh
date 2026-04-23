@@ -5,7 +5,7 @@ import shutil
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .types import ActorConfig
 
@@ -72,6 +72,27 @@ class Agent(abc.ABC):
     @abc.abstractmethod
     def read_logs(self, dir: Path, session_id: str) -> List[LogEntry]:
         """Read logs from the agent's session files."""
+
+    def read_logs_since(
+        self, dir: Path, session_id: str, cursor: Any = None,
+    ) -> Tuple[List[LogEntry], Any]:
+        """Read entries that have arrived since `cursor`.
+
+        Returns ``(new_entries, next_cursor)``. Pass ``None`` for a full
+        read on the first call, then pass back whatever cursor was
+        returned from the previous call to pick up from there.
+
+        The cursor is opaque to callers; each agent chooses what to
+        return. For the file-based agents (Claude, Codex) it's a byte
+        offset into the rollout JSONL; for a hypothetical SQLite-backed
+        future agent it could be a row id or timestamp.
+
+        Default implementation falls back to a full read on every call,
+        discarding the cursor. Agents that want streaming behavior
+        override this; everything else keeps working correctness-wise,
+        just without the I/O savings. Watch callers that don't care
+        about streaming can ignore the returned cursor."""
+        return self.read_logs(dir, session_id), None
 
     @abc.abstractmethod
     def stop(self, pid: int) -> None:

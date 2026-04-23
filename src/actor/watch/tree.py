@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from rich.style import Style
+from rich.text import Text
+
 from textual.widgets import Tree
+from textual.widgets.tree import TreeNode
 
 from ..types import Actor, Status
 from .helpers import STATUS_ICON, group_by_parent
@@ -18,10 +22,19 @@ class ActorTree(Tree[Actor]):
     ActorTree {
         width: 1fr;
     }
+    /* Dim the cursor highlight when the tree isn't focused — same
+       $foreground 30% tint we use for the scrollbar track, panel
+       underlines, and other "inactive" indicators. Saturates to
+       $primary when the tree gains focus. Text stays the theme's
+       standard foreground rather than $text (which auto-picks
+       contrast and ends up bright white against our flavored bg). */
     ActorTree > .tree--cursor {
-        background: $primary;
-        color: $text;
+        background: $foreground 30%;
+        color: $foreground;
         text-style: bold;
+    }
+    ActorTree:focus > .tree--cursor {
+        background: $primary;
     }
     """
 
@@ -35,6 +48,29 @@ class ActorTree(Tree[Actor]):
 
     def on_mount(self) -> None:
         self.set_interval(0.5, self._tick_animation)
+
+    def render_label(
+        self, node: TreeNode, base_style: Style, style: Style
+    ) -> Text:
+        """Add a `→` prefix only to the currently-selected actor row
+        while the tree has focus. All other rows (and every row when
+        focus is elsewhere) get no prefix — so when the tree is
+        unfocused the whole column shifts left by one char, which is
+        the desired visual."""
+        label = super().render_label(node, base_style, style)
+        if node.data is None:
+            return label  # group / root nodes — no indicator
+        if node is self.cursor_node and self.has_focus:
+            return Text("→", style=style) + label
+        return label
+
+    def on_focus(self) -> None:
+        # Re-render so the arrow appears on the cursor row.
+        self.refresh()
+
+    def on_blur(self) -> None:
+        # Re-render so the arrow disappears.
+        self.refresh()
 
     def _make_label(self, name: str, status: Status) -> str:
         """Generate display label for an actor."""

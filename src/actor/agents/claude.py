@@ -7,11 +7,12 @@ import subprocess
 import threading
 import uuid
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from ..errors import ActorError
 from ..interfaces import Agent, LogEntry, LogEntryKind
 from ..types import ActorConfig
+from ._jsonl import split_complete_lines
 
 
 class ClaudeAgent(Agent):
@@ -130,7 +131,53 @@ class ClaudeAgent(Agent):
             content = path.read_text()
         except FileNotFoundError:
             return []
+        return self._parse_entries(content)
 
+    def read_logs_since(
+        self, dir: Path, session_id: str, cursor: Any = None,
+    ) -> Tuple[List[LogEntry], Any]:
+        """Read the tail of the session JSONL starting from a byte
+        offset cursor. Cursor semantics:
+
+        - ``cursor=None`` or an out-of-range int → full read from byte 0.
+        - ``cursor=N`` → seek to N and read to EOF.
+        - Returned cursor points to the end of the last **complete**
+          (newline-terminated) line we parsed. Any partial tail is
+          left for the next call to pick up once more bytes arrive.
+        - File shrunk below cursor (rotation, truncation) → treat
+          cursor as stale and full-read from 0.
+        """
+        path = self._session_file_path(dir, session_id)
+        try:
+            size = path.stat().st_size
+        except (FileNotFoundError, OSError):
+            return [], cursor
+
+        if isinstance(cursor, int) and 0 <= cursor <= size:
+            offset = cursor
+        else:
+            offset = 0
+
+        try:
+            with open(path, "rb") as f:
+                f.seek(offset)
+                data = f.read()
+        except OSError:
+            return [], cursor
+
+        text, cursor_advance = split_complete_lines(data)
+        if cursor_advance is None:
+            # No newline in the chunk at all — defer entirely.
+            return [], cursor
+        new_cursor = offset + cursor_advance
+        return self._parse_entries(text), new_cursor
+
+    @staticmethod
+    def _parse_entries(content: str) -> List[LogEntry]:
+        """Parse Claude JSONL text into LogEntry instances. Shared
+        between the full-read path (``read_logs``) and the streaming
+        tail path (``read_logs_since``); also re-exported via
+        ``claude_read_logs`` for direct-path-based tests."""
         entries: List[LogEntry] = []
         for line in content.splitlines():
             line = line.strip()
@@ -140,78 +187,82 @@ class ClaudeAgent(Agent):
                 v = json.loads(line)
             except json.JSONDecodeError:
                 continue
-
-            msg_type = v.get("type")
-            if not isinstance(msg_type, str):
-                continue
-
-            timestamp = v.get("timestamp")
-            if isinstance(timestamp, str):
-                ts: Optional[str] = timestamp
-            else:
-                ts = None
-
-            message = v.get("message")
-            if message is None:
-                continue
-
-            if msg_type == "user":
-                content_val = message.get("content")
-                if isinstance(content_val, str):
-                    entries.append(LogEntry(
-                        kind=LogEntryKind.USER,
-                        timestamp=ts,
-                        text=content_val,
-                    ))
-                elif isinstance(content_val, list):
-                    for item in content_val:
-                        if isinstance(item, dict) and item.get("type") == "tool_result":
-                            c = item.get("content", "")
-                            if isinstance(c, str):
-                                text = c
-                            else:
-                                text = json.dumps(c) if c is not None else ""
-                            entries.append(LogEntry(
-                                kind=LogEntryKind.TOOL_RESULT,
-                                timestamp=ts,
-                                content=text,
-                            ))
-
-            elif msg_type == "assistant":
-                content_arr = message.get("content")
-                if isinstance(content_arr, list):
-                    for block in content_arr:
-                        if not isinstance(block, dict):
-                            continue
-                        block_type = block.get("type")
-                        if block_type == "text":
-                            text = block.get("text")
-                            if isinstance(text, str):
-                                entries.append(LogEntry(
-                                    kind=LogEntryKind.ASSISTANT,
-                                    timestamp=ts,
-                                    text=text,
-                                ))
-                        elif block_type == "thinking":
-                            text = block.get("thinking")
-                            if isinstance(text, str):
-                                entries.append(LogEntry(
-                                    kind=LogEntryKind.THINKING,
-                                    timestamp=ts,
-                                    text=text,
-                                ))
-                        elif block_type == "tool_use":
-                            name = block.get("name", "unknown")
-                            inp = block.get("input")
-                            inp_str = json.dumps(inp) if inp is not None else ""
-                            entries.append(LogEntry(
-                                kind=LogEntryKind.TOOL_USE,
-                                timestamp=ts,
-                                name=name,
-                                input=inp_str,
-                            ))
-
+            entries.extend(ClaudeAgent._parse_log_dict(v))
         return entries
+
+    @staticmethod
+    def _parse_log_dict(v: dict) -> List[LogEntry]:
+        """Parse one decoded JSONL record into zero or more LogEntry."""
+        out: List[LogEntry] = []
+
+        msg_type = v.get("type")
+        if not isinstance(msg_type, str):
+            return out
+
+        timestamp = v.get("timestamp")
+        ts: Optional[str] = timestamp if isinstance(timestamp, str) else None
+
+        message = v.get("message")
+        if message is None:
+            return out
+
+        if msg_type == "user":
+            content_val = message.get("content")
+            if isinstance(content_val, str):
+                out.append(LogEntry(
+                    kind=LogEntryKind.USER,
+                    timestamp=ts,
+                    text=content_val,
+                ))
+            elif isinstance(content_val, list):
+                for item in content_val:
+                    if isinstance(item, dict) and item.get("type") == "tool_result":
+                        c = item.get("content", "")
+                        if isinstance(c, str):
+                            text = c
+                        else:
+                            text = json.dumps(c) if c is not None else ""
+                        out.append(LogEntry(
+                            kind=LogEntryKind.TOOL_RESULT,
+                            timestamp=ts,
+                            content=text,
+                        ))
+
+        elif msg_type == "assistant":
+            content_arr = message.get("content")
+            if isinstance(content_arr, list):
+                for block in content_arr:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = block.get("type")
+                    if block_type == "text":
+                        text = block.get("text")
+                        if isinstance(text, str):
+                            out.append(LogEntry(
+                                kind=LogEntryKind.ASSISTANT,
+                                timestamp=ts,
+                                text=text,
+                            ))
+                    elif block_type == "thinking":
+                        text = block.get("thinking")
+                        if isinstance(text, str):
+                            out.append(LogEntry(
+                                kind=LogEntryKind.THINKING,
+                                timestamp=ts,
+                                text=text,
+                            ))
+                    elif block_type == "tool_use":
+                        name = block.get("name", "unknown")
+                        inp = block.get("input")
+                        inp_str = json.dumps(inp) if inp is not None else ""
+                        out.append(LogEntry(
+                            kind=LogEntryKind.TOOL_USE,
+                            timestamp=ts,
+                            name=name,
+                            input=inp_str,
+                        ))
+
+        return out
 
     def interactive_argv(self, session_id: str, config: ActorConfig) -> List[str]:
         return [
