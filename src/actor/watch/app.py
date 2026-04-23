@@ -159,6 +159,15 @@ class ActorWatchApp(App):
     #splash.-active, #main-layout.-active {
         display: block;
     }
+    /* Toast notifications appear at the top-right instead of
+       Textual's default bottom-right. Bottom-right collides with the
+       status bar / footer and with scrollbar thumbs in the LIVE pane;
+       top-right stays clear and matches where most terminal apps
+       surface transient info. */
+    ToastRack {
+        dock: top;
+        align: right top;
+    }
     """
 
     BINDINGS = [
