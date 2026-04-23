@@ -38,7 +38,7 @@ from .omarchy_theme import (
 )
 from .themes import CLAUDE_DARK, CLAUDE_LIGHT
 from .tree import ActorTree
-from .helpers import read_log_entries, compute_diff
+from .helpers import compute_diff, read_log_entries_since
 from .log_renderer import render_log_entries
 from .types import ThemeColors
 
@@ -503,8 +503,21 @@ class ActorWatchApp(App):
 
     @work(thread=True, exclusive=True, group="logs")
     def _refresh_logs(self, actor: Actor) -> None:
-        entries = read_log_entries(actor)
-        self.call_from_thread(self._set_logs, actor.name, entries)
+        # Cursor-based tail read: only the bytes added since last poll
+        # are re-parsed. On actor change the cursor will be None so
+        # we get a full read. See read_log_entries_since for the
+        # contract.
+        cursor = self._log_cursors.get(actor.name)
+        new_entries, next_cursor = read_log_entries_since(actor, cursor)
+        self.call_from_thread(
+            self._append_logs, actor.name, new_entries, next_cursor,
+        )
+
+    # Accumulated log entries + read-cursor kept per-actor so switching
+    # actors doesn't force a re-parse from byte 0 when the user comes
+    # back. Entries survive for the TUI session lifetime.
+    _log_entries_by_actor: dict[str, list] = {}
+    _log_cursors: dict[str, object] = {}
 
     _last_log_actor: str | None = None
     _last_log_count: int = 0
@@ -516,6 +529,21 @@ class ActorWatchApp(App):
         if log.size.width != self._last_log_width and self._last_log_entries:
             self._last_log_count = 0
             self._set_logs(self._last_log_actor, self._last_log_entries)
+
+    def _append_logs(self, actor_name: str, new_entries: list, next_cursor) -> None:
+        """Thread-safe entry-point called from _refresh_logs worker.
+
+        Appends the newly-read tail to this actor's accumulated log,
+        stores the next cursor, and hands the full list to _set_logs.
+        Keeping the accumulation separate from the render stage lets
+        _set_logs continue to make its own "did anything change"
+        decision using entry count + width."""
+        bucket = self._log_entries_by_actor.setdefault(actor_name, [])
+        if new_entries:
+            bucket.extend(new_entries)
+        if next_cursor is not None:
+            self._log_cursors[actor_name] = next_cursor
+        self._set_logs(actor_name, bucket)
 
     def _set_logs(self, actor_name: str, entries: list) -> None:
         log = self.query_one("#logs-content", RichLog)

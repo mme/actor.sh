@@ -58,7 +58,18 @@ def group_by_parent(actors: list[Actor], statuses: dict[str, Status]) -> dict[st
 # -- Read log entries --------------------------------------------------------
 
 def read_log_entries(actor: Actor) -> list:
-    """Read raw LogEntry list for an actor."""
+    """Read raw LogEntry list for an actor (full read)."""
+    entries, _ = read_log_entries_since(actor, None)
+    return entries
+
+
+def read_log_entries_since(actor: Actor, cursor=None):
+    """Read entries that have arrived since `cursor` for an actor.
+
+    Returns ``(new_entries, next_cursor)`` — same contract as
+    ``Agent.read_logs_since``. Pass ``None`` for a full read on first
+    call; pass the returned cursor back next time to pick up only new
+    tail entries without re-parsing the whole session."""
     from ..agents.claude import ClaudeAgent
     from ..agents.codex import CodexAgent
     from ..interfaces import Agent
@@ -71,11 +82,11 @@ def read_log_entries(actor: Actor) -> list:
         agent = CodexAgent()
 
     if actor.agent_session is None:
-        return []
+        return [], cursor
     try:
-        return agent.read_logs(Path(actor.dir), actor.agent_session)
+        return agent.read_logs_since(Path(actor.dir), actor.agent_session, cursor)
     except Exception:
-        return []
+        return [], cursor
 
 
 # -- Compute git diff --------------------------------------------------------
