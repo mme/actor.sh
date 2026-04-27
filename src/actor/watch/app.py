@@ -148,9 +148,6 @@ class ActorWatchApp(App):
         scrollbar-background: ansi_default;
         scrollbar-background-hover: ansi_default;
         scrollbar-background-active: ansi_default;
-        /* 1-col right gutter so wrapped text doesn't run flush into
-           the scrollbar thumb (or the panel edge when content fits). */
-        padding-right: 1;
     }
     #info-content {
         padding: 1;

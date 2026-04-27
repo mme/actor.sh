@@ -90,6 +90,29 @@ def build_log_renderables(
     return buf.calls
 
 
+class _RightPaddedLog:
+    """Wraps a log-like object; pads every written renderable with a
+    1-col right gutter so wrapped text doesn't sit flush against the
+    RichLog scrollbar thumb.
+
+    Doing it via a renderable wrapper rather than CSS `padding-right`
+    on the widget is intentional — Textual's CSS padding insets the
+    scrollbar too, which produces a visible gap on the wrong side
+    (between scrollbar and panel edge). Wrapping at the renderable
+    level keeps the scrollbar at the widget edge and the gap between
+    text and scrollbar."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def write(self, content, **kwargs):
+        self._inner.write(Padding(content, (0, 1, 0, 0)), **kwargs)
+        return self
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 def apply_log_renderables(
     log: RichLog, renderables: list[tuple[object, dict]],
 ) -> None:
@@ -97,8 +120,9 @@ def apply_log_renderables(
     real RichLog. Must run on the main thread — `clear` and `write`
     mutate widget state that the compositor reads."""
     log.clear()
+    padded = _RightPaddedLog(log)
     for content, kwargs in renderables:
-        log.write(content, **kwargs)
+        padded.write(content, **kwargs)
 
 
 def append_log_entries(
@@ -120,9 +144,10 @@ def append_log_entries(
     if prior_count >= len(entries):
         return
     tool_results = _pair_tools(entries)
+    already_rendered = len(log.lines) > 0
     _write_range(
-        log, entries, prior_count, tool_results, colors,
-        already_rendered=len(log.lines) > 0,
+        _RightPaddedLog(log), entries, prior_count, tool_results, colors,
+        already_rendered=already_rendered,
     )
 
 
