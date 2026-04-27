@@ -189,7 +189,7 @@ class ActorWatchApp(App):
         Binding("i", "enter_interactive", "Interactive"),
         Binding("l", "show_tab('logs')", "Live"),
         Binding("d", "show_tab('diff')", "Diff"),
-        Binding("question_mark", "show_tab('info')", "Info"),
+        Binding("o", "show_tab('info')", "Overview"),
         # Enter is handled by the Tree's NodeSelected message, not an app
         # binding — a priority binding here would steal Enter from the
         # embedded terminal widget.
@@ -209,7 +209,7 @@ class ActorWatchApp(App):
     _tab_base_labels: dict[str, str] = {
         "logs": "LIVE",
         "diff": "DIFF",
-        "info": "INFO",
+        "info": "OVERVIEW",
         "interactive": "INTERACTIVE",
     }
     _splash_active: bool = False
@@ -253,7 +253,7 @@ class ActorWatchApp(App):
                         yield RichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False)
                     with TabPane("DIFF", id="diff"):
                         yield VerticalScroll(id="diff-scroll")
-                    with TabPane("INFO", id="info"):
+                    with TabPane("OVERVIEW", id="info"):
                         yield VerticalScroll(
                             Static("Select an actor", id="info-content"),
                             DataTable(id="runs-table"),
