@@ -72,12 +72,7 @@ def apply_omarchy_flavor(
 ) -> Optional[Theme]:
     """Return a variant of `base` with environment colors pulled from
     omarchy's active palette. Returns None when omarchy isn't present
-    or the palette file is unreadable / malformed.
-
-    Scope is intentionally small — just the foreground today. Growing
-    this to cover background / surface / panel / semantic slots is a
-    one-line-per-slot extension once we've lived with the FG override
-    for a bit."""
+    or the palette file is unreadable / malformed."""
     data = _load_palette(home)
     if data is None:
         return None
@@ -118,27 +113,91 @@ def _flavor(
 
     Overridden slots:
     - `foreground` ← colors.toml's foreground (desktop-native body text)
+    - `background` ← colors.toml's background
+    - `surface` and `panel` ← background lifted toward foreground
+      (subtle lift so widgets/panels still read as distinct from the
+      desktop bg without introducing a non-palette color)
+    - `secondary` ← whichever of `accent` / `color3` / `color5` /
+      `color1` is most distant in RGB from the active-border color,
+      so the brand/logo slot doesn't collapse into `primary` (e.g.
+      tokyo night sets accent == active-border)
     - `primary` and `accent` ← hyprland.conf's $activeBorderColor
       (TUI focus rings match active-window border)
 
-    Everything else stays as `base` had it."""
+    Semantic slots (`warning`, `error`, `success`) stay as `base` had
+    them — colors.toml doesn't carry semantic meaning per slot, and
+    swapping them out arbitrarily from numbered colorN entries would
+    risk red-as-success collisions."""
     foreground = _hex(data, "foreground", base.foreground)
+    background = _hex(data, "background", base.background)
+    surface = _shift_toward_foreground(background, foreground, 0.08)
     primary = active_border if active_border is not None else base.primary
     accent = active_border if active_border is not None else base.accent
+    secondary = _pick_distinct(
+        data,
+        exclude=primary,
+        candidates=("accent", "color3", "color5", "color1"),
+        fallback=base.secondary,
+    )
     return Theme(
         name=base.name,
         primary=primary,
-        secondary=base.secondary,
+        secondary=secondary,
         accent=accent,
         warning=base.warning,
         error=base.error,
         success=base.success,
         foreground=foreground,
-        background=base.background,
-        surface=base.surface,
-        panel=base.panel,
+        background=background,
+        surface=surface,
+        panel=surface,
         dark=base.dark,
     )
+
+
+# Two palette colors are "distinguishable" if their RGB-space distance
+# exceeds this threshold. ~85 in 0-255 RGB = a perceptible hue/value
+# shift that's not just dithered noise. Tuned by eye against tokyo
+# night (accent == active-border) where we want secondary to skip past
+# `accent` to a real second color; against gruvbox where accent and
+# color3 are both yellow-orange but visibly distinct.
+_DISTINCT_THRESHOLD = 85.0
+
+
+def _pick_distinct(
+    data: Dict[str, object],
+    exclude: Optional[str],
+    candidates: tuple[str, ...],
+    fallback: str,
+) -> str:
+    """Walk `candidates` in order; return the first hex value far
+    enough from `exclude` to read as a different color. If `exclude`
+    is None (no active-border file) the first valid candidate wins."""
+    farthest: tuple[Optional[str], float] = (None, 0.0)
+    for key in candidates:
+        try:
+            color = _hex(data, key, "")
+        except (TypeError, ValueError):
+            continue
+        if not color:
+            continue
+        if exclude is None:
+            return color
+        dist = _rgb_distance(color, exclude)
+        if dist >= _DISTINCT_THRESHOLD:
+            return color
+        if dist > farthest[1]:
+            farthest = (color, dist)
+    # Nothing met the threshold — return the most-distant candidate we
+    # found (if any), else the base fallback. Better to drift toward
+    # similar than to pull a totally off-palette color.
+    return farthest[0] if farthest[0] is not None else fallback
+
+
+def _rgb_distance(a: str, b: str) -> float:
+    ar, ag, ab = _to_rgb(a)
+    br, bg, bb = _to_rgb(b)
+    return ((ar - br) ** 2 + (ag - bg) ** 2 + (ab - bb) ** 2) ** 0.5
 
 
 # Matches `$activeBorderColor = rgb(7aa2f7)` or `rgba(7aa2f7, 1.0)` at

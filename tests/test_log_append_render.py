@@ -7,11 +7,22 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
+from rich.padding import Padding
+from rich.text import Text
+
 from actor.interfaces import LogEntry, LogEntryKind
 from actor.watch.log_renderer import (
     append_log_entries,
     render_log_entries,
 )
+
+
+def _unwrap(content: object) -> object:
+    """Peel the 1-col right Padding that apply/append wrap each
+    renderable in. Tests assert against the inner content."""
+    if isinstance(content, Padding):
+        return content.renderable
+    return content
 from actor.watch.types import ThemeColors
 
 
@@ -70,9 +81,10 @@ class TestAppendLogEntries(unittest.TestCase):
         with patch("actor.watch.log_renderer.render_user"):
             append_log_entries(log, entries, prior_count=1, colors=_colors())
 
-        # First log.write is the blank separator before the new entry.
+        # First log.write is the blank separator before the new entry,
+        # wrapped in a 1-col right Padding by _RightPaddedLog.
         first_write = log.write.call_args_list[0]
-        self.assertEqual(str(first_write.args[0]), "")
+        self.assertEqual(str(_unwrap(first_write.args[0])), "")
 
     def test_append_no_leading_separator_when_log_empty(self):
         log = MagicMock()
