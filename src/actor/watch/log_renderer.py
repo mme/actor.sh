@@ -170,6 +170,12 @@ def _write_range(
             continue
         if entry.kind == LogEntryKind.TOOL_USE and entry.name in HIDDEN_TOOLS:
             continue
+        # Claude emits a 0-length thinking block when extended thinking
+        # isn't engaged — skip both the entry AND its leading separator
+        # so the prompt → assistant transition doesn't show phantom
+        # blank rows.
+        if entry.kind == LogEntryKind.THINKING and not entry.text.strip():
+            continue
 
         needs_separator = already_rendered or not first_this_pass
         if needs_separator:
