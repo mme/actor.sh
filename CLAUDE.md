@@ -35,9 +35,6 @@ src/actor/               # Python package
     cli.md               # CLI fallback reference
     claude-config.md     # Claude agent config reference
     codex-config.md      # Codex agent config reference
-.claude-plugin/
-  plugin.json            # Declares src/actor/_skill as a skill location for
-                         # tooling like npx skills
 tests/
   test_*.py              # unittest suites
 spec/
