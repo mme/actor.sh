@@ -350,6 +350,21 @@ def cmd_run(
 
     dir_p = Path(actor.dir)
 
+    # Snap the session-file size BEFORE spawning the agent. This becomes
+    # the run's `log_start_offset` — the lower bound of the byte range
+    # of JSONL entries this run will produce. For a fresh session the
+    # file doesn't exist yet; `session_file_size` returns None which we
+    # coerce to 0 (a brand-new file will be written to starting at byte
+    # 0, and any stale file of that name gets overwritten from 0 by
+    # `claude --session-id`). For a resume the session file already
+    # has content and we bracket strictly after it.
+    existing_session_id = actor.agent_session
+    start_offset: Optional[int] = None
+    if existing_session_id is not None:
+        start_offset = agent.session_file_size(dir_p, existing_session_id)
+    if start_offset is None:
+        start_offset = 0
+
     # Insert run row BEFORE starting agent so list/show see it immediately
     now = _now_iso()
     run = Run(
@@ -362,6 +377,7 @@ def cmd_run(
         config=effective_config,
         started_at=now,
         finished_at=None,
+        log_start_offset=start_offset,
     )
     run_id = db.insert_run(run)
     db.touch_actor(name)
@@ -378,8 +394,15 @@ def cmd_run(
         else:
             pid, new_session = agent.start(dir_p, prompt, effective_config)
     except Exception:
-        # Agent failed to start — mark run as error
-        db.update_run_status(run_id, Status.ERROR, -1)
+        # Agent failed to start — mark run as error. Best-effort offset
+        # stamp: the agent may or may not have touched the file before
+        # failing.
+        session_for_end = actor.agent_session
+        end_offset = (
+            agent.session_file_size(dir_p, session_for_end)
+            if session_for_end is not None else None
+        )
+        db.update_run_status(run_id, Status.ERROR, -1, log_end_offset=end_offset)
         raise
     finally:
         # Restore ACTOR_NAME so the MCP server process isn't polluted
@@ -398,13 +421,23 @@ def cmd_run(
     # Block until agent exits
     exit_code, output = agent.wait(pid)
 
-    # Check if stop command already updated this run (race condition)
+    # Effective session id for the end-offset stat: either the
+    # pre-existing one (resume) or the one the agent just minted
+    # (start). `new_session` is only set on a first start.
+    session_for_end = new_session or actor.agent_session
+
+    # Check if stop command already updated this run (race condition).
+    # The stop path already stamped end_offset, so skip the re-stamp.
     current_run = db.latest_run(name)
     if current_run is not None and current_run.id == run_id and current_run.status == Status.STOPPED:
         return output
 
+    end_offset = (
+        agent.session_file_size(dir_p, session_for_end)
+        if session_for_end is not None else None
+    )
     run_status = Status.DONE if exit_code == 0 else Status.ERROR
-    db.update_run_status(run_id, run_status, exit_code)
+    db.update_run_status(run_id, run_status, exit_code, log_end_offset=end_offset)
 
     # after-run hook fires AFTER the DB has been updated with the final
     # status so a hook that runs `actor show` sees the completed run.
@@ -487,6 +520,13 @@ def cmd_interactive(
 
     argv = agent.interactive_argv(session_id, actor.config)
 
+    # Snap the session-file size for run-id bucketing. Interactive
+    # sessions always have a pre-existing session (cmd_interactive
+    # rejects when `agent_session is None`) so the file should exist.
+    start_offset = agent.session_file_size(dir_path, session_id)
+    if start_offset is None:
+        start_offset = 0
+
     run = Run(
         id=0,
         actor_name=name,
@@ -497,6 +537,7 @@ def cmd_interactive(
         config=actor.config,
         started_at=_now_iso(),
         finished_at=None,
+        log_start_offset=start_offset,
     )
     run_id = db.insert_run(run)
     db.touch_actor(name)
@@ -507,15 +548,17 @@ def cmd_interactive(
     try:
         exit_code = (runner or _default_interactive_runner)(argv, dir_path, env)
     except BaseException:
-        db.update_run_status(run_id, Status.ERROR, -1)
+        end_offset = agent.session_file_size(dir_path, session_id)
+        db.update_run_status(run_id, Status.ERROR, -1, log_end_offset=end_offset)
         raise
 
     current = db.latest_run(name)
     if current is not None and current.id == run_id and current.status == Status.STOPPED:
         return exit_code, f"Interactive session for '{name}' stopped."
 
+    end_offset = agent.session_file_size(dir_path, session_id)
     final = Status.DONE if exit_code == 0 else Status.ERROR
-    db.update_run_status(run_id, final, exit_code)
+    db.update_run_status(run_id, final, exit_code, log_end_offset=end_offset)
 
     # after-run hook (same semantics as cmd_run): fires AFTER the DB
     # update with final status. Non-zero exit logs a warning but doesn't
@@ -716,9 +759,18 @@ def cmd_stop(
     # Check PID liveness
     alive = pid is not None and proc_mgr.is_alive(pid)
 
+    # Snap the current session-file size so whichever finalization
+    # branch fires below can close the run's byte bucket. Same for
+    # both the "already-dead" and "ask-agent-to-kill" paths — the
+    # file state is whatever it is right now.
+    actor = db.get_actor(name)
+    end_offset: Optional[int] = None
+    if actor.agent_session is not None:
+        end_offset = agent.session_file_size(Path(actor.dir), actor.agent_session)
+
     if not alive:
         # Process already dead -- stale run, mark as error
-        db.update_run_status(latest.id, Status.ERROR, -1)
+        db.update_run_status(latest.id, Status.ERROR, -1, log_end_offset=end_offset)
         return f"{name} was already dead \u2014 marked as error"
 
     # Process is alive -- ask the agent to stop it
@@ -726,7 +778,7 @@ def cmd_stop(
     agent.stop(pid)
 
     # Update run status to stopped
-    db.update_run_status(latest.id, Status.STOPPED, None)
+    db.update_run_status(latest.id, Status.STOPPED, None, log_end_offset=end_offset)
 
     return f"{name} stopped"
 
@@ -803,15 +855,26 @@ def cmd_logs(db: Database, agent: Agent, name: str, verbose: bool, watch: bool) 
 
 # -- cmd_discard --
 
-def _force_stop(db: Database, proc_mgr: ProcessManager, name: str) -> None:
-    """Stop a running actor by killing its process."""
+def _force_stop(
+    db: Database, proc_mgr: ProcessManager, name: str,
+    agent: Optional[Agent] = None,
+) -> None:
+    """Stop a running actor by killing its process. When `agent` is
+    provided, also stamps `log_end_offset` on the finalized run so
+    the run bucket is properly closed; omitted during `discard` paths
+    where the actor is about to be deleted anyway."""
     latest = db.latest_run(name)
     if latest is None or latest.status != Status.RUNNING:
         return
     pid = latest.pid
     if pid is not None and proc_mgr.is_alive(pid):
         proc_mgr.kill(pid)
-    db.update_run_status(latest.id, Status.STOPPED, None)
+    end_offset: Optional[int] = None
+    if agent is not None:
+        actor = db.get_actor(name)
+        if actor.agent_session is not None:
+            end_offset = agent.session_file_size(Path(actor.dir), actor.agent_session)
+    db.update_run_status(latest.id, Status.STOPPED, None, log_end_offset=end_offset)
 
 
 def cmd_discard(
@@ -913,9 +976,12 @@ def claude_read_logs(path: str) -> List[LogEntry]:
 
     Thin wrapper around ``ClaudeAgent._parse_entries`` for direct
     file-path-based testing — exists so tests can parse without
-    constructing a ClaudeAgent or a session directory structure."""
+    constructing a ClaudeAgent or a session directory structure.
+    Emitted entries carry their byte offset just like the streaming
+    read path."""
+    from .agents._jsonl import iter_lines_with_offsets
     try:
-        content = Path(path).read_text()
+        data = Path(path).read_bytes()
     except FileNotFoundError:
         return []
-    return ClaudeAgent._parse_entries(content)
+    return ClaudeAgent._parse_entries(iter_lines_with_offsets(data, 0))

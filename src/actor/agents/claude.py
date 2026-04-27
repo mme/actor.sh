@@ -12,7 +12,10 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from ..errors import ActorError
 from ..interfaces import Agent, LogEntry, LogEntryKind
 from ..types import ActorConfig
-from ._jsonl import split_complete_lines
+from ._jsonl import (
+    iter_lines_with_offsets as _iter_lines_with_offsets,
+    split_complete_lines_with_offsets,
+)
 
 
 class ClaudeAgent(Agent):
@@ -125,13 +128,24 @@ class ClaudeAgent(Agent):
         returncode = proc.returncode
         return (returncode if returncode is not None else -1, output)
 
+    def session_file_size(
+        self, dir: Path, session_id: str,
+    ) -> Optional[int]:
+        """Byte size of the session JSONL if it exists, else ``None``.
+        Used by run-boundary offset capture to bracket each run's
+        contribution to the file."""
+        try:
+            return self._session_file_path(dir, session_id).stat().st_size
+        except (FileNotFoundError, OSError):
+            return None
+
     def read_logs(self, dir: Path, session_id: str) -> List[LogEntry]:
         path = self._session_file_path(dir, session_id)
         try:
-            content = path.read_text()
+            data = path.read_bytes()
         except FileNotFoundError:
             return []
-        return self._parse_entries(content)
+        return self._parse_entries(_iter_lines_with_offsets(data, 0))
 
     def read_logs_since(
         self, dir: Path, session_id: str, cursor: Any = None,
@@ -146,6 +160,11 @@ class ClaudeAgent(Agent):
           left for the next call to pick up once more bytes arrive.
         - File shrunk below cursor (rotation, truncation) → treat
           cursor as stale and full-read from 0.
+
+        Each emitted ``LogEntry`` carries its absolute source offset
+        so downstream readers can bucket it back into the ``Run`` row
+        whose ``[log_start_offset, log_end_offset)`` bracket contains
+        it.
         """
         path = self._session_file_path(dir, session_id)
         try:
@@ -165,34 +184,45 @@ class ClaudeAgent(Agent):
         except OSError:
             return [], cursor
 
-        text, cursor_advance = split_complete_lines(data)
+        lines, cursor_advance = split_complete_lines_with_offsets(data, offset)
         if cursor_advance is None:
             # No newline in the chunk at all — defer entirely.
             return [], cursor
         new_cursor = offset + cursor_advance
-        return self._parse_entries(text), new_cursor
+        return self._parse_entries(lines), new_cursor
 
     @staticmethod
-    def _parse_entries(content: str) -> List[LogEntry]:
-        """Parse Claude JSONL text into LogEntry instances. Shared
-        between the full-read path (``read_logs``) and the streaming
-        tail path (``read_logs_since``); also re-exported via
-        ``claude_read_logs`` for direct-path-based tests."""
+    def _parse_entries(
+        lines: "Any",
+    ) -> List[LogEntry]:
+        """Parse an iterable of ``(absolute_offset, line_text)`` pairs
+        into LogEntry instances. Each entry carries the offset of the
+        JSONL line it was decoded from.
+
+        Accepts an iterable rather than a list so both the
+        streaming-tail path (``split_complete_lines_with_offsets``)
+        and the full-read path (``_iter_lines_with_offsets``) can
+        plug in directly."""
         entries: List[LogEntry] = []
-        for line in content.splitlines():
-            line = line.strip()
-            if not line:
+        for offset, line in lines:
+            stripped = line.strip()
+            if not stripped:
                 continue
             try:
-                v = json.loads(line)
+                v = json.loads(stripped)
             except json.JSONDecodeError:
                 continue
-            entries.extend(ClaudeAgent._parse_log_dict(v))
+            entries.extend(ClaudeAgent._parse_log_dict(v, offset))
         return entries
 
     @staticmethod
-    def _parse_log_dict(v: dict) -> List[LogEntry]:
-        """Parse one decoded JSONL record into zero or more LogEntry."""
+    def _parse_log_dict(v: dict, offset: Optional[int] = None) -> List[LogEntry]:
+        """Parse one decoded JSONL record into zero or more LogEntry.
+
+        All entries produced from the same source line share the same
+        ``source_offset`` — they collectively represent that line's
+        contribution to the visible log and therefore belong to the
+        same run bucket."""
         out: List[LogEntry] = []
 
         msg_type = v.get("type")
@@ -213,6 +243,7 @@ class ClaudeAgent(Agent):
                     kind=LogEntryKind.USER,
                     timestamp=ts,
                     text=content_val,
+                    source_offset=offset,
                 ))
             elif isinstance(content_val, list):
                 for item in content_val:
@@ -226,6 +257,7 @@ class ClaudeAgent(Agent):
                             kind=LogEntryKind.TOOL_RESULT,
                             timestamp=ts,
                             content=text,
+                            source_offset=offset,
                         ))
 
         elif msg_type == "assistant":
@@ -242,6 +274,7 @@ class ClaudeAgent(Agent):
                                 kind=LogEntryKind.ASSISTANT,
                                 timestamp=ts,
                                 text=text,
+                                source_offset=offset,
                             ))
                     elif block_type == "thinking":
                         text = block.get("thinking")
@@ -250,6 +283,7 @@ class ClaudeAgent(Agent):
                                 kind=LogEntryKind.THINKING,
                                 timestamp=ts,
                                 text=text,
+                                source_offset=offset,
                             ))
                     elif block_type == "tool_use":
                         name = block.get("name", "unknown")
@@ -260,6 +294,7 @@ class ClaudeAgent(Agent):
                             timestamp=ts,
                             name=name,
                             input=inp_str,
+                            source_offset=offset,
                         ))
 
         return out

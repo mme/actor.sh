@@ -30,6 +30,14 @@ class InteractiveSession:
     screen: TerminalScreen
     widget: TerminalWidget
     run_id: int
+    # Closure that returns the current session-file byte size, used to
+    # stamp `log_end_offset` at finalize time. Stored on the dataclass
+    # so `close()` / `shutdown()` can reach the right agent + path
+    # without having to re-plumb them through every caller — the
+    # closure captures what `create()` already had in scope.
+    stat_size: Callable[[], Optional[int]] = field(
+        default=lambda: None,
+    )
 
 
 class InteractiveSessionManager:
@@ -91,7 +99,13 @@ class InteractiveSessionManager:
         screen = TerminalScreen(rows=self.DEFAULT_ROWS, cols=self.DEFAULT_COLS)
         widget = TerminalWidget(pty_session, screen, recorder=self._recorder)
 
-        run_id = self._insert_run(actor_name, config)
+        # Snap start-offset BEFORE spawning so entries the PTY's child
+        # writes are bracketed above this value.
+        start_offset = agent.session_file_size(cwd, session_id)
+        if start_offset is None:
+            start_offset = 0
+
+        run_id = self._insert_run(actor_name, config, start_offset)
 
         info = InteractiveSession(
             actor_name=actor_name,
@@ -99,16 +113,20 @@ class InteractiveSessionManager:
             screen=screen,
             widget=widget,
             run_id=run_id,
+            stat_size=lambda: agent.session_file_size(cwd, session_id),
         )
         self._sessions[actor_name] = info
 
         # Chain on_exit: preserve the widget's handler (which posts the
         # SessionExited message for UI recovery) AND add DB finalization.
+        # The finalize path stats the session file one more time to
+        # stamp `log_end_offset`, closing the run's byte bucket.
         widget_on_exit = pty_session._on_exit  # set by widget constructor
 
         def _chained_on_exit(code: int) -> None:
             try:
-                self._finalize_run(actor_name, info.run_id, code)
+                end_offset = agent.session_file_size(cwd, session_id)
+                self._finalize_run(actor_name, info.run_id, code, end_offset)
             finally:
                 if widget_on_exit is not None:
                     widget_on_exit(code)
@@ -143,8 +161,10 @@ class InteractiveSessionManager:
             # (incl. KeyboardInterrupt during the close poll). Otherwise
             # the DB row would stay RUNNING forever.
             try:
+                end_offset = info.stat_size()
                 self._finalize_run(
-                    actor_name, info.run_id, info.session.exit_code or -1,
+                    actor_name, info.run_id,
+                    info.session.exit_code or -1, end_offset,
                 )
             finally:
                 self._stopping.discard(actor_name)
@@ -172,8 +192,10 @@ class InteractiveSessionManager:
                 except Exception as e:
                     self._record_error(f"shutdown({name!r}): {e!r}")
                 try:
+                    end_offset = info.stat_size()
                     self._finalize_run(
-                        name, info.run_id, info.session.exit_code or -1,
+                        name, info.run_id,
+                        info.session.exit_code or -1, end_offset,
                     )
                 except Exception as e:
                     self._record_error(f"shutdown finalize({name!r}): {e!r}")
@@ -182,7 +204,9 @@ class InteractiveSessionManager:
 
     # -- DB integration ----------------------------------------------------
 
-    def _insert_run(self, actor_name: str, config: ActorConfig) -> int:
+    def _insert_run(
+        self, actor_name: str, config: ActorConfig, start_offset: int,
+    ) -> int:
         with self._db_opener() as db:
             run = Run(
                 id=0,
@@ -194,14 +218,27 @@ class InteractiveSessionManager:
                 config=config,
                 started_at=_now_iso(),
                 finished_at=None,
+                log_start_offset=start_offset,
             )
             run_id = db.insert_run(run)
             db.touch_actor(actor_name)
             return run_id
 
-    def _finalize_run(self, actor_name: str, run_id: int, exit_code: int) -> None:
+    def _finalize_run(
+        self,
+        actor_name: str,
+        run_id: int,
+        exit_code: int,
+        log_end_offset: Optional[int] = None,
+    ) -> None:
         """Idempotent, never raises. Errors are routed to the diagnostic
-        recorder so the nested-finally in `close()` can rely on it."""
+        recorder so the nested-finally in `close()` can rely on it.
+
+        `log_end_offset` (when provided) closes the run's byte bucket
+        for correlation. Passed as None from call sites that don't
+        have a current file-size reading; the row stays with
+        log_end_offset=NULL and the bucketing helper falls back to
+        the next run's start_offset or the current file size."""
         try:
             with self._db_opener() as db:
                 current = db.get_run(run_id)
@@ -213,7 +250,9 @@ class InteractiveSessionManager:
                     final = Status.STOPPED
                 else:
                     final = Status.DONE if exit_code == 0 else Status.ERROR
-                db.update_run_status(run_id, final, exit_code)
+                db.update_run_status(
+                    run_id, final, exit_code, log_end_offset=log_end_offset,
+                )
         except Exception as e:
             # DB errors at shutdown shouldn't crash the TUI.
             self._record_error(f"finalize_run({actor_name!r}, {run_id}): {e!r}")

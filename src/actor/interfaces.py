@@ -26,6 +26,13 @@ class LogEntry:
     name: str = ""        # for TOOL_USE
     input: str = ""       # for TOOL_USE
     content: str = ""     # for TOOL_RESULT
+    # Absolute byte offset of this entry's source line in the agent's
+    # session rollout file. Populated by the file-based agents so the
+    # watch UI (and any other reader) can bucket entries back into the
+    # run row that produced them via the run's [log_start_offset,
+    # log_end_offset) bracket. None for agents that don't track byte
+    # positions (e.g. future in-memory/SQLite-backed agents).
+    source_offset: Optional[int] = None
 
 
 class Agent(abc.ABC):
@@ -72,6 +79,25 @@ class Agent(abc.ABC):
     @abc.abstractmethod
     def read_logs(self, dir: Path, session_id: str) -> List[LogEntry]:
         """Read logs from the agent's session files."""
+
+    def session_file_size(
+        self, dir: Path, session_id: str,
+    ) -> Optional[int]:
+        """Current byte size of the on-disk rollout file for this
+        session, or ``None`` if the agent doesn't have a knowable
+        file (missing, not yet created, or agent isn't file-based).
+
+        Called by ``cmd_run`` / the interactive manager at run
+        boundaries to stamp ``Run.log_start_offset`` (before spawn)
+        and ``Run.log_end_offset`` (after exit). Those offsets
+        bracket the JSONL region that this run produced, which
+        downstream readers use to correlate ``LogEntry.source_offset``
+        back to a specific run without relying on timestamp ranges.
+
+        Default is ``None`` — agents without offsets stay on the
+        timestamp-range fallback, which is lossy at boundaries but
+        doesn't break anything."""
+        return None
 
     def read_logs_since(
         self, dir: Path, session_id: str, cursor: Any = None,

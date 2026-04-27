@@ -97,15 +97,17 @@ class Database:
             );
 
             CREATE TABLE IF NOT EXISTS runs (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                actor_name      TEXT NOT NULL REFERENCES actors(name) ON DELETE CASCADE,
-                prompt          TEXT NOT NULL,
-                status          TEXT NOT NULL DEFAULT 'running',
-                exit_code       INTEGER,
-                pid             INTEGER,
-                config          TEXT NOT NULL DEFAULT '{}',
-                started_at      TEXT NOT NULL,
-                finished_at     TEXT
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_name        TEXT NOT NULL REFERENCES actors(name) ON DELETE CASCADE,
+                prompt            TEXT NOT NULL,
+                status            TEXT NOT NULL DEFAULT 'running',
+                exit_code         INTEGER,
+                pid               INTEGER,
+                config            TEXT NOT NULL DEFAULT '{}',
+                started_at        TEXT NOT NULL,
+                finished_at       TEXT,
+                log_start_offset  INTEGER,
+                log_end_offset    INTEGER
             );
         """)
         conn.commit()
@@ -115,6 +117,17 @@ class Database:
         columns = {row[1] for row in cur.fetchall()}
         if "parent" not in columns:
             conn.execute("ALTER TABLE actors ADD COLUMN parent TEXT")
+            conn.commit()
+
+        cur = conn.execute("PRAGMA table_info(runs)")
+        run_columns = {row[1] for row in cur.fetchall()}
+        # log_{start,end}_offset arrived together; pre-feature rows
+        # keep NULL and fall back to timestamp correlation.
+        if "log_start_offset" not in run_columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN log_start_offset INTEGER")
+            conn.commit()
+        if "log_end_offset" not in run_columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN log_end_offset INTEGER")
             conn.commit()
 
         return cls(conn)
@@ -220,8 +233,9 @@ class Database:
         config_json = _actor_config_to_json(run.config)
         cur = self._conn.execute(
             """INSERT INTO runs
-               (actor_name, prompt, status, exit_code, pid, config, started_at, finished_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (actor_name, prompt, status, exit_code, pid, config,
+                started_at, finished_at, log_start_offset, log_end_offset)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run.actor_name,
                 run.prompt,
@@ -231,6 +245,8 @@ class Database:
                 config_json,
                 run.started_at,
                 run.finished_at,
+                run.log_start_offset,
+                run.log_end_offset,
             ),
         )
         self._conn.commit()
@@ -245,12 +261,32 @@ class Database:
         if cur.rowcount == 0:
             raise ActorError("run not found")
 
-    def update_run_status(self, run_id: int, status: Status, exit_code: Optional[int]) -> None:
+    def update_run_status(
+        self,
+        run_id: int,
+        status: Status,
+        exit_code: Optional[int],
+        log_end_offset: Optional[int] = None,
+    ) -> None:
+        """Finalize a run. Sets status, exit_code, finished_at (now),
+        and — when provided — the log_end_offset bracket for run-id
+        bucketing. `log_end_offset=None` leaves whatever was there
+        (typically NULL); callers that have a real offset should
+        always pass it so the bucket is fully closed."""
         now = _now_iso()
-        cur = self._conn.execute(
-            "UPDATE runs SET status = ?, exit_code = ?, finished_at = ? WHERE id = ?",
-            (status.as_str(), exit_code, now, run_id),
-        )
+        if log_end_offset is None:
+            cur = self._conn.execute(
+                "UPDATE runs SET status = ?, exit_code = ?, finished_at = ? WHERE id = ?",
+                (status.as_str(), exit_code, now, run_id),
+            )
+        else:
+            cur = self._conn.execute(
+                """UPDATE runs
+                   SET status = ?, exit_code = ?, finished_at = ?,
+                       log_end_offset = ?
+                   WHERE id = ?""",
+                (status.as_str(), exit_code, now, log_end_offset, run_id),
+            )
         self._conn.commit()
         if cur.rowcount == 0:
             raise ActorError("run not found")
@@ -258,7 +294,7 @@ class Database:
     def get_run(self, run_id: int) -> Optional[Run]:
         cur = self._conn.execute(
             """SELECT id, actor_name, prompt, status, exit_code, pid, config,
-                      started_at, finished_at
+                      started_at, finished_at, log_start_offset, log_end_offset
                FROM runs WHERE id = ?""",
             (run_id,),
         )
@@ -270,7 +306,7 @@ class Database:
     def latest_run(self, actor_name: str) -> Optional[Run]:
         cur = self._conn.execute(
             """SELECT id, actor_name, prompt, status, exit_code, pid, config,
-                      started_at, finished_at
+                      started_at, finished_at, log_start_offset, log_end_offset
                FROM runs WHERE actor_name = ? ORDER BY id DESC LIMIT 1""",
             (actor_name,),
         )
@@ -288,7 +324,7 @@ class Database:
 
         cur = self._conn.execute(
             """SELECT id, actor_name, prompt, status, exit_code, pid, config,
-                      started_at, finished_at
+                      started_at, finished_at, log_start_offset, log_end_offset
                FROM runs WHERE actor_name = ? ORDER BY id DESC LIMIT ?""",
             (actor_name, limit),
         )
@@ -336,4 +372,6 @@ class Database:
             config=_json_to_actor_config(row[6]),
             started_at=row[7],
             finished_at=row[8],
+            log_start_offset=row[9],
+            log_end_offset=row[10],
         )

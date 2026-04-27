@@ -107,6 +107,17 @@ class Run:
     config: ActorConfig
     started_at: str
     finished_at: Optional[str]
+    # Byte offsets into the agent's session rollout file that bracket
+    # the JSONL region this run produced. `start` is snapped before
+    # spawning the agent; `end` is stamped at run finalization
+    # (DONE / ERROR / STOPPED). While `end is None`, the run is still
+    # considered open: any LogEntry with `source_offset >= start`
+    # belongs to it. Both may be None for agents that don't track
+    # on-disk byte positions (current default on the Agent ABC) or
+    # for rows created before this feature landed, in which case
+    # readers fall back to the timestamp-range heuristic.
+    log_start_offset: Optional[int] = None
+    log_end_offset: Optional[int] = None
 
 
 def validate_name(name: str) -> None:

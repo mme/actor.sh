@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Optional
 
 if sys.platform == "win32":
     raise unittest.SkipTest("PTY not available on Windows")
@@ -59,6 +60,12 @@ class _FakeAgent:
 
     def stop(self, *a, **k):  # pragma: no cover
         raise AssertionError("stop should not be called")
+
+    def session_file_size(self, *a, **k) -> Optional[int]:
+        # No real session file in these tests; returning None routes
+        # InteractiveSessionManager through its "agent doesn't know
+        # offsets" fallback (log_start_offset=0, log_end_offset=NULL).
+        return None
 
 
 def _ensure_actor(db: Database, name: str, session: str = "sess-1") -> None:

@@ -14,7 +14,10 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from ..errors import ActorError
 from ..interfaces import Agent, LogEntry, LogEntryKind
 from ..types import ActorConfig
-from ._jsonl import split_complete_lines
+from ._jsonl import (
+    iter_lines_with_offsets as _iter_lines_with_offsets,
+    split_complete_lines_with_offsets,
+)
 
 
 class _CodexChild:
@@ -200,22 +203,37 @@ class CodexAgent(Agent):
         output = "\n".join(entry.output_lines)
         return (returncode if returncode is not None else -1, output)
 
+    def session_file_size(
+        self, dir: Path, session_id: str,
+    ) -> Optional[int]:
+        """Byte size of the current rollout file for this session, or
+        ``None`` if we can't find it. Used for run-boundary offset
+        capture."""
+        rollout_path = self._find_rollout_path(session_id)
+        if rollout_path is None:
+            return None
+        try:
+            return rollout_path.stat().st_size
+        except (FileNotFoundError, OSError):
+            return None
+
     def read_logs(self, dir: Path, session_id: str) -> List[LogEntry]:
         rollout_path = self._find_rollout_path(session_id)
         if rollout_path is None:
             return []
         try:
-            content = rollout_path.read_text()
+            data = rollout_path.read_bytes()
         except FileNotFoundError:
             return []
-        return self._parse_entries(content)
+        return self._parse_entries(_iter_lines_with_offsets(data, 0))
 
     def read_logs_since(
         self, dir: Path, session_id: str, cursor: Any = None,
     ) -> Tuple[List[LogEntry], Any]:
         """Byte-offset cursor tail read against the Codex rollout file.
         Same semantics as ClaudeAgent.read_logs_since — see that
-        docstring for cursor behavior."""
+        docstring for cursor behavior. Each emitted entry carries its
+        absolute byte offset in the rollout file."""
         rollout_path = self._find_rollout_path(session_id)
         if rollout_path is None:
             return [], cursor
@@ -236,33 +254,36 @@ class CodexAgent(Agent):
         except OSError:
             return [], cursor
 
-        text, cursor_advance = split_complete_lines(data)
+        lines, cursor_advance = split_complete_lines_with_offsets(data, offset)
         if cursor_advance is None:
             return [], cursor
         new_cursor = offset + cursor_advance
-        return self._parse_entries(text), new_cursor
+        return self._parse_entries(lines), new_cursor
 
     @staticmethod
-    def _parse_entries(content: str) -> List[LogEntry]:
-        """Parse Codex JSONL text into LogEntry instances. Shared
-        between the full-read path (``read_logs``) and the streaming
-        tail path (``read_logs_since``)."""
+    def _parse_entries(lines: "Any") -> List[LogEntry]:
+        """Parse ``(offset, text)`` pairs into LogEntry instances.
+        Offsets are propagated onto every emitted entry so the run
+        bucketing layer can attribute each entry to the right run."""
         entries: List[LogEntry] = []
-        for line in content.splitlines():
-            line = line.strip()
-            if not line:
+        for offset, line in lines:
+            stripped = line.strip()
+            if not stripped:
                 continue
             try:
-                v = json.loads(line)
+                v = json.loads(stripped)
             except json.JSONDecodeError:
                 continue
-            entries.extend(CodexAgent._parse_log_dict(v))
+            entries.extend(CodexAgent._parse_log_dict(v, offset))
         return entries
 
     @staticmethod
-    def _parse_log_dict(v: dict) -> List[LogEntry]:
+    def _parse_log_dict(
+        v: dict, offset: Optional[int] = None,
+    ) -> List[LogEntry]:
         """Parse one decoded Codex JSONL record into zero or more
-        LogEntry instances."""
+        LogEntry instances. All entries from one source line share
+        the same ``source_offset``."""
         out: List[LogEntry] = []
         top_type = v.get("type")
         payload = v.get("payload", {})
@@ -275,6 +296,7 @@ class CodexAgent(Agent):
                     out.append(LogEntry(
                         kind=LogEntryKind.ASSISTANT,
                         text=text,
+                        source_offset=offset,
                     ))
             elif msg_type == "user_message":
                 text = payload.get("message", "")
@@ -282,6 +304,7 @@ class CodexAgent(Agent):
                     out.append(LogEntry(
                         kind=LogEntryKind.USER,
                         text=text,
+                        source_offset=offset,
                     ))
             elif msg_type == "exec_command":
                 cmd = payload.get("command", {})
@@ -291,6 +314,7 @@ class CodexAgent(Agent):
                         kind=LogEntryKind.TOOL_USE,
                         name="shell",
                         input=cmd_str,
+                        source_offset=offset,
                     ))
             elif msg_type == "exec_command_output":
                 output = payload.get("output", "")
@@ -298,6 +322,7 @@ class CodexAgent(Agent):
                     out.append(LogEntry(
                         kind=LogEntryKind.TOOL_RESULT,
                         content=output,
+                        source_offset=offset,
                     ))
         elif top_type == "response_item":
             item_type = payload.get("type")
@@ -309,6 +334,7 @@ class CodexAgent(Agent):
                         out.append(LogEntry(
                             kind=LogEntryKind.THINKING,
                             text=text,
+                            source_offset=offset,
                         ))
         return out
 
