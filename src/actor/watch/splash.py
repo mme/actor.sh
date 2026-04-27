@@ -95,10 +95,10 @@ class Splash(Widget):
         self._grids: list[list[list[float]]] | None = None
         self._style_cache: dict[str, Style] = {}
         # Three caches with different invalidation axes: _frame per tick,
-        # _styles per theme change, _geometry per resize.
+        # _styles per resolved-palette change, _geometry per resize.
         self._frame_dirty = True
         self._frame: dict | None = None
-        self._theme_key: str | None = None
+        self._theme_key: tuple[str, str, str, str] | None = None
         self._styles: dict[str, Style] | None = None
         self._geometry: dict | None = None
         self._geometry_size: tuple[int, int] | None = None
@@ -149,11 +149,14 @@ class Splash(Widget):
         return "#D77757", "#B1B9F9", "#FFFFFF", "#2C323E"
 
     def _ensure_styles(self) -> None:
-        t = self.app.current_theme
-        key = t.name if t is not None else "_default"
+        # Key on the resolved color tuple, not the theme name — omarchy
+        # re-registers themes under the same name when the palette
+        # changes, so a name-only key would freeze the splash on the
+        # first-rendered palette.
+        key = self._theme_colors()
         if self._styles is not None and self._theme_key == key:
             return
-        logo_color, anim_color, border_color, panel_color = self._theme_colors()
+        logo_color, anim_color, border_color, panel_color = key
         self._styles = {
             "anim": self._get_style(anim_color),
             "border": self._get_style(f"{border_color} on {panel_color}"),

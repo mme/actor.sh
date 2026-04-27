@@ -86,28 +86,39 @@ class TestApplyOmarchyFlavor(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             self.assertIsNone(apply_omarchy_flavor(_BASE, home=Path(home)))
 
-    def test_overrides_only_environmental_slots(self):
-        # No hyprland.conf → only FG gets overridden (palette flavor
-        # works even without the window-border file).
+    def test_palette_overrides_environmental_slots(self):
+        # No hyprland.conf → palette-only overrides still apply (the
+        # window-border file is optional).
         with tempfile.TemporaryDirectory() as home:
             _write_palette(Path(home), _DARK_PALETTE)
             out = apply_omarchy_flavor(_BASE, home=Path(home))
         self.assertIsNotNone(out)
         assert out is not None
-        # FG swapped in from the palette…
+        # Palette-driven slots…
         self.assertEqual(out.foreground, "#a9b1d6")
-        # …every other slot is untouched from the base.
+        self.assertEqual(out.background, "#1a1b26")
+        self.assertEqual(out.panel, out.surface)  # both lifted from bg
+        # No active-border to dodge → first candidate (accent) wins.
+        self.assertEqual(out.secondary, "#7aa2f7")
+        # No active-border file → primary/accent stay on base.
         self.assertEqual(out.primary, "#000001")
-        self.assertEqual(out.secondary, "#000002")
         self.assertEqual(out.accent, "#000003")
+        # Semantic slots untouched.
         self.assertEqual(out.warning, "#000004")
         self.assertEqual(out.error, "#000005")
         self.assertEqual(out.success, "#000006")
-        self.assertEqual(out.background, "#222222")
-        self.assertEqual(out.surface, "#333333")
-        self.assertEqual(out.panel, "#444444")
         self.assertEqual(out.dark, True)
         self.assertEqual(out.name, _BASE.name)
+
+    def test_surface_is_lifted_from_background(self):
+        # surface = bg shifted ~8% toward fg, so it sits between them
+        # rather than mirroring either slot.
+        with tempfile.TemporaryDirectory() as home:
+            _write_palette(Path(home), _DARK_PALETTE)
+            out = apply_omarchy_flavor(_BASE, home=Path(home))
+        assert out is not None
+        self.assertNotEqual(out.surface, out.background)
+        self.assertNotEqual(out.surface, out.foreground)
 
     def test_active_border_overrides_primary_and_accent(self):
         with tempfile.TemporaryDirectory() as home:
@@ -121,17 +132,22 @@ class TestApplyOmarchyFlavor(unittest.TestCase):
         assert out is not None
         self.assertEqual(out.primary, "#7aa2f7")
         self.assertEqual(out.accent, "#7aa2f7")
-        # Secondary untouched.
-        self.assertEqual(out.secondary, _BASE.secondary)
+        # accent equals active-border in tokyo night, so secondary skips
+        # it and lands on color3 — a perceptibly different palette slot.
+        self.assertNotEqual(out.secondary, out.primary)
+        self.assertEqual(out.secondary, "#e0af68")  # color3 (warm yellow)
 
-    def test_light_palette_still_only_touches_foreground(self):
+    def test_light_palette_overrides_environmental_slots(self):
         with tempfile.TemporaryDirectory() as home:
             _write_palette(Path(home), _LIGHT_PALETTE)
             out = apply_omarchy_flavor(_BASE, home=Path(home))
         assert out is not None
         self.assertEqual(out.foreground, "#222222")
-        # `dark` stays as base had it (we're not deriving it from the
-        # omarchy BG today — that'd contradict "FG only" scope).
+        self.assertEqual(out.background, "#f5f5f5")
+        self.assertEqual(out.secondary, "#2e5aa0")
+        # `dark` stays as base had it — we don't derive it from
+        # background luminance, so the user's chosen base controls the
+        # CSS class regardless of the palette.
         self.assertTrue(out.dark)
 
     def test_malformed_toml_returns_none_and_warns(self):

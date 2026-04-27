@@ -257,12 +257,19 @@ templates).
 The `actor watch` TUI ships with `claude-dark` / `claude-light`. If it
 detects omarchy running locally (presence of
 `~/.config/omarchy/current/theme/colors.toml`), it **flavors** the
-claude-dark theme with omarchy's foreground color — the brand slots
-(primary / secondary / accent / warning / error / success / background /
-surface / panel) stay as claude-dark defines them, so the app still
-reads as an "Actor.sh" TUI but its body text matches the rest of the
-user's desktop. Today only the foreground slot is overridden; growing
-this to cover more slots is a one-line-per-slot extension.
+active claude-dark/light theme with omarchy's palette so the TUI reads
+as part of the user's desktop:
+
+- `foreground` ← `colors.toml`'s `foreground`
+- `background` ← `colors.toml`'s `background`
+- `surface`, `panel` ← `background` lifted ~8% toward `foreground` so
+  panels stay subtly distinct from the desktop bg (still palette-derived)
+- `secondary` ← `colors.toml`'s `accent` (brand/logo slot)
+- `primary`, `accent` ← `hyprland.conf`'s `$activeBorderColor` (focus
+  rings match active-window border)
+
+Semantic slots (`warning` / `error` / `success`) stay as the base
+theme had them — `colors.toml` doesn't carry semantic meaning.
 
 **Live reload:** every 3 seconds we re-stat the resolved-target mtime of
 `colors.toml`. If it changed (e.g. the user ran `omarchy theme set
