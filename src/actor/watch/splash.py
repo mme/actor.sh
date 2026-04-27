@@ -310,13 +310,20 @@ class Splash(Widget):
         return Segment("".join(chars), style)
 
     def render_line(self, y: int) -> Strip:
-        if self._frame_dirty:
+        rows = self.size.height
+        cols = self.size.width
+        if (
+            self._frame_dirty
+            or self._frame is None
+            or self._frame["rows"] != rows
+            or self._frame["cols"] != cols
+        ):
             self._prepare_frame()
             self._frame_dirty = False
 
         frame = self._frame
-        if frame is None:
-            return Strip.blank(self.size.width)
+        if frame is None or y >= frame["rows"]:
+            return Strip.blank(cols)
 
         cols = frame["cols"]
         a_row = frame["a_grid"][y]
