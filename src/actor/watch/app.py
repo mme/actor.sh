@@ -1234,29 +1234,29 @@ class ActorWatchApp(App):
         self._diff_poll_last_shortstat = None
 
     def _update_diff_tab_label(self, added: int = 0, removed: int = 0) -> None:
-        # Classic diff-style ` +N -M` badge with theme `$success` / `$error`
-        # for the colors so omarchy palette flips carry through. We hold a
-        # Rich Text in `_tab_base_labels["diff"]` instead of a plain string
-        # — Tab.label accepts Rich renderables, and `_refresh_tab_arrows`
-        # special-cases Text bases to preserve the styling when it
-        # prepends the focus-arrow.
+        # Pill-style ` +N -M` badge using the same fg/bg the diff body
+        # uses for added/removed lines (`DARK_COLORS` / `LIGHT_COLORS`
+        # in diff_render). Inactive tab → colored pills; active tab →
+        # plain text (Textual's focus-background overrides our colors
+        # there and would produce unreadable contrast). The
+        # active-state stripping happens in `_refresh_tab_arrows`.
         if added or removed:
+            from .diff_render import DARK_COLORS, LIGHT_COLORS
             # `current_theme` raises ReactiveError before super().__init__
-            # runs (some tests construct a bare App without init). Falling
-            # back to brand defaults keeps label generation pure-data-in.
+            # runs (some tests bypass init). Default to dark on failure.
             try:
                 t = self.current_theme
+                is_dark = t.dark if t else True
             except Exception:
-                t = None
-            success = (t.success if t else None) or "#50C850"
-            error = (t.error if t else None) or "#DC5A5A"
+                is_dark = True
+            dc = DARK_COLORS if is_dark else LIGHT_COLORS
+            added_style = f"{dc.added_marker} on {dc.added_bg}"
+            removed_style = f"{dc.removed_marker} on {dc.removed_bg}"
             base: str | Text = Text("DIFF")
             if added:
-                base.append(" +", style=success)
-                base.append(str(added), style=success)
+                base.append(f" +{added}", style=added_style)
             if removed:
-                base.append(" -", style=error)
-                base.append(str(removed), style=error)
+                base.append(f" -{removed}", style=removed_style)
         else:
             base = "DIFF"
         self._tab_base_labels["diff"] = base
@@ -1283,14 +1283,13 @@ class ActorWatchApp(App):
             if tab is None:
                 continue
             if tab_id == active_id and focused:
-                if isinstance(base, Text):
-                    # Preserve segment styles in the Text base when
-                    # prepending the focus arrow. f"→ {text}" would
-                    # stringify it and drop the colors.
-                    label: str | Text = Text("→ ").append_text(base)
-                else:
-                    label = f"→ {base}"
-                tab.label = label
+                # Drop styles when this tab is the focused-active one —
+                # Textual paints its own reverse-video focus background
+                # over the label, and our pill colors fight it (e.g.
+                # green-on-darkgreen badge becomes unreadable on the
+                # active-tab background). Use the plain text form.
+                plain = base.plain if isinstance(base, Text) else base
+                tab.label = f"→ {plain}"
             else:
                 tab.label = base
 
