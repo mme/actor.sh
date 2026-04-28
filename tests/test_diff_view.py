@@ -30,8 +30,10 @@ from actor.watch.helpers import (
     _parse_diff_files,
     compute_diff,
     compute_diff_shortstat,
+    git_index_mtime,
     parse_shortstat,
 )
+from actor.types import Status
 
 
 def _bare_app() -> ActorWatchApp:
@@ -50,6 +52,10 @@ def _bare_app() -> ActorWatchApp:
     app._diff_pending_actor = None
     app._diff_badge_token = 0
     app._diff_badge_target_actor = None
+    app._diff_poll_initialized = False
+    app._diff_poll_last_index_mtime = None
+    app._diff_poll_last_shortstat = None
+    app._prev_statuses = {}
     app._current_actors = []
     app._tab_base_labels = {
         "logs": "LIVE", "diff": "DIFF",
@@ -1268,6 +1274,372 @@ class ClearDetailCancelsStreamingTests(unittest.TestCase):
             app._diff_append_file(token=3, file_path="x.py",
                                   renderable=Text("x"))
         scroll.mount.assert_not_called()
+
+
+# -- Stage 5: live refresh while a run is in progress -----------------------
+
+
+def _stub_diff_poll_dom(
+    app, *, selected_actor=None, active_tab: str = "diff",
+):
+    """Return a `query_one` side-effect that resolves the two
+    DOM lookups `_diff_poll_actor` makes — the ActorTree (with a
+    `selected_actor` attribute) and the TabbedContent (with an
+    `active` attribute). The state-machine methods only read these
+    two values; everything else stays a vanilla MagicMock."""
+    tree = MagicMock()
+    tree.selected_actor = selected_actor
+    tabs = MagicMock()
+    tabs.active = active_tab
+
+    def query_one(selector, *_args, **_kwargs):
+        # ActorTree is queried by class, "#tabs" by id selector.
+        if isinstance(selector, str) and selector == "#tabs":
+            return tabs
+        return tree
+
+    return query_one
+
+
+class GitIndexMtimeTests(unittest.TestCase):
+    """The cheap "did anything happen" signal — works for primary
+    checkouts AND for `git worktree` checkouts where `.git` is a
+    file pointing at the per-worktree git dir."""
+
+    def test_returns_mtime_for_primary_checkout(self):
+        if shutil.which("git") is None:
+            self.skipTest("git not available")
+        tmp = tempfile.mkdtemp(prefix="actor-index-primary-")
+        try:
+            _git("init", "-q", "-b", "main", tmp, cwd=tmp)
+            Path(tmp, "seed.txt").write_text("seed\n")
+            _git("add", "-A", cwd=tmp)
+            _git("commit", "-q", "-m", "seed", cwd=tmp)
+            actor = _fake_actor_for_repo(tmp)
+            mtime = git_index_mtime(actor)
+            self.assertIsNotNone(mtime)
+            self.assertIsInstance(mtime, float)
+            # Should match the actual file's mtime.
+            self.assertEqual(mtime, Path(tmp, ".git", "index").stat().st_mtime)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_returns_mtime_for_worktree_checkout(self):
+        """`actor new` typically lands as a `git worktree`, so
+        `<wt>/.git` is a *file* with `gitdir: <path>` pointing at the
+        per-worktree git dir under the parent repo."""
+        if shutil.which("git") is None:
+            self.skipTest("git not available")
+        primary = tempfile.mkdtemp(prefix="actor-index-primary-for-wt-")
+        wt = tempfile.mkdtemp(prefix="actor-index-wt-")
+        os.rmdir(wt)  # `git worktree add` creates it
+        try:
+            _git("init", "-q", "-b", "main", primary, cwd=primary)
+            Path(primary, "seed.txt").write_text("seed\n")
+            _git("add", "-A", cwd=primary)
+            _git("commit", "-q", "-m", "seed", cwd=primary)
+            _git("worktree", "add", wt, "-b", "feature", cwd=primary)
+            actor = _fake_actor_for_repo(wt)
+            mtime = git_index_mtime(actor)
+            self.assertIsNotNone(mtime)
+            self.assertIsInstance(mtime, float)
+        finally:
+            shutil.rmtree(wt, ignore_errors=True)
+            shutil.rmtree(primary, ignore_errors=True)
+
+    def test_returns_none_when_not_a_repo(self):
+        tmp = tempfile.mkdtemp(prefix="actor-index-notrepo-")
+        try:
+            actor = _fake_actor_for_repo(tmp)
+            self.assertIsNone(git_index_mtime(actor))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class DiffPollActorTests(unittest.TestCase):
+    """`_diff_poll_actor` returns the eligible actor only when ALL
+    conditions hold: actor selected, RUNNING status, DIFF active."""
+
+    def test_returns_actor_when_running_and_diff_active(self):
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._prev_statuses = {"alice": Status.RUNNING}
+        with patch.object(
+            app, "query_one",
+            side_effect=_stub_diff_poll_dom(
+                app, selected_actor=actor, active_tab="diff",
+            ),
+        ):
+            self.assertIs(app._diff_poll_actor(), actor)
+
+    def test_returns_none_when_no_actor_selected(self):
+        app = _bare_app()
+        with patch.object(
+            app, "query_one",
+            side_effect=_stub_diff_poll_dom(
+                app, selected_actor=None, active_tab="diff",
+            ),
+        ):
+            self.assertIsNone(app._diff_poll_actor())
+
+    def test_returns_none_when_actor_not_running(self):
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._prev_statuses = {"alice": Status.DONE}
+        with patch.object(
+            app, "query_one",
+            side_effect=_stub_diff_poll_dom(
+                app, selected_actor=actor, active_tab="diff",
+            ),
+        ):
+            self.assertIsNone(app._diff_poll_actor())
+
+    def test_returns_none_when_diff_tab_inactive(self):
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._prev_statuses = {"alice": Status.RUNNING}
+        with patch.object(
+            app, "query_one",
+            side_effect=_stub_diff_poll_dom(
+                app, selected_actor=actor, active_tab="logs",
+            ),
+        ):
+            self.assertIsNone(app._diff_poll_actor())
+
+
+class PollDiffForRunningTests(unittest.TestCase):
+    """The interval handler. Only spawns the signal-capture worker
+    when conditions hold; resets baseline state otherwise so a
+    re-entry doesn't compare against stale signals."""
+
+    def test_starts_worker_when_conditions_met(self):
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._prev_statuses = {"alice": Status.RUNNING}
+        with patch.object(
+            app, "query_one",
+            side_effect=_stub_diff_poll_dom(
+                app, selected_actor=actor, active_tab="diff",
+            ),
+        ), patch.object(app, "_poll_diff_signals_worker") as worker:
+            app._poll_diff_for_running()
+        worker.assert_called_once_with(actor)
+
+    def test_resets_state_when_conditions_not_met(self):
+        app = _bare_app()
+        # Pretend a prior tick had observed signals.
+        app._diff_poll_initialized = True
+        app._diff_poll_last_index_mtime = 1.0
+        app._diff_poll_last_shortstat = (3, 1)
+        # No actor selected → conditions fail.
+        with patch.object(
+            app, "query_one",
+            side_effect=_stub_diff_poll_dom(
+                app, selected_actor=None,
+            ),
+        ), patch.object(app, "_poll_diff_signals_worker") as worker:
+            app._poll_diff_for_running()
+        worker.assert_not_called()
+        self.assertFalse(app._diff_poll_initialized)
+        self.assertIsNone(app._diff_poll_last_index_mtime)
+        self.assertIsNone(app._diff_poll_last_shortstat)
+
+    def test_resets_state_when_actor_not_running(self):
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._prev_statuses = {"alice": Status.DONE}
+        app._diff_poll_initialized = True
+        app._diff_poll_last_index_mtime = 1.0
+        with patch.object(
+            app, "query_one",
+            side_effect=_stub_diff_poll_dom(
+                app, selected_actor=actor, active_tab="diff",
+            ),
+        ), patch.object(app, "_poll_diff_signals_worker") as worker:
+            app._poll_diff_for_running()
+        worker.assert_not_called()
+        self.assertFalse(app._diff_poll_initialized)
+
+    def test_resets_state_when_tab_inactive(self):
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._prev_statuses = {"alice": Status.RUNNING}
+        app._diff_poll_initialized = True
+        with patch.object(
+            app, "query_one",
+            side_effect=_stub_diff_poll_dom(
+                app, selected_actor=actor, active_tab="logs",
+            ),
+        ), patch.object(app, "_poll_diff_signals_worker") as worker:
+            app._poll_diff_for_running()
+        worker.assert_not_called()
+        self.assertFalse(app._diff_poll_initialized)
+
+
+class EvaluateDiffPollSignalsTests(unittest.TestCase):
+    """Main-thread signal comparison. First observation baselines;
+    subsequent ticks fire `_maybe_refresh_diff(force=True)` if either
+    signal flipped."""
+
+    def _running_actor(self, app, actor):
+        app._prev_statuses = {actor.name: Status.RUNNING}
+        return _stub_diff_poll_dom(
+            app, selected_actor=actor, active_tab="diff",
+        )
+
+    def test_first_observation_baselines_no_refresh(self):
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        with patch.object(
+            app, "query_one", side_effect=self._running_actor(app, actor),
+        ), patch.object(app, "_maybe_refresh_diff") as refresh:
+            app._evaluate_diff_poll_signals(
+                "alice", mtime=10.0, shortstat=(3, 1),
+            )
+        refresh.assert_not_called()
+        self.assertTrue(app._diff_poll_initialized)
+        self.assertEqual(app._diff_poll_last_index_mtime, 10.0)
+        self.assertEqual(app._diff_poll_last_shortstat, (3, 1))
+
+    def test_unchanged_signals_no_refresh(self):
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._diff_poll_initialized = True
+        app._diff_poll_last_index_mtime = 10.0
+        app._diff_poll_last_shortstat = (3, 1)
+        with patch.object(
+            app, "query_one", side_effect=self._running_actor(app, actor),
+        ), patch.object(app, "_maybe_refresh_diff") as refresh:
+            app._evaluate_diff_poll_signals(
+                "alice", mtime=10.0, shortstat=(3, 1),
+            )
+        refresh.assert_not_called()
+
+    def test_index_mtime_change_triggers_refresh(self):
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._diff_poll_initialized = True
+        app._diff_poll_last_index_mtime = 10.0
+        app._diff_poll_last_shortstat = (3, 1)
+        with patch.object(
+            app, "query_one", side_effect=self._running_actor(app, actor),
+        ), patch.object(app, "_maybe_refresh_diff") as refresh:
+            app._evaluate_diff_poll_signals(
+                "alice", mtime=20.0, shortstat=(3, 1),
+            )
+        refresh.assert_called_once_with(force=True)
+        # Baseline advanced.
+        self.assertEqual(app._diff_poll_last_index_mtime, 20.0)
+
+    def test_shortstat_change_triggers_refresh(self):
+        """Picks up unstaged edits the index doesn't reflect — the
+        whole reason we pair the two signals."""
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._diff_poll_initialized = True
+        app._diff_poll_last_index_mtime = 10.0
+        app._diff_poll_last_shortstat = (3, 1)
+        with patch.object(
+            app, "query_one", side_effect=self._running_actor(app, actor),
+        ), patch.object(app, "_maybe_refresh_diff") as refresh:
+            app._evaluate_diff_poll_signals(
+                "alice", mtime=10.0, shortstat=(5, 2),
+            )
+        refresh.assert_called_once_with(force=True)
+        self.assertEqual(app._diff_poll_last_shortstat, (5, 2))
+
+    def test_actor_changed_mid_poll_drops_signals(self):
+        """Signals captured for `alice` mustn't refresh `bob`'s
+        diff. The worker can race with a tab/actor change between
+        the kick and the call_from_thread."""
+        app = _bare_app()
+        bob = _fake_actor("bob")
+        app._prev_statuses = {"bob": Status.RUNNING}
+        # Conditions hold for `bob` now.
+        with patch.object(
+            app, "query_one",
+            side_effect=_stub_diff_poll_dom(
+                app, selected_actor=bob, active_tab="diff",
+            ),
+        ), patch.object(app, "_maybe_refresh_diff") as refresh:
+            # ...but the worker is reporting signals captured for
+            # `alice` before the tab switch.
+            app._evaluate_diff_poll_signals(
+                "alice", mtime=99.0, shortstat=(7, 7),
+            )
+        refresh.assert_not_called()
+        # State must NOT advance to `alice`'s captured signals —
+        # those would corrupt `bob`'s baseline.
+        self.assertFalse(app._diff_poll_initialized)
+        self.assertIsNone(app._diff_poll_last_index_mtime)
+
+    def test_drops_signals_when_conditions_no_longer_hold(self):
+        """User switched to LIVE mid-poll; signals stale on arrival."""
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._prev_statuses = {"alice": Status.RUNNING}
+        with patch.object(
+            app, "query_one",
+            side_effect=_stub_diff_poll_dom(
+                app, selected_actor=actor, active_tab="logs",
+            ),
+        ), patch.object(app, "_maybe_refresh_diff") as refresh:
+            app._evaluate_diff_poll_signals(
+                "alice", mtime=10.0, shortstat=(3, 1),
+            )
+        refresh.assert_not_called()
+
+
+class DiffPollResetCleanlyTests(unittest.TestCase):
+    """End-to-end stop-cleanly behavior. After a tick where
+    conditions become false, the next tick where they become true
+    again must re-baseline rather than refresh on stale comparison."""
+
+    def test_re_entry_after_reset_treats_as_first_observation(self):
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._prev_statuses = {"alice": Status.RUNNING}
+
+        # First tick: conditions met. Baseline records.
+        with patch.object(
+            app, "query_one",
+            side_effect=_stub_diff_poll_dom(
+                app, selected_actor=actor, active_tab="diff",
+            ),
+        ), patch.object(app, "_maybe_refresh_diff") as refresh:
+            app._evaluate_diff_poll_signals(
+                "alice", mtime=10.0, shortstat=(3, 1),
+            )
+        refresh.assert_not_called()
+        self.assertTrue(app._diff_poll_initialized)
+
+        # User leaves DIFF for LIVE. Interval still ticks.
+        with patch.object(
+            app, "query_one",
+            side_effect=_stub_diff_poll_dom(
+                app, selected_actor=actor, active_tab="logs",
+            ),
+        ), patch.object(app, "_poll_diff_signals_worker") as worker:
+            app._poll_diff_for_running()
+        worker.assert_not_called()
+        self.assertFalse(app._diff_poll_initialized)
+        self.assertIsNone(app._diff_poll_last_index_mtime)
+
+        # User comes back to DIFF. Even if signals differ from
+        # what was last seen *long ago*, the next eval is a fresh
+        # baseline — no surprise refresh.
+        with patch.object(
+            app, "query_one",
+            side_effect=_stub_diff_poll_dom(
+                app, selected_actor=actor, active_tab="diff",
+            ),
+        ), patch.object(app, "_maybe_refresh_diff") as refresh:
+            app._evaluate_diff_poll_signals(
+                "alice", mtime=99.0, shortstat=(99, 99),
+            )
+        refresh.assert_not_called()
+        self.assertTrue(app._diff_poll_initialized)
+        self.assertEqual(app._diff_poll_last_index_mtime, 99.0)
 
 
 if __name__ == "__main__":

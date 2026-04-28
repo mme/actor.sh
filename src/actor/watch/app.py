@@ -43,6 +43,7 @@ from .diff_render import iter_diff_renderables
 from .helpers import (
     compute_diff,
     compute_diff_shortstat,
+    git_index_mtime,
     read_head_oid,
     read_log_entries_since,
 )
@@ -240,6 +241,19 @@ class ActorWatchApp(App):
     _diff_badge_token: int = 0
     _diff_badge_target_actor: str | None = None
 
+    # Live-refresh poll state. While DIFF is active and the selected
+    # actor is RUNNING, a 2s interval ticks
+    # `_poll_diff_for_running`, which captures index mtime + shortstat
+    # and force-refreshes the diff if either flipped vs the last
+    # observation. The first observation after conditions become
+    # true is treated as the baseline (no refresh — the user just
+    # got here, the build is presumably already correct); subsequent
+    # ticks compare. When conditions stop holding, the baseline
+    # resets so a later re-entry baselines cleanly.
+    _diff_poll_initialized: bool = False
+    _diff_poll_last_index_mtime: float | None = None
+    _diff_poll_last_shortstat: tuple[int, int] | None = None
+
     # Base labels for each tab (without the arrow prefix). Kept separate
     # from the rendered tab.label so we can re-apply the "active +
     # focused → arrow" decoration whenever focus moves or the active
@@ -332,6 +346,10 @@ class ActorWatchApp(App):
         # 3s cadence is fine and we don't need inotify / platform-specific
         # machinery. No-op on non-omarchy systems.
         self.set_interval(3.0, self._poll_omarchy_theme)
+        # Live DIFF refresh while the selected actor is RUNNING and
+        # DIFF is active. Same 2s cadence as the actor poller; the
+        # handler early-outs cheaply when conditions don't hold.
+        self.set_interval(2.0, self._poll_diff_for_running)
 
         # Start with focus on the actor tree. call_after_refresh so
         # the focus call runs AFTER any pending focus-changes queued
@@ -1101,6 +1119,99 @@ class ActorWatchApp(App):
         and so a subsequent kick can start a new build cleanly."""
         if token == self._diff_build_token:
             self._diff_build_pending = False
+
+    # -- Live DIFF refresh while a run is in progress ----------------------
+
+    def _poll_diff_for_running(self) -> None:
+        """2s tick (set_interval). Picks up worktree changes for the
+        currently-selected RUNNING actor and force-refreshes the
+        diff so the tab tracks edits without manual interaction.
+
+        Conditions checked synchronously here on the main thread;
+        the subprocess-bound signal capture (`shortstat`) is then
+        delegated to a worker, which calls back via
+        `_evaluate_diff_poll_signals` for the comparison + refresh
+        decision.
+
+        When conditions don't hold (no actor / not RUNNING / DIFF
+        not the active tab), the recorded baseline resets so a
+        later re-entry doesn't think a stale signal "changed"."""
+        actor = self._diff_poll_actor()
+        if actor is None:
+            self._reset_diff_poll_state()
+            return
+        self._poll_diff_signals_worker(actor)
+
+    def _diff_poll_actor(self) -> Actor | None:
+        """The actor whose diff is eligible for live polling, or
+        None if any of (selection, RUNNING status, DIFF tab active)
+        doesn't hold."""
+        try:
+            tree = self.query_one(ActorTree)
+        except Exception:
+            return None
+        actor = tree.selected_actor
+        if actor is None:
+            return None
+        if self._prev_statuses.get(actor.name) != Status.RUNNING:
+            return None
+        try:
+            tabs = self.query_one("#tabs", TabbedContent)
+        except Exception:
+            return None
+        if tabs.active != "diff":
+            return None
+        return actor
+
+    @work(thread=True, exclusive=True, group="diff_poll")
+    def _poll_diff_signals_worker(self, actor: Actor) -> None:
+        """Off-main-thread signal capture: stat the index file +
+        run shortstat. Both are cheap, but a subprocess on the main
+        thread can drop a frame; threading it keeps the TUI smooth."""
+        mtime = git_index_mtime(actor)
+        shortstat = compute_diff_shortstat(actor)
+        self.call_from_thread(
+            self._evaluate_diff_poll_signals,
+            actor.name, mtime, shortstat,
+        )
+
+    def _evaluate_diff_poll_signals(
+        self,
+        actor_name: str,
+        mtime: float | None,
+        shortstat: tuple[int, int] | None,
+    ) -> None:
+        """Main-thread signal comparison + refresh decision.
+
+        Re-checks polling conditions because the worker may have
+        raced with a tab/actor change since the kick: stale signals
+        from a prior selection must not refresh the diff for a
+        different actor."""
+        actor = self._diff_poll_actor()
+        if actor is None or actor.name != actor_name:
+            return
+        if not self._diff_poll_initialized:
+            # First observation since conditions became true. The
+            # user has just landed on DIFF, so the active build /
+            # cache key is presumably already correct — we don't
+            # refresh, just record the baseline for next time.
+            self._diff_poll_initialized = True
+            self._diff_poll_last_index_mtime = mtime
+            self._diff_poll_last_shortstat = shortstat
+            return
+        changed = (
+            mtime != self._diff_poll_last_index_mtime
+            or shortstat != self._diff_poll_last_shortstat
+        )
+        self._diff_poll_last_index_mtime = mtime
+        self._diff_poll_last_shortstat = shortstat
+        if changed:
+            self._maybe_refresh_diff(force=True)
+
+    def _reset_diff_poll_state(self) -> None:
+        self._diff_poll_initialized = False
+        self._diff_poll_last_index_mtime = None
+        self._diff_poll_last_shortstat = None
 
     def _update_diff_tab_label(self, added: int = 0, removed: int = 0) -> None:
         if added or removed:

@@ -164,6 +164,50 @@ def read_head_oid(actor: Actor) -> str | None:
     return oid or None
 
 
+def git_index_mtime(actor: Actor) -> float | None:
+    """Locate the index file for an actor's worktree and return its
+    mtime as a float, or None if the file isn't there.
+
+    Handles both shapes:
+    - **primary checkout**: ``<wt>/.git`` is a directory; the index
+      lives at ``<wt>/.git/index``.
+    - **`git worktree` checkout** (which is what `actor new` creates
+      for non-primary actors): ``<wt>/.git`` is a small text file
+      with ``gitdir: <path>`` pointing at the per-worktree git dir;
+      the index lives at ``<that-path>/index``.
+
+    Used by the live-refresh poller as a near-zero-cost "did
+    something happen since last tick" signal — beats running
+    `git status` or `git diff` on every poll. Misses unstaged edits
+    (the index only updates on `git add`/`rm`/etc.), so the poller
+    pairs this with a `git diff --shortstat` call to catch worktree
+    changes the index doesn't reflect."""
+    wt = Path(actor.dir)
+    git = wt / ".git"
+    try:
+        if git.is_dir():
+            index = git / "index"
+        elif git.is_file():
+            content = git.read_text(errors="replace")
+            gitdir: Path | None = None
+            for line in content.splitlines():
+                if line.startswith("gitdir: "):
+                    raw = line[len("gitdir: "):].strip()
+                    gd = Path(raw)
+                    if not gd.is_absolute():
+                        gd = (wt / gd).resolve()
+                    gitdir = gd
+                    break
+            if gitdir is None:
+                return None
+            index = gitdir / "index"
+        else:
+            return None
+        return index.stat().st_mtime
+    except (FileNotFoundError, OSError):
+        return None
+
+
 def parse_shortstat(line: str) -> tuple[int, int]:
     """Parse `git diff --shortstat` summary line into (added, removed).
 
