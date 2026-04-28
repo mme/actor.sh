@@ -2418,5 +2418,165 @@ class FlushPendingDiffStaleActorTests(unittest.TestCase):
         self.assertEqual(app._diff_pending_actor, "alice")
 
 
+# -- CR-loop fixes Round 4 ---------------------------------------------------
+
+
+class ApplyDiffErrorRetryEligibilityTests(unittest.TestCase):
+    """`_apply_diff_error` must reset `_diff_loaded_for` to `None`
+    so that re-selecting the same actor in the tree retries the
+    build, instead of short-circuiting at `_maybe_refresh_diff`'s
+    actor-already-loaded check. Without this, the user would be
+    stuck on the error message until they switched actors and back
+    (or waited for a live poll force-refresh to fire)."""
+
+    def test_apply_diff_error_resets_loaded_for(self):
+        app = _bare_app()
+        app._diff_build_token = 7
+        app._diff_loaded_for = "alice"
+        scroll = _scroll_with_width(100)
+        with patch.object(app, "query_one", return_value=scroll), \
+             patch.object(app, "_refresh_tab_arrows"):
+            app._apply_diff_error(token=7, text="Diff error: kaboom")
+        # Loaded-for cleared → next `_maybe_refresh_diff(force=False)`
+        # on alice will pass the early-out and re-kick.
+        self.assertIsNone(app._diff_loaded_for)
+
+    def test_re_select_after_error_re_kicks(self):
+        """End-to-end: after an error, the user re-clicks the same
+        actor in the tree → `_maybe_refresh_diff` does NOT short-
+        circuit and a fresh build kicks."""
+        app = _bare_app()
+        app._diff_build_token = 7
+        scroll = _scroll_with_width(100)
+        with patch.object(app, "query_one", return_value=scroll), \
+             patch.object(app, "_refresh_tab_arrows"):
+            app._apply_diff_error(token=7, text="Diff error: kaboom")
+        # Now simulate re-selection of the same actor.
+        actor = _fake_actor("alice")
+        tree = MagicMock()
+        tree.selected_actor = actor
+        with patch.object(app, "query_one", return_value=tree), \
+             patch.object(app, "_kick_diff_badge") as badge_kick, \
+             patch.object(app, "_kick_diff_build") as build_kick:
+            app._maybe_refresh_diff()
+        # Both paths kicked despite this being the same actor — the
+        # error reset cleared the early-out gate.
+        badge_kick.assert_called_once_with(actor)
+        build_kick.assert_called_once_with(actor, force=False)
+
+
+class PlaceholderSkipsForSameActorTests(unittest.TestCase):
+    """The 300ms `Loading diff...` placeholder should NOT replace
+    fresh content during a live-poll force-refresh of the same
+    actor. Otherwise every 2s the user sees the placeholder flash
+    and clobber the diff that was just rendered. The placeholder
+    fires only when there's no existing content for this actor
+    yet — i.e., the first build for an actor or a switch to a
+    different actor."""
+
+    def test_placeholder_skipped_when_same_actor_has_committed_content(self):
+        app = _bare_app()
+        # Prior build for alice already committed content.
+        app._diff_last_applied_key = ("alice", "oid", 100)
+        # New kick is for the same actor (e.g. live-poll force-refresh).
+        app._diff_build_token = 5
+        app._diff_build_pending = True
+        app._diff_build_target_actor = "alice"
+
+        # Drive the placeholder closure directly.
+        actor = _fake_actor("alice")
+        captured: dict = {}
+        def fake_set_timer(_delay, fn):
+            captured["fn"] = fn
+        with patch.object(app, "query_one", return_value=_scroll_with_width(100)), \
+             patch.object(app, "set_timer", side_effect=fake_set_timer), \
+             patch.object(app, "_build_diff_worker"):
+            # Re-trigger _kick_diff_build to pick up the newly-prepared
+            # state; we just want the closure.
+            app._diff_build_token = 4  # kick will increment to 5
+            app._diff_build_pending = False  # kick will set to True
+            app._diff_build_target_actor = None  # kick will set
+            app._kick_diff_build(actor)
+        self.assertIn("fn", captured)
+
+        # Now invoke the closure with a fresh scroll — verify it
+        # does NOT clear or mount because the same actor already has
+        # content.
+        scroll = MagicMock()
+        scroll.size = MagicMock()
+        scroll.size.width = 100
+        with patch.object(app, "query_one", return_value=scroll):
+            captured["fn"]()
+        scroll.remove_children.assert_not_called()
+        scroll.mount.assert_not_called()
+
+    def test_placeholder_fires_when_no_committed_content(self):
+        """First build for an actor (no prior cache key) → placeholder
+        fires normally. Otherwise users would never see the loading
+        indicator on initial diff renders."""
+        app = _bare_app()
+        # No prior content.
+        app._diff_last_applied_key = None
+        app._diff_build_token = 3
+        app._diff_build_pending = True
+        app._diff_build_target_actor = "alice"
+
+        actor = _fake_actor("alice")
+        captured: dict = {}
+        def fake_set_timer(_delay, fn):
+            captured["fn"] = fn
+        with patch.object(app, "query_one", return_value=_scroll_with_width(100)), \
+             patch.object(app, "set_timer", side_effect=fake_set_timer), \
+             patch.object(app, "_build_diff_worker"):
+            app._diff_build_token = 2  # kick will increment to 3
+            app._diff_build_pending = False
+            app._kick_diff_build(actor)
+        self.assertIn("fn", captured)
+
+        scroll = MagicMock()
+        scroll.size = MagicMock()
+        scroll.size.width = 100
+        with patch.object(app, "query_one", return_value=scroll):
+            captured["fn"]()
+        # Placeholder fired — scroll cleared and "Loading diff..."
+        # static mounted.
+        scroll.remove_children.assert_called_once()
+        scroll.mount.assert_called_once()
+
+    def test_placeholder_fires_for_different_actor(self):
+        """Switching to a new actor whose content we don't have →
+        placeholder still fires (we'd otherwise leave the prior
+        actor's content visible while the new one builds, which
+        is far more confusing than a brief loading indicator)."""
+        app = _bare_app()
+        # Prior build for alice — but the new kick is for bob.
+        app._diff_last_applied_key = ("alice", "oid", 100)
+        app._diff_build_token = 5
+        app._diff_build_pending = True
+        app._diff_build_target_actor = "bob"
+
+        actor = _fake_actor("bob")
+        captured: dict = {}
+        def fake_set_timer(_delay, fn):
+            captured["fn"] = fn
+        with patch.object(app, "query_one", return_value=_scroll_with_width(100)), \
+             patch.object(app, "set_timer", side_effect=fake_set_timer), \
+             patch.object(app, "_build_diff_worker"):
+            app._diff_build_token = 4
+            app._diff_build_pending = False
+            app._diff_build_target_actor = None
+            app._kick_diff_build(actor)
+        self.assertIn("fn", captured)
+
+        scroll = MagicMock()
+        scroll.size = MagicMock()
+        scroll.size.width = 100
+        with patch.object(app, "query_one", return_value=scroll):
+            captured["fn"]()
+        # Placeholder fired — different actor than what's cached.
+        scroll.remove_children.assert_called_once()
+        scroll.mount.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -984,6 +984,20 @@ class ActorWatchApp(App):
             # token; a committed apply clears the pending flag.
             if token != self._diff_build_token or not self._diff_build_pending:
                 return
+            # Skip the placeholder when we already have content for
+            # this actor — wiping fresh content with "Loading diff..."
+            # for a few hundred milliseconds is jarring and recurs
+            # every 2s while the live poll force-refreshes a slow
+            # render. The cache-key actor field tells us whether the
+            # currently mounted scroll content matches the actor of
+            # this kick; if so, leave it alone until the new build
+            # streams or the finalizer commits.
+            last_key = self._diff_last_applied_key
+            if (
+                last_key is not None
+                and last_key[0] == self._diff_build_target_actor
+            ):
+                return
             try:
                 scroll = self.query_one("#diff-scroll", VerticalScroll)
             except Exception:
@@ -1225,6 +1239,14 @@ class ActorWatchApp(App):
         scroll.mount(Static(text, markup=False))
         self._diff_build_pending = False
         self._diff_last_applied_key = None
+        # Reset `_diff_loaded_for` so re-selecting the same actor in
+        # the tree retries the build instead of short-circuiting at
+        # the `_maybe_refresh_diff` actor-already-loaded check. Without
+        # this, the user would be stuck on the error message and have
+        # to switch actors and back (or wait for a live-poll force
+        # refresh) just to retry. With this reset, a simple re-click
+        # in the actor tree fires a fresh build.
+        self._diff_loaded_for = None
         # Same badge-race guard as `_apply_diff_build_done` and
         # `_apply_diff_text`: a badge worker from this same kick
         # (still in flight with shortstat counts) must not later
