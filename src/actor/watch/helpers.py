@@ -106,6 +106,25 @@ class DiffResult:
         self.reason = reason
 
 
+def read_head_oid(actor: Actor) -> str | None:
+    """Cheap `git rev-parse HEAD` on the actor's worktree. Used as
+    part of the diff-view cache key — the diff against merge-base
+    only needs recomputing when HEAD moves (or width changes). Returns
+    None when the worktree isn't a git repo or git fails for any
+    reason; callers should treat that as a cache miss."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, cwd=actor.dir,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    oid = result.stdout.strip()
+    return oid or None
+
+
 def compute_diff(actor: Actor) -> DiffResult:
     """Compute diff for an actor."""
     worktree_dir = actor.dir

@@ -39,7 +39,8 @@ from .omarchy_theme import (
 )
 from .themes import CLAUDE_DARK, CLAUDE_LIGHT
 from .tree import ActorTree
-from .helpers import compute_diff, read_log_entries_since
+from .diff_render import build_diff_renderables
+from .helpers import compute_diff, read_head_oid, read_log_entries_since
 from .log_renderer import (
     append_log_entries,
     apply_log_renderables,
@@ -201,6 +202,23 @@ class ActorWatchApp(App):
     _prev_statuses: dict[str, Status] = {}
     _current_actors: list[Actor] = []
     _diff_loaded_for: str | None = None
+
+    # Two-phase diff build state — mirrors the logs pattern. The kick
+    # path bumps `_diff_build_token` and starts a worker; the worker
+    # checks the token cooperatively and only commits its result when
+    # the token still matches at apply time. `_diff_build_pending`
+    # gates the 300ms placeholder. `_diff_last_applied_key` stores the
+    # `(actor.name, head_oid, content_width)` cache key from the most
+    # recent successful apply — kicks early-out when the request key
+    # matches. `_diff_pending_actor` stashes the actor whose diff was
+    # requested while the DIFF tab was hidden (width 0); the next tab
+    # activation flushes it.
+    _diff_build_token: int = 0
+    _diff_build_pending: bool = False
+    _diff_build_target_actor: str | None = None
+    _diff_build_target_width: int = 0
+    _diff_last_applied_key: tuple | None = None
+    _diff_pending_actor: str | None = None
 
     # Base labels for each tab (without the arrow prefix). Kept separate
     # from the rendered tab.label so we can re-apply the "active +
@@ -532,6 +550,12 @@ class ActorWatchApp(App):
         scroll = self.query_one("#diff-scroll", VerticalScroll)
         scroll.remove_children()
         self._diff_loaded_for = None
+        # Cancel any in-flight diff build by bumping the token; the
+        # worker's apply will see a mismatch and drop its output.
+        self._diff_build_token += 1
+        self._diff_build_pending = False
+        self._diff_last_applied_key = None
+        self._diff_pending_actor = None
         self._update_diff_tab_label()
 
     # -- Logs ----------------------------------------------------------------
@@ -591,6 +615,27 @@ class ActorWatchApp(App):
         if log.size.width != self._last_log_width and self._last_log_entries:
             self._last_log_count = 0
             self._set_logs(self._last_log_actor, self._last_log_entries)
+
+        # Diff: width is part of the cache key, so a real width change
+        # invalidates the last apply. Re-kick for the currently-loaded
+        # actor; the kick's own width-0 guard handles the hidden case.
+        try:
+            scroll = self.query_one("#diff-scroll", VerticalScroll)
+        except Exception:
+            return
+        last_key = self._diff_last_applied_key
+        if last_key is None:
+            return
+        last_actor_name, _last_oid, last_width = last_key
+        if scroll.size.width == last_width:
+            return
+        actor = next(
+            (a for a in self._current_actors if a.name == last_actor_name),
+            None,
+        )
+        if actor is None:
+            return
+        self._kick_diff_build(actor)
 
     def _append_logs(self, actor_name: str, new_entries: list) -> None:
         """Main-thread callback from _refresh_logs worker. The cursor
@@ -803,37 +848,149 @@ class ActorWatchApp(App):
         if not force and self._diff_loaded_for == actor.name:
             return
         self._diff_loaded_for = actor.name
-        self._refresh_diff(actor)
+        self._kick_diff_build(actor)
 
-    @work(thread=True, exclusive=True, group="diff")
-    def _refresh_diff(self, actor: Actor) -> None:
-        from .diff_render import render_edit_diff
+    def _kick_diff_build(self, actor: Actor) -> None:
+        """Start an off-thread diff build with token + 300ms placeholder.
 
-        result = compute_diff(actor)
+        Skips work entirely when `#diff-scroll` has zero width — that
+        means the DIFF tab is hidden (TabbedContent collapses inactive
+        panes). The actor is stashed on `_diff_pending_actor` and
+        replayed by `_flush_pending_diff_if_visible` once the tab is
+        activated.
 
-        if result.files is None:
-            self.call_from_thread(self._set_diff_text, result.reason)
+        Token discipline mirrors the logs path: every kick bumps
+        `_diff_build_token`, every worker captures its own token, and
+        `_apply_diff_build` only commits when the captured token still
+        matches. Stale workers drop their output silently."""
+        try:
+            scroll = self.query_one("#diff-scroll", VerticalScroll)
+        except Exception:
+            return
+        width = scroll.size.width
+        if width == 0:
+            self._diff_pending_actor = actor.name
+            return
+        self._diff_pending_actor = None
+
+        self._diff_build_token += 1
+        self._diff_build_pending = True
+        self._diff_build_target_actor = actor.name
+        self._diff_build_target_width = width
+        token = self._diff_build_token
+
+        def _maybe_show_placeholder() -> None:
+            # Fire only if this build is still the latest one AND
+            # hasn't already applied. Any newer kick-off bumps the
+            # token; a committed apply clears the pending flag.
+            if token != self._diff_build_token or not self._diff_build_pending:
+                return
+            try:
+                scroll = self.query_one("#diff-scroll", VerticalScroll)
+            except Exception:
+                return
+            scroll.remove_children()
+            scroll.mount(Static(Text("Loading diff...", style="dim")))
+
+        self.set_timer(0.3, _maybe_show_placeholder)
+        self._build_diff_worker(token, actor, width)
+
+    @work(thread=True, exclusive=True, group="diff_build")
+    def _build_diff_worker(self, token: int, actor: Actor, width: int) -> None:
+        # Cooperative cancel: when a newer build supersedes this one,
+        # `_diff_build_token` is already the new value on the main
+        # thread. Check at every coarse-grained boundary so we don't
+        # keep burning subprocess + render work on output that will be
+        # discarded anyway.
+        def is_cancelled() -> bool:
+            return self._diff_build_token != token
+
+        if is_cancelled():
             return
 
+        head_oid = read_head_oid(actor)
+        cache_key = (actor.name, head_oid, width)
+        if cache_key == self._diff_last_applied_key:
+            # Nothing relevant changed since the last applied build —
+            # skip the expensive `compute_diff` + render. Hand control
+            # back to the main thread to clear the pending flag.
+            self.call_from_thread(self._mark_diff_build_done, token)
+            return
+
+        if is_cancelled():
+            return
+
+        result = compute_diff(actor)
+        if is_cancelled():
+            return
+
+        if result.files is None:
+            self.call_from_thread(
+                self._apply_diff_text, token, cache_key, result.reason,
+            )
+            return
+
+        is_dark = self.current_theme.dark if self.current_theme else True
         try:
-            is_dark = self.current_theme.dark if self.current_theme else True
-            from rich.console import Group
-            import difflib
-            parts = []
-            total_added = 0
-            total_removed = 0
-            from rich.text import Text as RichText
-            for fd in result.files:
-                parts.append(render_edit_diff(fd.file_path, fd.old_content, fd.new_content, dark=is_dark, style="diff"))
-                parts.append(RichText(""))
-                for line in difflib.unified_diff(fd.old_content.splitlines(), fd.new_content.splitlines(), lineterm=""):
-                    if line.startswith("+") and not line.startswith("+++"):
-                        total_added += 1
-                    elif line.startswith("-") and not line.startswith("---"):
-                        total_removed += 1
-            self.call_from_thread(self._set_diff_widget, Static(Group(*parts)), total_added, total_removed)
+            built = build_diff_renderables(result.files, is_dark, is_cancelled)
         except Exception as e:
-            self.call_from_thread(self._set_diff_text, f"Diff error: {e}")
+            self.call_from_thread(
+                self._apply_diff_text, token, cache_key, f"Diff error: {e}",
+            )
+            return
+        if built is None:
+            # Cancelled mid-build; the newer worker owns the apply.
+            return
+        parts, total_added, total_removed = built
+        self.call_from_thread(
+            self._apply_diff_build,
+            token, cache_key, parts, total_added, total_removed,
+        )
+
+    def _apply_diff_build(
+        self,
+        token: int,
+        cache_key: tuple,
+        parts: list,
+        total_added: int,
+        total_removed: int,
+    ) -> None:
+        if token != self._diff_build_token:
+            return
+        try:
+            scroll = self.query_one("#diff-scroll", VerticalScroll)
+        except Exception:
+            self._diff_build_pending = False
+            return
+        from rich.console import Group
+        scroll.remove_children()
+        scroll.mount(Static(Group(*parts)))
+        self._diff_build_pending = False
+        self._diff_last_applied_key = cache_key
+        self._update_diff_tab_label(total_added, total_removed)
+
+    def _apply_diff_text(
+        self, token: int, cache_key: tuple, text: str,
+    ) -> None:
+        if token != self._diff_build_token:
+            return
+        try:
+            scroll = self.query_one("#diff-scroll", VerticalScroll)
+        except Exception:
+            self._diff_build_pending = False
+            return
+        scroll.remove_children()
+        scroll.mount(Static(text))
+        self._diff_build_pending = False
+        self._diff_last_applied_key = cache_key
+        self._update_diff_tab_label()
+
+    def _mark_diff_build_done(self, token: int) -> None:
+        """Cache-hit early-out path: the worker decided no rebuild was
+        needed. Clear the pending flag so the placeholder doesn't fire
+        and so a subsequent kick can start a new build cleanly."""
+        if token == self._diff_build_token:
+            self._diff_build_pending = False
 
     def _update_diff_tab_label(self, added: int = 0, removed: int = 0) -> None:
         if added or removed:
@@ -884,6 +1041,9 @@ class ActorWatchApp(App):
         # first paint sees real content at the real width instead
         # of a stale/empty cache that then gets corrected.
         self._flush_pending_logs_if_visible()
+        # Same story for DIFF: kicks that happened while the tab was
+        # hidden stash on `_diff_pending_actor`; flush them now.
+        self._flush_pending_diff_if_visible()
 
     def _flush_pending_logs_if_visible(self) -> None:
         """Re-run the logs renderer once LIVE has a non-zero width,
@@ -921,17 +1081,34 @@ class ActorWatchApp(App):
     def on_descendant_blur(self, event) -> None:
         self._refresh_tab_arrows()
 
-    def _set_diff_text(self, text: str) -> None:
-        scroll = self.query_one("#diff-scroll", VerticalScroll)
-        scroll.remove_children()
-        scroll.mount(Static(text))
-        self._update_diff_tab_label()
+    def _flush_pending_diff_if_visible(self) -> None:
+        """Re-kick the stashed diff build once DIFF has a non-zero
+        width, mirroring `_flush_pending_logs_if_visible`. Called from
+        the tab-activated handler.
 
-    def _set_diff_widget(self, dv: object, added: int = 0, removed: int = 0) -> None:
-        scroll = self.query_one("#diff-scroll", VerticalScroll)
-        scroll.remove_children()
-        scroll.mount(dv)
-        self._update_diff_tab_label(added, removed)
+        `_kick_diff_build`'s width-0 guard handles the "still hidden"
+        case (it just re-stashes), and the cache-key comparison in
+        the worker short-circuits the "user toggled tabs but nothing
+        else changed" case so we don't pay for redundant rebuilds."""
+        if self._diff_pending_actor is None:
+            return
+        name = self._diff_pending_actor
+
+        def _attempt() -> None:
+            try:
+                scroll = self.query_one("#diff-scroll", VerticalScroll)
+            except Exception:
+                return
+            if scroll.size.width == 0:
+                return
+            actor = next(
+                (a for a in self._current_actors if a.name == name), None,
+            )
+            if actor is None:
+                return
+            self._kick_diff_build(actor)
+
+        self.call_after_refresh(_attempt)
 
     # -- Runs ----------------------------------------------------------------
 

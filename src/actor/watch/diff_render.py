@@ -6,13 +6,27 @@ import difflib
 import json
 import re
 from pathlib import Path
-from typing import NamedTuple
+from typing import Callable, NamedTuple, TYPE_CHECKING
 
 from pygments.lexers import get_lexer_for_filename, TextLexer
 from pygments.token import Token
 from rich.console import Group
 from rich.table import Table
 from rich.text import Text
+
+if TYPE_CHECKING:
+    from .helpers import FileDiff
+
+
+# Callable returning True when the build should abort. Builders check
+# between files and after each per-file render; the default never
+# cancels, so synchronous callers can ignore this entirely. Mirrors
+# the `CancelCheck` contract used by the logs renderer.
+CancelCheck = Callable[[], bool]
+
+
+def _never_cancelled() -> bool:
+    return False
 
 
 
@@ -374,6 +388,56 @@ def render_write_diff(
 ) -> Group:
     """Render a file write as all-added lines."""
     return render_edit_diff(file_path, "", content, dark=dark)
+
+
+def build_diff_renderables(
+    files: list["FileDiff"],
+    dark: bool,
+    is_cancelled: CancelCheck = _never_cancelled,
+) -> tuple[list, int, int] | None:
+    """Render `files` into a list of Rich renderables plus aggregate
+    add/remove counts. Safe to call from a worker thread — no widget
+    state is touched.
+
+    Returns ``(parts, total_added, total_removed)`` on success, or
+    ``None`` when ``is_cancelled()`` flips True between files or after
+    a per-file render. The caller (worker) takes None as a signal to
+    drop its result and return silently — a newer build is running and
+    will own the apply.
+
+    The duplicate `difflib.unified_diff` for ± counts is intentional
+    Stage-1 carry-over from the original `_refresh_diff`. Stage 2
+    folds the count into the parsed diff to drop this redundant work.
+    """
+    if is_cancelled():
+        return None
+    parts: list = []
+    total_added = 0
+    total_removed = 0
+    for fd in files:
+        if is_cancelled():
+            return None
+        parts.append(
+            render_edit_diff(
+                fd.file_path, fd.old_content, fd.new_content,
+                dark=dark, style="diff",
+            )
+        )
+        parts.append(Text(""))
+        if is_cancelled():
+            return None
+        for line in difflib.unified_diff(
+            fd.old_content.splitlines(),
+            fd.new_content.splitlines(),
+            lineterm="",
+        ):
+            if line.startswith("+") and not line.startswith("+++"):
+                total_added += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                total_removed += 1
+    if is_cancelled():
+        return None
+    return parts, total_added, total_removed
 
 
 def try_render_tool_diff(name: str, input_json: str, dark: bool = True) -> Group | None:
