@@ -621,6 +621,22 @@ class ActorWatchApp(App):
         # time the next worker takes the lock it sees the advanced
         # cursor and skips already-read bytes.
         with self._log_lock:
+            # Detect session_id change for this actor name. Happens when
+            # the user discards-and-recreates an actor with the same
+            # name: the cached entries belong to the prior incarnation's
+            # JSONL file, the cursor is a byte offset into that file,
+            # and neither has anything to say about the new session.
+            # Without this reset, `_append_logs` would extend the new
+            # actor's entries onto the old actor's bucket and the user
+            # sees a concatenated transcript across both lifetimes.
+            last_session = self._log_session_for_actor.get(actor.name)
+            if last_session != actor.agent_session:
+                self._log_session_for_actor[actor.name] = actor.agent_session
+                self._log_entries_by_actor.pop(actor.name, None)
+                self._log_cursors.pop(actor.name, None)
+                # Defer clearing _last_log_* to the main thread via
+                # _append_logs (which runs there); the worker doesn't
+                # touch widget state.
             cursor = self._log_cursors.get(actor.name)
             new_entries, next_cursor = read_log_entries_since(actor, cursor)
             if next_cursor is not None:
@@ -634,6 +650,11 @@ class ActorWatchApp(App):
     # back. Entries survive for the TUI session lifetime.
     _log_entries_by_actor: dict[str, list] = {}
     _log_cursors: dict[str, object] = {}
+    # Tracks the session_id last seen for each actor name so a new
+    # session under the same name (after discard + recreate) is
+    # detected and the stale entries/cursor are dropped before the
+    # new file's bytes are parsed onto the previous transcript.
+    _log_session_for_actor: dict[str, str] = {}
     _log_lock = threading.Lock()
 
     _last_log_actor: str | None = None
