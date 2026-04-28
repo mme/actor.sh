@@ -208,6 +208,33 @@ def git_index_mtime(actor: Actor) -> float | None:
         return None
 
 
+def git_untracked_count(actor: Actor) -> int | None:
+    """Count untracked, non-ignored files in the actor's worktree.
+
+    Used by the live-refresh poller as a third change signal beside
+    `git_index_mtime` and `compute_diff_shortstat`. The first two
+    miss new untracked files entirely — index mtime only flips on
+    `git add`/etc., and `git diff --shortstat` against the merge base
+    doesn't include `--others`. An actor that creates a new file via
+    `Write` (the most common output shape) needs this signal to
+    trigger a live refresh; otherwise the diff stays stale until a
+    tracked file is also touched.
+
+    Returns the number of untracked, non-ignored entries, or ``None``
+    on git failure (the caller should treat None as "no signal yet"
+    so the next tick can baseline cleanly)."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True, cwd=actor.dir,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    return sum(1 for line in result.stdout.splitlines() if line)
+
+
 def parse_shortstat(line: str) -> tuple[int, int]:
     """Parse `git diff --shortstat` summary line into (added, removed).
 
@@ -279,18 +306,25 @@ def compute_diff_shortstat(actor: Actor) -> tuple[int, int] | None:
 def _parse_diff_files(diff_output: str) -> list[dict]:
     """Parse `git diff --no-color` output into per-file metadata.
 
-    Returns a list of dicts with: ``path``, ``added``, ``removed``,
-    ``is_new``, ``is_deleted``, ``is_binary``. The walk is a flat
-    state machine — no regex on every line — so it stays cheap on
-    large diffs. Multiple hunks per file aggregate into the same
-    counts. Lines like ``\\ No newline at end of file`` are skipped.
+    Returns a list of dicts with: ``path``, ``old_path``, ``added``,
+    ``removed``, ``is_new``, ``is_deleted``, ``is_binary``. The walk
+    is a flat state machine — no regex on every line — so it stays
+    cheap on large diffs. Multiple hunks per file aggregate into the
+    same counts. Lines like ``\\ No newline at end of file`` are
+    skipped.
 
     The file path comes from the ``+++ b/<path>`` line when present
     (authoritative for adds and modifies), falling back to
     ``--- a/<path>`` for deletes (where the +++ side is /dev/null).
-    The ``diff --git a/X b/Y`` header is intentionally not parsed
-    for the path because it's ambiguous when paths contain spaces
-    — git only quotes it for special chars."""
+    For renames, the ``rename from`` / ``rename to`` headers populate
+    ``old_path`` and ``path`` separately so callers can read the
+    pre-image at the *old* name from the merge base — a query at the
+    new name would miss because the rename hasn't happened in that
+    tree. The ``diff --git a/X b/Y`` header is intentionally not
+    parsed for the path because it's ambiguous when paths contain
+    spaces — git only quotes it for special chars (and we pass
+    ``-c core.quotepath=false`` to compute_diff to avoid quoted forms
+    on non-ASCII paths)."""
     files: list[dict] = []
     cur: dict | None = None
     in_hunk = False
@@ -301,6 +335,7 @@ def _parse_diff_files(diff_output: str) -> list[dict]:
                 files.append(cur)
             cur = {
                 "path": None,
+                "old_path": None,
                 "added": 0,
                 "removed": 0,
                 "is_new": False,
@@ -310,6 +345,14 @@ def _parse_diff_files(diff_output: str) -> list[dict]:
             in_hunk = False
             continue
         if cur is None:
+            continue
+        if line.startswith("rename from "):
+            cur["old_path"] = line[len("rename from "):]
+            in_hunk = False
+            continue
+        if line.startswith("rename to "):
+            cur["path"] = line[len("rename to "):]
+            in_hunk = False
             continue
         if line.startswith("--- "):
             rest = line[4:]
@@ -332,7 +375,10 @@ def _parse_diff_files(diff_output: str) -> list[dict]:
                 cur["is_deleted"] = True
             else:
                 slash = rest.find("/")
-                if slash >= 0:
+                if slash >= 0 and cur["path"] is None:
+                    # Only set from `+++ b/...` if not already set —
+                    # `rename to` takes precedence and runs before
+                    # `+++` in git's output ordering, so we honor it.
                     cur["path"] = rest[slash + 1:]
             in_hunk = False
             continue
@@ -374,15 +420,18 @@ def _git_cat_file_batch(refs: list[str], cwd: str) -> dict[str, str]:
     if not refs:
         return {}
     try:
-        proc = subprocess.Popen(
+        # `with` ensures the subprocess and its three pipes get
+        # cleaned up even when `communicate()` raises mid-call. Plain
+        # try/except would leak the child + FDs in that path.
+        with subprocess.Popen(
             ["git", "cat-file", "--batch"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=cwd,
-        )
-        stdin_data = ("\n".join(refs) + "\n").encode("utf-8")
-        stdout, _stderr = proc.communicate(stdin_data)
+        ) as proc:
+            stdin_data = ("\n".join(refs) + "\n").encode("utf-8")
+            stdout, _stderr = proc.communicate(stdin_data)
     except Exception:
         return {ref: "" for ref in refs}
 
@@ -467,8 +516,13 @@ def compute_diff(actor: Actor) -> DiffResult:
         # `--src-prefix`/`--dst-prefix` overrides the user's
         # `diff.mnemonicPrefix` so the parser sees the standard
         # `a/`/`b/` prefixes regardless of local git config.
+        # `core.quotepath=false` keeps non-ASCII paths verbatim
+        # (utf-8) instead of git's default octal-escaped quoted form,
+        # which would otherwise corrupt the parser's slash-strip and
+        # break disk reads of those paths.
         diff_proc = subprocess.run(
-            ["git", "diff", "--no-color",
+            ["git", "-c", "core.quotepath=false",
+             "diff", "--no-color",
              "--src-prefix=a/", "--dst-prefix=b/",
              diff_ref],
             capture_output=True, text=True, cwd=worktree_dir,
@@ -478,9 +532,11 @@ def compute_diff(actor: Actor) -> DiffResult:
             if diff_proc.returncode == 0 else []
         )
 
-        # 3. Untracked files.
+        # 3. Untracked files. Same `core.quotepath=false` pin so
+        # non-ASCII filenames come back unquoted.
         untracked_proc = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard"],
+            ["git", "-c", "core.quotepath=false",
+             "ls-files", "--others", "--exclude-standard"],
             capture_output=True, text=True, cwd=worktree_dir,
         )
         untracked_paths = (
@@ -492,12 +548,15 @@ def compute_diff(actor: Actor) -> DiffResult:
             return DiffResult(reason="working tree clean")
 
         # 4. Batch-read old contents for every tracked, non-binary,
-        # non-new file in a single cat-file invocation.
+        # non-new file in a single cat-file invocation. Renames look
+        # up the OLD path (the file's name at the merge base), since
+        # querying the new name in that tree would miss.
         refs_needed: list[str] = []
         for f in tracked:
             if f["path"] is None or f["is_new"] or f["is_binary"]:
                 continue
-            refs_needed.append(f"{diff_ref}:{f['path']}")
+            old_path = f.get("old_path") or f["path"]
+            refs_needed.append(f"{diff_ref}:{old_path}")
         old_contents = (
             _git_cat_file_batch(refs_needed, worktree_dir)
             if refs_needed else {}
@@ -512,7 +571,11 @@ def compute_diff(actor: Actor) -> DiffResult:
                 # text-oriented view; skip rather than mount blank
                 # rows.
                 continue
-            old = "" if f["is_new"] else old_contents.get(f"{diff_ref}:{path}", "")
+            if f["is_new"]:
+                old = ""
+            else:
+                old_path = f.get("old_path") or path
+                old = old_contents.get(f"{diff_ref}:{old_path}", "")
             if f["is_deleted"]:
                 new = ""
             else:

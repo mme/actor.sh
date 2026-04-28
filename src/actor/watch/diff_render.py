@@ -76,17 +76,27 @@ def _tokenize(s: str) -> list[str]:
     return re.findall(r'\S+|\s+', s)
 
 
-def _word_diff(old: str, new: str) -> tuple[list[tuple[str, bool]], list[tuple[str, bool]]]:
-    """Compute word-level diff. Returns (old_tokens, new_tokens) with changed flag."""
+def _word_diff(
+    old: str, new: str,
+) -> tuple[list[tuple[str, bool]], list[tuple[str, bool]]] | None:
+    """Compute word-level diff. Returns ``(old_tokens, new_tokens)``
+    with per-token changed flags, or ``None`` when the lines are too
+    dissimilar to make per-word highlighting useful (>40% of tokens
+    changed). Callers should treat None as "skip the word-diff path
+    and render this line with the standard line-bg + syntax
+    highlighting"."""
     old_tokens = _tokenize(old)
     new_tokens = _tokenize(new)
 
     sm = difflib.SequenceMatcher(None, old_tokens, new_tokens)
 
-    # If more than 40% changed, don't do word highlighting
+    # If more than 40% changed, don't do word highlighting — the
+    # whole line ends up smeared with `*_word_bg` which is louder
+    # than the standard line-bg and obscures rather than highlights
+    # the actual change. The caller falls back to the no-pair path.
     ratio = sm.ratio()
     if ratio < 0.6:
-        return [(old, True)], [(new, True)]
+        return None
 
     old_result: list[tuple[str, bool]] = []
     new_result: list[tuple[str, bool]] = []
@@ -231,10 +241,7 @@ def render_edit_diff(
             if match:
                 old_num = int(match.group(1))
                 new_num = int(match.group(2))
-                if entries:
-                    entries.append({"type": "hunk", "header": line})
-                else:
-                    entries.append({"type": "hunk", "header": line})
+                entries.append({"type": "hunk", "header": line})
             continue
         if line.startswith('---') or line.startswith('+++'):
             continue
@@ -258,12 +265,21 @@ def render_edit_diff(
     max_num = max((e.get("num", 0) for e in entries if e["type"] != "ellipsis"), default=0)
     num_width = len(str(max_num))
 
-    # Compute word-diff ranges for adjacent del+add pairs
+    # Compute word-diff ranges for adjacent del+add pairs. Lines
+    # too dissimilar (>40% changed) get a None back — those entries
+    # never enter `word_diffs`, so the per-line render below falls
+    # through to the standard syntax-highlighted line-bg path
+    # instead of smearing the whole line with `*_word_bg`.
     markers = [e.get("marker", "") for e in entries]
     pairs = _find_adjacent_pairs(markers)
     word_diffs: dict[int, list[tuple[str, bool]]] = {}
     for del_idx, add_idx in pairs:
-        old_tokens, new_tokens = _word_diff(entries[del_idx]["code"], entries[add_idx]["code"])
+        result = _word_diff(
+            entries[del_idx]["code"], entries[add_idx]["code"],
+        )
+        if result is None:
+            continue
+        old_tokens, new_tokens = result
         word_diffs[del_idx] = old_tokens
         word_diffs[add_idx] = new_tokens
 

@@ -56,8 +56,10 @@ def _bare_app() -> ActorWatchApp:
     app._diff_badge_token = 0
     app._diff_badge_target_actor = None
     app._diff_poll_initialized = False
+    app._diff_poll_last_actor = None
     app._diff_poll_last_index_mtime = None
     app._diff_poll_last_shortstat = None
+    app._diff_poll_last_untracked = None
     app._prev_statuses = {}
     app._current_actors = []
     app._tab_base_labels = {
@@ -186,10 +188,14 @@ class KickDiffBuildHiddenTabTests(unittest.TestCase):
         self.assertEqual(app._diff_build_target_width, 100)
         worker.assert_called_once()
         args, _kwargs = worker.call_args
-        token, called_actor, called_width = args
+        # Stage-5 fix: kick passes `force` through to the worker so
+        # live-poll-driven force-refreshes bypass the cache-key
+        # short-circuit. Default kick is force=False.
+        token, called_actor, called_width, force = args
         self.assertEqual(token, 1)
         self.assertIs(called_actor, actor)
         self.assertEqual(called_width, 100)
+        self.assertFalse(force)
 
     def test_flush_pending_diff_kicks_when_pane_visible(self):
         """After a hidden-tab kick stashes an actor, the next tab
@@ -887,7 +893,9 @@ class BadgeBeforeBuildTests(unittest.TestCase):
              patch.object(app, "_kick_diff_build") as build_kick:
             app._maybe_refresh_diff()
         badge_kick.assert_called_once_with(actor)
-        build_kick.assert_called_once_with(actor)
+        # `force` is propagated to the build kick so live-poll-driven
+        # refreshes bypass the cache-key short-circuit.
+        build_kick.assert_called_once_with(actor, force=False)
 
     def test_badge_apply_can_land_before_build_apply(self):
         """Their tokens are independent counters, so a fast badge
@@ -1234,9 +1242,13 @@ class StreamingWorkerEndToEndTests(unittest.TestCase):
                           )):
             ActorWatchApp._build_diff_worker.__wrapped__(app, 1, actor, 100)
         names = [n for n, _a in applied]
-        self.assertEqual(names, ["_apply_diff_text"])
+        # Render error path now routes through `_apply_diff_error`
+        # (which doesn't promote the cache key) instead of
+        # `_apply_diff_text` (which did, leaving the user stuck on
+        # the error mount until HEAD or width changed).
+        self.assertEqual(names, ["_apply_diff_error"])
         # Reason string includes the exception message.
-        self.assertIn("kaboom", applied[0][1][2])
+        self.assertIn("kaboom", applied[0][1][1])
 
 
 class ClearDetailCancelsStreamingTests(unittest.TestCase):
@@ -1502,24 +1514,28 @@ class EvaluateDiffPollSignalsTests(unittest.TestCase):
             app, "query_one", side_effect=self._running_actor(app, actor),
         ), patch.object(app, "_maybe_refresh_diff") as refresh:
             app._evaluate_diff_poll_signals(
-                "alice", mtime=10.0, shortstat=(3, 1),
+                "alice", mtime=10.0, shortstat=(3, 1), untracked=2,
             )
         refresh.assert_not_called()
         self.assertTrue(app._diff_poll_initialized)
+        self.assertEqual(app._diff_poll_last_actor, "alice")
         self.assertEqual(app._diff_poll_last_index_mtime, 10.0)
         self.assertEqual(app._diff_poll_last_shortstat, (3, 1))
+        self.assertEqual(app._diff_poll_last_untracked, 2)
 
     def test_unchanged_signals_no_refresh(self):
         app = _bare_app()
         actor = _fake_actor("alice")
         app._diff_poll_initialized = True
+        app._diff_poll_last_actor = "alice"
         app._diff_poll_last_index_mtime = 10.0
         app._diff_poll_last_shortstat = (3, 1)
+        app._diff_poll_last_untracked = 0
         with patch.object(
             app, "query_one", side_effect=self._running_actor(app, actor),
         ), patch.object(app, "_maybe_refresh_diff") as refresh:
             app._evaluate_diff_poll_signals(
-                "alice", mtime=10.0, shortstat=(3, 1),
+                "alice", mtime=10.0, shortstat=(3, 1), untracked=0,
             )
         refresh.assert_not_called()
 
@@ -1527,13 +1543,15 @@ class EvaluateDiffPollSignalsTests(unittest.TestCase):
         app = _bare_app()
         actor = _fake_actor("alice")
         app._diff_poll_initialized = True
+        app._diff_poll_last_actor = "alice"
         app._diff_poll_last_index_mtime = 10.0
         app._diff_poll_last_shortstat = (3, 1)
+        app._diff_poll_last_untracked = 0
         with patch.object(
             app, "query_one", side_effect=self._running_actor(app, actor),
         ), patch.object(app, "_maybe_refresh_diff") as refresh:
             app._evaluate_diff_poll_signals(
-                "alice", mtime=20.0, shortstat=(3, 1),
+                "alice", mtime=20.0, shortstat=(3, 1), untracked=0,
             )
         refresh.assert_called_once_with(force=True)
         # Baseline advanced.
@@ -1545,16 +1563,39 @@ class EvaluateDiffPollSignalsTests(unittest.TestCase):
         app = _bare_app()
         actor = _fake_actor("alice")
         app._diff_poll_initialized = True
+        app._diff_poll_last_actor = "alice"
         app._diff_poll_last_index_mtime = 10.0
         app._diff_poll_last_shortstat = (3, 1)
+        app._diff_poll_last_untracked = 0
         with patch.object(
             app, "query_one", side_effect=self._running_actor(app, actor),
         ), patch.object(app, "_maybe_refresh_diff") as refresh:
             app._evaluate_diff_poll_signals(
-                "alice", mtime=10.0, shortstat=(5, 2),
+                "alice", mtime=10.0, shortstat=(5, 2), untracked=0,
             )
         refresh.assert_called_once_with(force=True)
         self.assertEqual(app._diff_poll_last_shortstat, (5, 2))
+
+    def test_untracked_count_change_triggers_refresh(self):
+        """Stage-5 third signal: a new untracked file (the most
+        common output shape from an actor's `Write` tool) doesn't
+        flip mtime or shortstat, so without `untracked` the live
+        refresh would never fire on file creation."""
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._diff_poll_initialized = True
+        app._diff_poll_last_actor = "alice"
+        app._diff_poll_last_index_mtime = 10.0
+        app._diff_poll_last_shortstat = (3, 1)
+        app._diff_poll_last_untracked = 0
+        with patch.object(
+            app, "query_one", side_effect=self._running_actor(app, actor),
+        ), patch.object(app, "_maybe_refresh_diff") as refresh:
+            app._evaluate_diff_poll_signals(
+                "alice", mtime=10.0, shortstat=(3, 1), untracked=1,
+            )
+        refresh.assert_called_once_with(force=True)
+        self.assertEqual(app._diff_poll_last_untracked, 1)
 
     def test_actor_changed_mid_poll_drops_signals(self):
         """Signals captured for `alice` mustn't refresh `bob`'s
@@ -1573,13 +1614,45 @@ class EvaluateDiffPollSignalsTests(unittest.TestCase):
             # ...but the worker is reporting signals captured for
             # `alice` before the tab switch.
             app._evaluate_diff_poll_signals(
-                "alice", mtime=99.0, shortstat=(7, 7),
+                "alice", mtime=99.0, shortstat=(7, 7), untracked=5,
             )
         refresh.assert_not_called()
         # State must NOT advance to `alice`'s captured signals —
         # those would corrupt `bob`'s baseline.
         self.assertFalse(app._diff_poll_initialized)
         self.assertIsNone(app._diff_poll_last_index_mtime)
+
+    def test_actor_switch_re_baselines_without_refresh(self):
+        """When the selected actor changes between polls, the next
+        evaluation must re-baseline rather than compare bob's
+        signals against alice's stale baseline (which would always
+        diverge and fire a redundant force-refresh on top of the
+        actor-switch kick `on_tree_node_highlighted` already
+        triggered)."""
+        app = _bare_app()
+        bob = _fake_actor("bob")
+        app._prev_statuses = {"bob": Status.RUNNING}
+        # Baseline was for alice, but the user has switched to bob.
+        app._diff_poll_initialized = True
+        app._diff_poll_last_actor = "alice"
+        app._diff_poll_last_index_mtime = 10.0
+        app._diff_poll_last_shortstat = (3, 1)
+        app._diff_poll_last_untracked = 0
+        with patch.object(
+            app, "query_one",
+            side_effect=_stub_diff_poll_dom(
+                app, selected_actor=bob, active_tab="diff",
+            ),
+        ), patch.object(app, "_maybe_refresh_diff") as refresh:
+            app._evaluate_diff_poll_signals(
+                "bob", mtime=99.0, shortstat=(7, 7), untracked=5,
+            )
+        # No refresh — bob's first observation is a baseline.
+        refresh.assert_not_called()
+        self.assertEqual(app._diff_poll_last_actor, "bob")
+        self.assertEqual(app._diff_poll_last_index_mtime, 99.0)
+        self.assertEqual(app._diff_poll_last_shortstat, (7, 7))
+        self.assertEqual(app._diff_poll_last_untracked, 5)
 
     def test_drops_signals_when_conditions_no_longer_hold(self):
         """User switched to LIVE mid-poll; signals stale on arrival."""
@@ -1593,7 +1666,7 @@ class EvaluateDiffPollSignalsTests(unittest.TestCase):
             ),
         ), patch.object(app, "_maybe_refresh_diff") as refresh:
             app._evaluate_diff_poll_signals(
-                "alice", mtime=10.0, shortstat=(3, 1),
+                "alice", mtime=10.0, shortstat=(3, 1), untracked=0,
             )
         refresh.assert_not_called()
 
@@ -1616,7 +1689,7 @@ class DiffPollResetCleanlyTests(unittest.TestCase):
             ),
         ), patch.object(app, "_maybe_refresh_diff") as refresh:
             app._evaluate_diff_poll_signals(
-                "alice", mtime=10.0, shortstat=(3, 1),
+                "alice", mtime=10.0, shortstat=(3, 1), untracked=0,
             )
         refresh.assert_not_called()
         self.assertTrue(app._diff_poll_initialized)
@@ -1643,11 +1716,330 @@ class DiffPollResetCleanlyTests(unittest.TestCase):
             ),
         ), patch.object(app, "_maybe_refresh_diff") as refresh:
             app._evaluate_diff_poll_signals(
-                "alice", mtime=99.0, shortstat=(99, 99),
+                "alice", mtime=99.0, shortstat=(99, 99), untracked=99,
             )
         refresh.assert_not_called()
         self.assertTrue(app._diff_poll_initialized)
         self.assertEqual(app._diff_poll_last_index_mtime, 99.0)
+
+
+# -- CR-loop fixes: regression tests ---------------------------------------
+
+
+class StreamCancelInvalidatesCacheTests(unittest.TestCase):
+    """When a streaming build is cancelled mid-flight after at least
+    one file mounted, partial content remains on screen but the
+    cache key cannot stay promoted from the *previous* successful
+    build — otherwise a subsequent kick at the same key would
+    cache-hit and leave the user staring at the partial state
+    forever (e.g. resize away then back to a previously-cached width
+    while a re-render was in flight)."""
+
+    def test_cancel_after_first_append_invalidates_cache_key(self):
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        # Cache holds a key from a *different* prior build (different
+        # head_oid). The worker's cache check shouldn't early-out;
+        # we want the worker to actually start streaming so we can
+        # observe the mid-stream cancellation path.
+        app._diff_last_applied_key = ("alice", "different-oid", 100)
+        app._diff_build_token = 5
+        app._diff_streamed_token = -1
+
+        result = MagicMock()
+        result.files = [
+            FileDiff(f"f{i}.py", f"old{i}\n", f"new{i}\n", added=1, removed=1)
+            for i in range(3)
+        ]
+        result.reason = ""
+
+        applied: list[tuple] = []
+
+        def cft(fn, *a, **kw):
+            applied.append((fn.__name__, a))
+            # `_diff_append_file` would set `_diff_streamed_token` on
+            # the main thread; emulate that here so
+            # `_on_stream_cancelled` sees streamed_token == token.
+            if fn.__name__ == "_diff_append_file":
+                app._diff_streamed_token = a[0]
+            # After the first append lands, simulate a newer kick.
+            if len([x for x in applied if x[0] == "_diff_append_file"]) == 1:
+                app._diff_build_token = 6
+
+        with _stub_theme(), \
+             patch("actor.watch.app.read_head_oid", return_value="oid"), \
+             patch("actor.watch.app.compute_diff", return_value=result), \
+             patch.object(app, "call_from_thread", side_effect=cft):
+            ActorWatchApp._build_diff_worker.__wrapped__(
+                app, 5, actor, 100, False,
+            )
+
+        # Worker bailed via _on_stream_cancelled, which scheduled
+        # _invalidate_diff_cache_key on the main thread.
+        names = [n for n, _a in applied]
+        self.assertIn("_invalidate_diff_cache_key", names)
+        # And finalizer did NOT run (no cache-key promotion of the
+        # cancelled build).
+        self.assertNotIn("_apply_diff_build_done", names)
+
+
+class ForceRefreshBypassesCacheTests(unittest.TestCase):
+    """Live poll fires `_maybe_refresh_diff(force=True)` precisely
+    BECAUSE the worktree changed even though HEAD didn't move. The
+    cache key is keyed on (actor, head_oid, width), so without a
+    bypass the worker would always cache-hit and the live refresh
+    would never repaint."""
+
+    def test_force_true_skips_cache_hit_short_circuit(self):
+        app = _bare_app()
+        # Cache is populated with the exact key the worker will
+        # compute next.
+        app._diff_last_applied_key = ("alice", "oid", 100)
+        actor = _fake_actor("alice")
+        app._diff_build_token = 11
+
+        result = MagicMock()
+        result.files = None
+        result.reason = "working tree clean"
+        applied: list[tuple] = []
+        with _stub_theme(), \
+             patch("actor.watch.app.read_head_oid", return_value="oid"), \
+             patch("actor.watch.app.compute_diff", return_value=result) as compute, \
+             patch.object(app, "call_from_thread",
+                          side_effect=lambda fn, *a, **kw: applied.append(
+                              (fn.__name__, a),
+                          )):
+            ActorWatchApp._build_diff_worker.__wrapped__(
+                app, 11, actor, 100, True,  # force=True
+            )
+        # compute_diff RAN despite the cache key matching.
+        compute.assert_called_once()
+        # And _apply_diff_text was called (no files reason path),
+        # NOT _mark_diff_build_done (cache hit early-out).
+        names = [n for n, _a in applied]
+        self.assertEqual(names, ["_apply_diff_text"])
+
+    def test_force_false_keeps_cache_hit_short_circuit(self):
+        """Sanity: non-force kicks still cache-hit when the key
+        matches. Otherwise the cache layer is dead weight."""
+        app = _bare_app()
+        app._diff_last_applied_key = ("alice", "oid", 100)
+        actor = _fake_actor("alice")
+        app._diff_build_token = 11
+
+        applied: list[str] = []
+        with _stub_theme(), \
+             patch("actor.watch.app.read_head_oid", return_value="oid"), \
+             patch("actor.watch.app.compute_diff") as compute, \
+             patch.object(app, "call_from_thread",
+                          side_effect=lambda fn, *a, **kw: applied.append(
+                              fn.__name__,
+                          )):
+            ActorWatchApp._build_diff_worker.__wrapped__(
+                app, 11, actor, 100, False,  # force=False
+            )
+        compute.assert_not_called()
+        self.assertEqual(applied, ["_mark_diff_build_done"])
+
+
+class ApplyDiffErrorTests(unittest.TestCase):
+    """Render-error path is split out from `_apply_diff_text` so
+    error states don't poison the cache and lock the user out of
+    retries until HEAD or width changes."""
+
+    def test_error_clears_pending_and_invalidates_cache_key(self):
+        app = _bare_app()
+        app._diff_build_token = 7
+        app._diff_build_pending = True
+        # A previous successful build cached a key.
+        app._diff_last_applied_key = ("alice", "oid", 100)
+        scroll = _scroll_with_width(100)
+        with patch.object(app, "query_one", return_value=scroll), \
+             patch.object(app, "_refresh_tab_arrows"):
+            app._apply_diff_error(token=7, text="Diff error: kaboom")
+        scroll.remove_children.assert_called_once()
+        scroll.mount.assert_called_once()
+        self.assertFalse(app._diff_build_pending)
+        # Cache key dropped — next non-force kick at the same key
+        # rebuilds rather than hitting the stale cache.
+        self.assertIsNone(app._diff_last_applied_key)
+
+    def test_error_uses_markup_false_static(self):
+        """Exception messages can contain `[red]`-like substrings
+        that Rich's default markup parser would interpret. Mounting
+        with `markup=False` keeps the text literal."""
+        from textual.widgets import Static
+        app = _bare_app()
+        app._diff_build_token = 1
+        scroll = MagicMock()
+        scroll.size = MagicMock()
+        scroll.size.width = 100
+        with patch.object(app, "query_one", return_value=scroll), \
+             patch.object(app, "_refresh_tab_arrows"):
+            app._apply_diff_error(token=1, text="error: [red]boom[/red]")
+        widget = scroll.mount.call_args.args[0]
+        self.assertIsInstance(widget, Static)
+        # Textual's Static stores the markup flag as `_render_markup`.
+        self.assertFalse(widget._render_markup)
+
+
+class ParseDiffFilesRenameTests(unittest.TestCase):
+    """Renames need the OLD path to look up the pre-image at the
+    merge base — querying the new path in that tree would miss
+    because the rename hadn't happened yet, causing the diff to
+    render as if the entire file was newly added."""
+
+    def test_rename_with_modifications_captures_old_path(self):
+        diff = (
+            "diff --git a/old.py b/new.py\n"
+            "similarity index 87%\n"
+            "rename from old.py\n"
+            "rename to new.py\n"
+            "index abc..def 100644\n"
+            "--- a/old.py\n"
+            "+++ b/new.py\n"
+            "@@ -1,3 +1,3 @@\n"
+            " ctx\n"
+            "-removed\n"
+            "+added\n"
+        )
+        files = _parse_diff_files(diff)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]["path"], "new.py")
+        self.assertEqual(files[0]["old_path"], "old.py")
+        self.assertEqual(files[0]["added"], 1)
+        self.assertEqual(files[0]["removed"], 1)
+
+    def test_pure_rename_no_content_change_still_captures_paths(self):
+        diff = (
+            "diff --git a/old.py b/new.py\n"
+            "similarity index 100%\n"
+            "rename from old.py\n"
+            "rename to new.py\n"
+        )
+        files = _parse_diff_files(diff)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]["path"], "new.py")
+        self.assertEqual(files[0]["old_path"], "old.py")
+
+    def test_compute_diff_uses_old_path_for_rename_lookup(self):
+        """End-to-end: a renamed file's pre-image is read from the
+        merge base via its OLD name. Without the fix, cat-file
+        would query `<base>:new.py` (missing) and the diff would
+        render as a wholly-new file."""
+        if shutil.which("git") is None:
+            self.skipTest("git not available")
+        tmp = tempfile.mkdtemp(prefix="actor-rename-")
+        try:
+            _git("init", "-q", "-b", "main", tmp, cwd=tmp)
+            # 10-line file so a 1-line modification leaves >90%
+            # similarity — well above git's default rename detection
+            # threshold (50%).
+            seed = "\n".join(f"line {i}" for i in range(10)) + "\n"
+            Path(tmp, "old.py").write_text(seed)
+            _git("add", "-A", cwd=tmp)
+            _git("commit", "-q", "-m", "seed", cwd=tmp)
+            _git("mv", "old.py", "new.py", cwd=tmp)
+            # Modify just one line so git's rename detection still
+            # pairs the files together via similarity heuristic.
+            modified = seed.replace("line 5\n", "LINE FIVE\n")
+            Path(tmp, "new.py").write_text(modified)
+            actor = _fake_actor_for_repo(tmp)
+            result = compute_diff(actor)
+            self.assertIsNotNone(result.files)
+            self.assertEqual(len(result.files), 1)
+            fd = result.files[0]
+            self.assertEqual(fd.file_path, "new.py")
+            # Pre-image is the OLD content — captured via the rename
+            # header. Without the fix this would have been "".
+            self.assertEqual(fd.old_content, seed)
+            self.assertEqual(fd.new_content, modified)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class ParseDiffFilesQuotedPathTests(unittest.TestCase):
+    """`compute_diff` pins `core.quotepath=false` so the parser sees
+    raw utf-8 paths instead of git's default octal-escaped quoted
+    form. Verify the diff command includes the flag."""
+
+    def test_compute_diff_passes_core_quotepath_false(self):
+        if shutil.which("git") is None:
+            self.skipTest("git not available")
+        tmp = _build_repo(n_files=1)
+        try:
+            actor = _fake_actor_for_repo(tmp)
+            counter = _SubprocessCounter()
+            with patch("actor.watch.helpers.subprocess", counter):
+                compute_diff(actor)
+            diff_calls = [
+                c for c in counter.calls
+                if c[:1] == ["git"] and "diff" in c
+            ]
+            # The diff invocation includes `-c core.quotepath=false`.
+            self.assertTrue(
+                any(
+                    c[1:3] == ["-c", "core.quotepath=false"]
+                    and "diff" in c
+                    for c in diff_calls
+                ),
+                f"expected -c core.quotepath=false in diff invocation; "
+                f"got {diff_calls!r}",
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class WordDiffLowSimilarityTests(unittest.TestCase):
+    """When two paired lines are too dissimilar (>40% changed),
+    the word-diff path produces a uniform `*_word_bg` smear instead
+    of useful highlighting. Returning None tells the caller to fall
+    through to the standard syntax-highlighted line-bg path."""
+
+    def test_returns_none_on_low_similarity(self):
+        from actor.watch.diff_render import _word_diff
+        # Two completely different lines — ratio = 0.
+        result = _word_diff(
+            "this is the old line", "totally different content here",
+        )
+        self.assertIsNone(result)
+
+    def test_returns_tokens_on_high_similarity(self):
+        from actor.watch.diff_render import _word_diff
+        # Single-token change in a 5-token line — ratio ~0.8.
+        result = _word_diff(
+            "first second third fourth fifth",
+            "first second THIRD fourth fifth",
+        )
+        self.assertIsNotNone(result)
+        old_tokens, new_tokens = result
+        # Tokenization splits on whitespace runs. Verify per-token
+        # changed flags exist.
+        self.assertTrue(any(changed for _t, changed in old_tokens))
+        self.assertTrue(any(changed for _t, changed in new_tokens))
+
+
+class GitCatFileBatchCleanupTests(unittest.TestCase):
+    """The `with subprocess.Popen(...)` context manager guarantees
+    pipe + child cleanup even if `communicate()` raises mid-call.
+    The previous bare try/except leaked the child + three pipes."""
+
+    def test_communicate_exception_does_not_leak(self):
+        from actor.watch.helpers import _git_cat_file_batch
+        # Construct a Popen mock whose communicate raises and whose
+        # __exit__ records the cleanup.
+        proc_mock = MagicMock()
+        proc_mock.communicate.side_effect = OSError("boom")
+        cm_mock = MagicMock()
+        cm_mock.__enter__ = MagicMock(return_value=proc_mock)
+        cm_mock.__exit__ = MagicMock(return_value=False)
+        with patch("actor.watch.helpers.subprocess.Popen", return_value=cm_mock):
+            result = _git_cat_file_batch(["abc:foo"], "/tmp")
+        # All requested refs map to "" on failure.
+        self.assertEqual(result, {"abc:foo": ""})
+        # The context manager's __exit__ ran, ensuring cleanup of
+        # the child process and its pipes.
+        cm_mock.__exit__.assert_called_once()
 
 
 if __name__ == "__main__":
