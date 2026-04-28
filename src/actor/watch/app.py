@@ -1029,9 +1029,24 @@ class ActorWatchApp(App):
             return
 
         if result.files is None:
-            self.call_from_thread(
-                self._apply_diff_text, token, cache_key, result.reason,
-            )
+            # `compute_diff` reports two flavors of file-less result:
+            # benign reasons ("working tree clean", "no repository")
+            # which CACHE — repeat kicks at the same key correctly
+            # early-out — and "error" which signals a transient
+            # internal failure that must NOT be cached, otherwise
+            # the user is stuck on the error state until HEAD or
+            # width changes. Route the error reason through
+            # `_apply_diff_error` (cache-invalidating) and benign
+            # reasons through `_apply_diff_text` (cache-promoting).
+            if result.reason == "error":
+                self.call_from_thread(
+                    self._apply_diff_error, token,
+                    "Diff error: compute failed",
+                )
+            else:
+                self.call_from_thread(
+                    self._apply_diff_text, token, cache_key, result.reason,
+                )
             return
 
         # Stream files into `#diff-scroll` one PrerenderedDiff widget
@@ -1146,11 +1161,18 @@ class ActorWatchApp(App):
         label totals, drop the pending flag. Idempotent against
         per-file appends — only the cache key + label promotion need
         to ride this finalizer; the scroll is already populated by
-        the streaming `_diff_append_file` calls."""
+        the streaming `_diff_append_file` calls.
+
+        Bumps `_diff_badge_token` so any in-flight badge worker
+        from the same kick can no longer apply: the build's count
+        includes untracked files (which shortstat misses), so a
+        late-arriving badge would otherwise revise our authoritative
+        number downward and visually flicker."""
         if token != self._diff_build_token:
             return
         self._diff_build_pending = False
         self._diff_last_applied_key = cache_key
+        self._diff_badge_token += 1
         self._update_diff_tab_label(total_added, total_removed)
 
     def _apply_diff_text(
@@ -1175,6 +1197,10 @@ class ActorWatchApp(App):
         scroll.mount(Static(text, markup=False))
         self._diff_build_pending = False
         self._diff_last_applied_key = cache_key
+        # Same badge-race guard as `_apply_diff_build_done`: an
+        # in-flight badge from this kick must not later overwrite
+        # the no-changes / no-repo label we just committed.
+        self._diff_badge_token += 1
         self._update_diff_tab_label()
 
     def _apply_diff_error(self, token: int, text: str) -> None:
@@ -1232,8 +1258,16 @@ class ActorWatchApp(App):
 
     def _diff_poll_actor(self) -> Actor | None:
         """The actor whose diff is eligible for live polling, or
-        None if any of (selection, RUNNING status, DIFF tab active)
-        doesn't hold."""
+        None if any of (selection, RUNNING/INTERACTIVE status,
+        DIFF tab active) doesn't hold.
+
+        `Status.INTERACTIVE` is a display-only overlay applied to
+        actors with a live interactive session — under the hood
+        they're typically still RUNNING, and the user is driving
+        them by hand which can absolutely modify the worktree.
+        Excluding INTERACTIVE here would silently disable live
+        diff refresh for one of the most common use cases (a user
+        running an agent interactively while watching its edits)."""
         try:
             tree = self.query_one(ActorTree)
         except Exception:
@@ -1241,7 +1275,8 @@ class ActorWatchApp(App):
         actor = tree.selected_actor
         if actor is None:
             return None
-        if self._prev_statuses.get(actor.name) != Status.RUNNING:
+        status = self._prev_statuses.get(actor.name)
+        if status not in (Status.RUNNING, Status.INTERACTIVE):
             return None
         try:
             tabs = self.query_one("#tabs", TabbedContent)

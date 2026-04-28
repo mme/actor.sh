@@ -2042,5 +2042,273 @@ class GitCatFileBatchCleanupTests(unittest.TestCase):
         cm_mock.__exit__.assert_called_once()
 
 
+# -- CR-loop fixes Round 2 ---------------------------------------------------
+
+
+class InteractivePollEligibilityTests(unittest.TestCase):
+    """`Status.INTERACTIVE` is a display-only overlay applied to
+    actors with a live interactive session; under the hood they're
+    typically also RUNNING. Excluding them from live-poll eligibility
+    silently disables the live diff refresh for one of the most common
+    use cases — a user driving an agent interactively and watching its
+    edits land. Both states must qualify."""
+
+    def test_interactive_status_is_eligible_for_polling(self):
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._prev_statuses = {"alice": Status.INTERACTIVE}
+        with patch.object(
+            app, "query_one",
+            side_effect=_stub_diff_poll_dom(
+                app, selected_actor=actor, active_tab="diff",
+            ),
+        ):
+            self.assertIs(app._diff_poll_actor(), actor)
+
+    def test_done_status_is_not_eligible(self):
+        """Sanity: only RUNNING and INTERACTIVE qualify; idle/done
+        actors don't get auto-refresh (their worktree shouldn't be
+        changing)."""
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._prev_statuses = {"alice": Status.DONE}
+        with patch.object(
+            app, "query_one",
+            side_effect=_stub_diff_poll_dom(
+                app, selected_actor=actor, active_tab="diff",
+            ),
+        ):
+            self.assertIsNone(app._diff_poll_actor())
+
+
+class ComputeDiffErrorRoutingTests(unittest.TestCase):
+    """`compute_diff` returns `DiffResult(reason="error")` on
+    catch-all failures. That path must NOT cache the result —
+    otherwise a transient git failure poisons the cache and locks
+    the user out of retries until HEAD or width changes. The worker
+    routes "error" reasons through `_apply_diff_error` (which
+    invalidates the cache key); benign reasons still go through
+    `_apply_diff_text` (which caches)."""
+
+    def test_error_reason_routes_to_apply_diff_error(self):
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._diff_build_token = 3
+
+        result = MagicMock()
+        result.files = None
+        result.reason = "error"
+
+        applied: list[tuple] = []
+        with patch("actor.watch.app.read_head_oid", return_value="oid"), \
+             patch("actor.watch.app.compute_diff", return_value=result), \
+             patch.object(app, "call_from_thread",
+                          side_effect=lambda fn, *a, **kw: applied.append(
+                              (fn.__name__, a),
+                          )):
+            ActorWatchApp._build_diff_worker.__wrapped__(
+                app, 3, actor, 100, False,
+            )
+        names = [n for n, _a in applied]
+        self.assertEqual(names, ["_apply_diff_error"])
+
+    def test_benign_reason_still_routes_to_apply_diff_text(self):
+        """Sanity: non-error reasons (e.g. "working tree clean",
+        "no repository") still cache via `_apply_diff_text`."""
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._diff_build_token = 3
+
+        result = MagicMock()
+        result.files = None
+        result.reason = "working tree clean"
+
+        applied: list[tuple] = []
+        with patch("actor.watch.app.read_head_oid", return_value="oid"), \
+             patch("actor.watch.app.compute_diff", return_value=result), \
+             patch.object(app, "call_from_thread",
+                          side_effect=lambda fn, *a, **kw: applied.append(
+                              (fn.__name__, a),
+                          )):
+            ActorWatchApp._build_diff_worker.__wrapped__(
+                app, 3, actor, 100, False,
+            )
+        names = [n for n, _a in applied]
+        self.assertEqual(names, ["_apply_diff_text"])
+
+
+class PureRenameStillVisibleTests(unittest.TestCase):
+    """A rename with similarity=100% has identical content on both
+    sides. The previous `if old != new: append` filter dropped these
+    silently, leading the diff view to display "working tree clean"
+    when the user can plainly see in `git status` that something
+    changed. Renames must still surface as a FileDiff entry."""
+
+    def test_pure_rename_appears_in_compute_diff(self):
+        if shutil.which("git") is None:
+            self.skipTest("git not available")
+        tmp = tempfile.mkdtemp(prefix="actor-rename-pure-")
+        try:
+            _git("init", "-q", "-b", "main", tmp, cwd=tmp)
+            seed = "\n".join(f"line {i}" for i in range(10)) + "\n"
+            Path(tmp, "old.py").write_text(seed)
+            _git("add", "-A", cwd=tmp)
+            _git("commit", "-q", "-m", "seed", cwd=tmp)
+            # Pure rename — git mv with no content modification.
+            _git("mv", "old.py", "new.py", cwd=tmp)
+            actor = _fake_actor_for_repo(tmp)
+            result = compute_diff(actor)
+            self.assertIsNotNone(
+                result.files,
+                f"pure rename should surface in the diff (reason={result.reason!r})",
+            )
+            self.assertEqual(len(result.files), 1)
+            fd = result.files[0]
+            self.assertEqual(fd.file_path, "new.py")
+            # Content matches on both sides for a pure rename.
+            self.assertEqual(fd.old_content, fd.new_content)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class BuildInvalidatesBadgeTokenTests(unittest.TestCase):
+    """The build's count is authoritative (it includes untracked
+    files; shortstat doesn't). When a build commits its label, any
+    in-flight badge worker from the same kick must be invalidated
+    so it can't later overwrite with a smaller, less-correct count."""
+
+    def test_apply_diff_build_done_bumps_badge_token(self):
+        app = _bare_app()
+        app._diff_build_token = 5
+        app._diff_badge_token = 5
+        with patch.object(app, "_refresh_tab_arrows"):
+            app._apply_diff_build_done(
+                token=5,
+                cache_key=("alice", "oid", 100),
+                total_added=10,
+                total_removed=2,
+            )
+        # Badge token bumped past 5 → any in-flight badge worker
+        # whose `_apply_diff_badge(token=5, ...)` arrives later
+        # will see a token mismatch and skip.
+        self.assertGreater(app._diff_badge_token, 5)
+
+    def test_apply_diff_text_bumps_badge_token(self):
+        """Same guard for the cacheable text-mount path: an
+        in-flight badge worker shouldn't overwrite a 'working tree
+        clean' label with a shortstat-derived count."""
+        app = _bare_app()
+        app._diff_build_token = 5
+        app._diff_badge_token = 5
+        scroll = _scroll_with_width(100)
+        with patch.object(app, "query_one", return_value=scroll), \
+             patch.object(app, "_refresh_tab_arrows"):
+            app._apply_diff_text(
+                token=5,
+                cache_key=("alice", "oid", 100),
+                text="working tree clean",
+            )
+        self.assertGreater(app._diff_badge_token, 5)
+
+    def test_late_badge_drops_after_build_apply(self):
+        """End-to-end: build commits first, then a late-arriving
+        badge for the same kick is rejected by the token check
+        rather than clobbering the build's label."""
+        app = _bare_app()
+        app._diff_build_token = 5
+        app._diff_badge_token = 5
+
+        # Build applies first with authoritative count.
+        with patch.object(app, "_refresh_tab_arrows"):
+            app._apply_diff_build_done(
+                token=5,
+                cache_key=("alice", "oid", 100),
+                total_added=12,
+                total_removed=3,
+            )
+        # The label is a Rich Text using the green +N / red -N pill
+        # style (a Stage-3 follow-up); the displayed numbers come
+        # from `total_added` / `total_removed`.
+        label_after_build = str(app._tab_base_labels["diff"])
+        self.assertIn("+12", label_after_build)
+        self.assertIn("-3", label_after_build)
+
+        # Late badge from the same kick (token=5) tries to apply
+        # with shortstat-only count (e.g. missing untracked).
+        # It must be dropped — its token is now stale because the
+        # build apply bumped `_diff_badge_token`.
+        with patch.object(app, "_refresh_tab_arrows"):
+            app._apply_diff_badge(token=5, added=8, removed=3)
+        # Label still reflects the build's authoritative count,
+        # not the badge's smaller one.
+        label_after_badge = str(app._tab_base_labels["diff"])
+        self.assertIn("+12", label_after_badge)
+        self.assertNotIn("+8", label_after_badge)
+
+
+class GitLocaleEnvTests(unittest.TestCase):
+    """`compute_diff` and `compute_diff_shortstat` parse stderr
+    looking for "fatal: not a git repository". Under non-English
+    locales (`LC_MESSAGES=de_DE.UTF-8`, etc.) git emits translated
+    messages and the substring check fails. Pinning `LC_ALL=C` on
+    every git invocation that we read stderr from keeps the
+    detection robust."""
+
+    def test_compute_diff_passes_lc_all_c(self):
+        if shutil.which("git") is None:
+            self.skipTest("git not available")
+        tmp = _build_repo(n_files=1)
+        try:
+            actor = _fake_actor_for_repo(tmp)
+            captured_envs: list = []
+            real_run = subprocess.run
+
+            def capture(args, *a, **kw):
+                captured_envs.append(kw.get("env"))
+                return real_run(args, *a, **kw)
+
+            with patch("actor.watch.helpers.subprocess.run",
+                       side_effect=capture):
+                compute_diff(actor)
+            # At least one git call carried `LC_ALL=C`.
+            self.assertTrue(
+                any(
+                    env is not None and env.get("LC_ALL") == "C"
+                    for env in captured_envs
+                ),
+                f"expected at least one git call with LC_ALL=C; "
+                f"got envs {[e and e.get('LC_ALL') for e in captured_envs]!r}",
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_compute_diff_shortstat_passes_lc_all_c(self):
+        if shutil.which("git") is None:
+            self.skipTest("git not available")
+        tmp = _build_repo(n_files=1)
+        try:
+            actor = _fake_actor_for_repo(tmp)
+            captured_envs: list = []
+            real_run = subprocess.run
+
+            def capture(args, *a, **kw):
+                captured_envs.append(kw.get("env"))
+                return real_run(args, *a, **kw)
+
+            with patch("actor.watch.helpers.subprocess.run",
+                       side_effect=capture):
+                compute_diff_shortstat(actor)
+            self.assertTrue(
+                all(
+                    env is not None and env.get("LC_ALL") == "C"
+                    for env in captured_envs
+                ),
+                f"every shortstat git call should carry LC_ALL=C; "
+                f"got envs {[e and e.get('LC_ALL') for e in captured_envs]!r}",
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

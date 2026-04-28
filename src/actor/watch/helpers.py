@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 from ..types import Actor, Status
+
+
+# Pinning `LC_ALL=C` (and `LC_MESSAGES=C` as a defensive duplicate)
+# guarantees git emits English error messages on stderr regardless
+# of the user's locale. We parse those messages to detect the
+# "fatal: not a git repository" case, so a non-English locale would
+# otherwise silently skip the early-out and produce a confusing
+# fallthrough. Applied to every git invocation in this module that
+# cares about stderr semantics; harmless on the rest.
+_GIT_ENV = {**os.environ, "LC_ALL": "C", "LC_MESSAGES": "C"}
 
 # -- Status icons -----------------------------------------------------------
 
@@ -281,6 +292,7 @@ def compute_diff_shortstat(actor: Actor) -> tuple[int, int] | None:
         mb = subprocess.run(
             ["git", "merge-base", base_branch, "HEAD"],
             capture_output=True, text=True, cwd=actor.dir,
+            env=_GIT_ENV,
         )
     except Exception:
         return None
@@ -295,6 +307,7 @@ def compute_diff_shortstat(actor: Actor) -> tuple[int, int] | None:
         ss = subprocess.run(
             ["git", "diff", "--shortstat", diff_ref],
             capture_output=True, text=True, cwd=actor.dir,
+            env=_GIT_ENV,
         )
     except Exception:
         return None
@@ -503,6 +516,7 @@ def compute_diff(actor: Actor) -> DiffResult:
         mb = subprocess.run(
             ["git", "merge-base", base_branch, "HEAD"],
             capture_output=True, text=True, cwd=worktree_dir,
+            env=_GIT_ENV,
         )
         if mb.returncode != 0:
             stderr = (mb.stderr or "").lower()
@@ -583,7 +597,15 @@ def compute_diff(actor: Actor) -> DiffResult:
                     new = (wt / path).read_text(errors="replace")
                 except (FileNotFoundError, OSError):
                     new = ""
-            if old != new:
+            # A pure rename (similarity=100%, no content change) has
+            # `old == new` but the file moved — we still want it in
+            # the diff view, otherwise a rename-only worktree would
+            # display "working tree clean" and contradict reality.
+            # Identical content with no rename signal is the only
+            # case we filter out.
+            old_path = f.get("old_path")
+            is_rename = old_path is not None and old_path != path
+            if old != new or is_rename:
                 file_diffs.append(FileDiff(
                     file_path=path,
                     old_content=old,
