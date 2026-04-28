@@ -390,45 +390,68 @@ def render_write_diff(
     return render_edit_diff(file_path, "", content, dark=dark)
 
 
+def iter_diff_renderables(
+    files: list["FileDiff"],
+    dark: bool,
+    is_cancelled: CancelCheck = _never_cancelled,
+):
+    """Generator that yields ``(file_path, renderable, added, removed)``
+    per file, suitable for streaming mounts onto the DIFF pane.
+
+    The watch app's build worker iterates this generator and calls
+    ``call_from_thread(_diff_append_file, ...)`` for each yielded
+    tuple, so a 50-file diff appears progressively rather than after
+    one giant final mount. Stays safe to call from a worker thread —
+    no widget state is touched here.
+
+    Cancellation: ``is_cancelled()`` is checked BEFORE rendering each
+    file and AFTER rendering but BEFORE yielding. On cancel, the
+    generator returns silently — the consumer should check
+    ``is_cancelled()`` after the loop to distinguish "drained
+    naturally" from "stopped mid-stream", and skip the
+    finalize/commit step in the latter case.
+
+    Per-file ± counts come straight from `FileDiff.added` /
+    `FileDiff.removed`, which `compute_diff` populates by parsing
+    `git diff` output (Stage 2)."""
+    for fd in files:
+        if is_cancelled():
+            return
+        renderable = render_edit_diff(
+            fd.file_path, fd.old_content, fd.new_content,
+            dark=dark, style="diff",
+        )
+        if is_cancelled():
+            return
+        yield fd.file_path, renderable, fd.added, fd.removed
+
+
 def build_diff_renderables(
     files: list["FileDiff"],
     dark: bool,
     is_cancelled: CancelCheck = _never_cancelled,
 ) -> tuple[list, int, int] | None:
-    """Render `files` into a list of Rich renderables plus aggregate
-    add/remove counts. Safe to call from a worker thread — no widget
-    state is touched.
+    """Synchronous full-build wrapper around `iter_diff_renderables`.
 
-    Returns ``(parts, total_added, total_removed)`` on success, or
-    ``None`` when ``is_cancelled()`` flips True between files or after
-    a per-file render. The caller (worker) takes None as a signal to
-    drop its result and return silently — a newer build is running and
-    will own the apply.
+    Returns ``(parts, total_added, total_removed)`` on success or
+    ``None`` when cancellation aborted the iteration. Each rendered
+    file gets a trailing blank Text separator inside ``parts`` to
+    match the previous mount layout for callers that still want a
+    single `Group(*parts)` mount (e.g. tests, ad-hoc tools).
 
-    Per-file ± counts come straight from ``FileDiff.added /
-    FileDiff.removed``, which are populated by `compute_diff` from
-    parsed `git diff` output. Stage 1 ran a duplicate
-    `difflib.unified_diff` here just for the counts; Stage 2 wires the
-    counts through the FileDiff so this loop only renders."""
-    if is_cancelled():
-        return None
+    The watch app's build worker bypasses this wrapper and consumes
+    the iterator directly so it can mount per-file as renders complete
+    — see `_build_diff_worker` in `actor.watch.app`."""
     parts: list = []
     total_added = 0
     total_removed = 0
-    for fd in files:
-        if is_cancelled():
-            return None
-        parts.append(
-            render_edit_diff(
-                fd.file_path, fd.old_content, fd.new_content,
-                dark=dark, style="diff",
-            )
-        )
+    for _path, renderable, added, removed in iter_diff_renderables(
+        files, dark, is_cancelled,
+    ):
+        parts.append(renderable)
         parts.append(Text(""))
-        total_added += fd.added
-        total_removed += fd.removed
-        if is_cancelled():
-            return None
+        total_added += added
+        total_removed += removed
     if is_cancelled():
         return None
     return parts, total_added, total_removed

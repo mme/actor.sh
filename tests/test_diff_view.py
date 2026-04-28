@@ -16,8 +16,11 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
+
+from rich.text import Text
 
 from actor.watch.app import ActorWatchApp
 from actor.watch.diff_render import build_diff_renderables
@@ -71,6 +74,22 @@ def _scroll_with_width(width: int) -> MagicMock:
     scroll.size = MagicMock()
     scroll.size.width = width
     return scroll
+
+
+@contextmanager
+def _stub_theme(dark: bool = True):
+    """Patch `ActorWatchApp.current_theme` so worker tests can read
+    `is_dark` without paying for the full Textual app setup. The
+    reactive descriptor on the App class needs PropertyMock to override
+    cleanly — direct attribute assignment goes through Reactive.__set__
+    which complains about the missing app context."""
+    theme = MagicMock()
+    theme.dark = dark
+    with patch.object(
+        ActorWatchApp, "current_theme",
+        new_callable=PropertyMock, return_value=theme,
+    ):
+        yield
 
 
 # -- build_diff_renderables --------------------------------------------------
@@ -198,48 +217,57 @@ class KickDiffBuildHiddenTabTests(unittest.TestCase):
 
 class ApplyDiffBuildTokenDiscardTests(unittest.TestCase):
     """Stale builds (whose token has been superseded) must drop their
-    output silently. Same discipline as the logs apply path."""
+    output silently. Same discipline as the logs apply path. Stage 4
+    splits the old single-call apply into per-file streaming
+    (`_diff_append_file`) plus a finalizer (`_apply_diff_build_done`);
+    stale-token discipline applies to both."""
 
-    def test_apply_diff_build_drops_when_token_stale(self):
+    def test_diff_append_file_drops_when_token_stale(self):
         app = _bare_app()
         app._diff_build_token = 5  # main thread bumped past
-        app._diff_build_pending = True
         scroll = _scroll_with_width(100)
         with patch.object(app, "query_one", return_value=scroll):
-            app._apply_diff_build(
+            app._diff_append_file(
+                token=3,  # stale
+                file_path="x.py",
+                renderable=Text("hi"),
+            )
+        scroll.remove_children.assert_not_called()
+        scroll.mount.assert_not_called()
+        # Streamed-token sentinel stays put; the next live append for
+        # the current token will still trigger a clear.
+        self.assertEqual(app._diff_streamed_token, -1)
+
+    def test_apply_diff_build_done_drops_when_token_stale(self):
+        app = _bare_app()
+        app._diff_build_token = 5
+        app._diff_build_pending = True
+        with patch.object(app, "_update_diff_tab_label") as upd:
+            app._apply_diff_build_done(
                 token=3,  # stale
                 cache_key=("alice", "deadbeef", 100),
-                parts=[],
                 total_added=10,
                 total_removed=2,
             )
-        # The stale apply touched neither the widget nor the cache.
-        scroll.remove_children.assert_not_called()
-        scroll.mount.assert_not_called()
+        upd.assert_not_called()
         self.assertIsNone(app._diff_last_applied_key)
         # Pending flag is owned by the latest in-flight build; stale
-        # apply must not clear it.
+        # finalizer must not clear it.
         self.assertTrue(app._diff_build_pending)
 
-    def test_apply_diff_build_commits_when_token_matches(self):
+    def test_apply_diff_build_done_commits_when_token_matches(self):
         app = _bare_app()
         app._diff_build_token = 7
         app._diff_build_pending = True
-        scroll = _scroll_with_width(100)
-        with patch.object(app, "query_one", return_value=scroll), \
-             patch.object(app, "_refresh_tab_arrows"):
-            app._apply_diff_build(
+        with patch.object(app, "_refresh_tab_arrows"):
+            app._apply_diff_build_done(
                 token=7,
                 cache_key=("alice", "deadbeef", 100),
-                parts=[],
                 total_added=3,
                 total_removed=4,
             )
-        scroll.remove_children.assert_called_once()
-        scroll.mount.assert_called_once()
         self.assertEqual(app._diff_last_applied_key, ("alice", "deadbeef", 100))
         self.assertFalse(app._diff_build_pending)
-        # Tab label reflects the totals.
         self.assertIn("±7", app._tab_base_labels["diff"])
 
     def test_apply_diff_text_drops_when_token_stale(self):
@@ -852,7 +880,8 @@ class BadgeBeforeBuildTests(unittest.TestCase):
     def test_badge_apply_can_land_before_build_apply(self):
         """Their tokens are independent counters, so a fast badge
         worker committing first doesn't bump the build token. The
-        build's later apply still has its token intact and lands."""
+        build's later finalizer still has its token intact and
+        lands."""
         app = _bare_app()
         # Both paths kicked together.
         app._diff_badge_token = 1
@@ -867,16 +896,14 @@ class BadgeBeforeBuildTests(unittest.TestCase):
         self.assertEqual(app._diff_build_token, 1)
         self.assertTrue(app._diff_build_pending)
 
-        # Build commits later with its own counts. Last write wins;
-        # the build's number is authoritative (e.g. it includes
-        # untracked files that shortstat misses).
-        scroll = _scroll_with_width(100)
-        with patch.object(app, "query_one", return_value=scroll), \
-             patch.object(app, "_refresh_tab_arrows"):
-            app._apply_diff_build(
+        # Build's per-file streams complete and the finalizer
+        # commits with its own (authoritative) counts. Last write
+        # wins; the build's number includes untracked files that
+        # shortstat misses.
+        with patch.object(app, "_refresh_tab_arrows"):
+            app._apply_diff_build_done(
                 token=1,
                 cache_key=("alice", "deadbeef", 100),
-                parts=[],
                 total_added=14,  # diverges from badge's 12 (untracked)
                 total_removed=3,
             )
@@ -936,6 +963,311 @@ class BadgeWorkerCancellationTests(unittest.TestCase):
                 app, 1, actor,
             )
         cft.assert_not_called()
+
+
+# -- Stage 4: per-file streaming render -------------------------------------
+
+
+class IterDiffRenderablesTests(unittest.TestCase):
+    """The streaming generator yields one tuple per file as the
+    worker renders ahead. The watch app's `_build_diff_worker` calls
+    `call_from_thread(_diff_append_file, ...)` for each yielded tuple
+    so files appear progressively rather than after one giant final
+    mount."""
+
+    def test_yields_one_tuple_per_file_in_order(self):
+        from actor.watch.diff_render import iter_diff_renderables
+        files = [
+            FileDiff("a.py", "x = 1\n", "x = 2\n", added=1, removed=1),
+            FileDiff("b.py", "", "hi\n", added=1, removed=0),
+            FileDiff("c.py", "old\n", "", added=0, removed=1),
+        ]
+        results = list(iter_diff_renderables(files, dark=True))
+        self.assertEqual(len(results), 3)
+        # Streaming order matches input order — that's what the
+        # consumer relies on for mount-order correctness.
+        self.assertEqual([r[0] for r in results], ["a.py", "b.py", "c.py"])
+        # Counts ride straight off FileDiff (Stage 2 plumbing); the
+        # generator doesn't recompute them.
+        self.assertEqual([(r[2], r[3]) for r in results],
+                         [(1, 1), (1, 0), (0, 1)])
+
+    def test_cancel_stops_iteration_before_next_file(self):
+        from actor.watch.diff_render import iter_diff_renderables
+        files = [
+            FileDiff("a.py", "1\n", "2\n", added=1, removed=1),
+            FileDiff("b.py", "1\n", "2\n", added=1, removed=1),
+            FileDiff("c.py", "1\n", "2\n", added=1, removed=1),
+        ]
+        # Cancel after first yield by flipping the flag from the
+        # consumer side. The generator's pre-render check kicks in
+        # on the next iteration and stops cleanly.
+        cancelled = {"flag": False}
+        results: list = []
+        for tup in iter_diff_renderables(
+            files, dark=True, is_cancelled=lambda: cancelled["flag"],
+        ):
+            results.append(tup)
+            cancelled["flag"] = True  # cancel after the first yield
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][0], "a.py")
+
+
+class DiffAppendFileTests(unittest.TestCase):
+    """First append for a fresh kick clears the scroll (placeholder
+    + any prior content); subsequent appends just mount. Stale
+    tokens skip everything."""
+
+    def test_first_append_clears_scroll_then_mounts(self):
+        app = _bare_app()
+        app._diff_build_token = 4
+        scroll = _scroll_with_width(100)
+        with patch.object(app, "query_one", return_value=scroll):
+            app._diff_append_file(
+                token=4, file_path="a.py", renderable=Text("rendered a"),
+            )
+        scroll.remove_children.assert_called_once()
+        scroll.mount.assert_called_once()
+        self.assertEqual(app._diff_streamed_token, 4)
+        # Pending must be flipped off — real content is on screen
+        # so the 300ms placeholder timer must NOT fire.
+        self.assertFalse(app._diff_build_pending)
+
+    def test_subsequent_appends_skip_clear(self):
+        app = _bare_app()
+        app._diff_build_token = 4
+        app._diff_streamed_token = 4  # first append already happened
+        scroll = _scroll_with_width(100)
+        with patch.object(app, "query_one", return_value=scroll):
+            app._diff_append_file(
+                token=4, file_path="b.py", renderable=Text("b"),
+            )
+        scroll.remove_children.assert_not_called()
+        scroll.mount.assert_called_once()
+
+    def test_stream_order_preserved_across_appends(self):
+        """Mount calls land in the order the worker invoked them —
+        which mirrors the iter_diff_renderables yield order, which
+        mirrors compute_diff's file order."""
+        app = _bare_app()
+        app._diff_build_token = 1
+        scroll = _scroll_with_width(100)
+        mount_args: list[object] = []
+        scroll.mount.side_effect = lambda widget: mount_args.append(widget)
+
+        def fresh_renderable(label: str) -> Text:
+            return Text(label)
+
+        with patch.object(app, "query_one", return_value=scroll):
+            app._diff_append_file(1, "a.py", fresh_renderable("A"))
+            app._diff_append_file(1, "b.py", fresh_renderable("B"))
+            app._diff_append_file(1, "c.py", fresh_renderable("C"))
+
+        self.assertEqual(len(mount_args), 3)
+        # Each mount holds a Static wrapping a Group(renderable, Text("")).
+        # The label letter sits inside the Group's first child.
+        for widget, expected in zip(mount_args, ["A", "B", "C"]):
+            # widget is Static; Static.content is the Group; the first
+            # element of the Group is our supplied Text.
+            inner = widget.content
+            self.assertEqual(inner.renderables[0].plain, expected)
+        # First call also cleared the scroll once; subsequent two did
+        # not.
+        scroll.remove_children.assert_called_once()
+
+
+class StreamingWorkerEndToEndTests(unittest.TestCase):
+    """Drive `_build_diff_worker` directly with a small file set;
+    verify per-file `_diff_append_file` calls happen in order, the
+    finalizer runs once, and a stale token mid-stream stops the
+    finalizer from committing."""
+
+    def _make_files(self, n: int) -> list[FileDiff]:
+        return [
+            FileDiff(
+                f"f{i}.py", f"old{i}\n", f"new{i}\n",
+                added=1, removed=1,
+            )
+            for i in range(n)
+        ]
+
+    def test_worker_streams_then_finalizes(self):
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._diff_build_token = 5
+
+        result = MagicMock()
+        result.files = self._make_files(3)
+        result.reason = ""
+
+        applied: list[tuple] = []
+        # Capture call_from_thread invocations to verify ordering.
+        with _stub_theme(), \
+             patch("actor.watch.app.read_head_oid", return_value="oid"), \
+             patch("actor.watch.app.compute_diff", return_value=result), \
+             patch.object(app, "call_from_thread",
+                          side_effect=lambda fn, *a, **kw: applied.append(
+                              (fn.__name__, a),
+                          )):
+            ActorWatchApp._build_diff_worker.__wrapped__(app, 5, actor, 100)
+
+        # Three append calls in order, then exactly one finalizer.
+        names = [n for n, _a in applied]
+        self.assertEqual(
+            names,
+            ["_diff_append_file", "_diff_append_file",
+             "_diff_append_file", "_apply_diff_build_done"],
+            f"unexpected call sequence: {names!r}",
+        )
+        # The append calls landed in input file order.
+        append_paths = [a[1] for n, a in applied if n == "_diff_append_file"]
+        self.assertEqual(append_paths, ["f0.py", "f1.py", "f2.py"])
+        # Finalizer received the aggregated counts (Stage 2 plumbing).
+        finalizer_args = applied[-1][1]
+        # (token, cache_key, total_added, total_removed)
+        self.assertEqual(finalizer_args[0], 5)
+        self.assertEqual(finalizer_args[1], ("alice", "oid", 100))
+        self.assertEqual(finalizer_args[2], 3)
+        self.assertEqual(finalizer_args[3], 3)
+
+    def test_cancel_mid_stream_skips_finalizer(self):
+        """Token bumped after the second file's append → worker bails
+        before the finalizer. Partial mounts already on screen stay
+        until the next kick's first append clears them. The cache key
+        must NOT be promoted."""
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._diff_build_token = 5
+
+        result = MagicMock()
+        result.files = self._make_files(5)
+        result.reason = ""
+
+        applied: list[tuple] = []
+
+        def cft(fn, *a, **kw):
+            applied.append((fn.__name__, a))
+            # After the second append lands, simulate a newer kick
+            # by bumping the token. The worker's post-loop
+            # `is_cancelled()` check then sees the mismatch and
+            # returns before finalizing.
+            if len([x for x in applied if x[0] == "_diff_append_file"]) == 2:
+                app._diff_build_token = 6
+
+        with _stub_theme(), \
+             patch("actor.watch.app.read_head_oid", return_value="oid"), \
+             patch("actor.watch.app.compute_diff", return_value=result), \
+             patch.object(app, "call_from_thread", side_effect=cft):
+            ActorWatchApp._build_diff_worker.__wrapped__(app, 5, actor, 100)
+
+        names = [n for n, _a in applied]
+        # Two appends made it through before cancellation; the
+        # generator's pre-render check on iteration 3 saw the bumped
+        # token and stopped. No finalizer.
+        self.assertEqual(names, ["_diff_append_file", "_diff_append_file"])
+        # Cache key must NOT have been finalized — the next kick has
+        # to re-render rather than seeing a stale "already applied".
+        self.assertIsNone(app._diff_last_applied_key)
+
+    def test_empty_file_list_routes_through_text_path(self):
+        """`compute_diff` returns reason="working tree clean" with
+        files=None when nothing changed. That path is text-only — no
+        streaming, no finalizer, single `_apply_diff_text` mount."""
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._diff_build_token = 9
+
+        result = MagicMock()
+        result.files = None
+        result.reason = "working tree clean"
+
+        applied: list[str] = []
+        with patch("actor.watch.app.read_head_oid", return_value="oid"), \
+             patch("actor.watch.app.compute_diff", return_value=result), \
+             patch.object(app, "call_from_thread",
+                          side_effect=lambda fn, *a, **kw: applied.append(
+                              fn.__name__,
+                          )):
+            ActorWatchApp._build_diff_worker.__wrapped__(app, 9, actor, 100)
+        self.assertEqual(applied, ["_apply_diff_text"])
+
+    def test_render_exception_routes_to_error_text(self):
+        """A render error mid-stream wipes the scroll and surfaces
+        "Diff error: ..." in its place. `_apply_diff_text` does the
+        remove_children itself, so partial appends don't linger above
+        the error message."""
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._diff_build_token = 1
+
+        result = MagicMock()
+        result.files = self._make_files(2)
+        result.reason = ""
+
+        applied: list[tuple] = []
+
+        def boom(*_a, **_kw):
+            raise RuntimeError("kaboom")
+
+        with _stub_theme(), \
+             patch("actor.watch.app.read_head_oid", return_value="oid"), \
+             patch("actor.watch.app.compute_diff", return_value=result), \
+             patch("actor.watch.app.iter_diff_renderables",
+                   side_effect=boom), \
+             patch.object(app, "call_from_thread",
+                          side_effect=lambda fn, *a, **kw: applied.append(
+                              (fn.__name__, a),
+                          )):
+            ActorWatchApp._build_diff_worker.__wrapped__(app, 1, actor, 100)
+        names = [n for n, _a in applied]
+        self.assertEqual(names, ["_apply_diff_text"])
+        # Reason string includes the exception message.
+        self.assertIn("kaboom", applied[0][1][2])
+
+
+class ClearDetailCancelsStreamingTests(unittest.TestCase):
+    """Selecting nothing must wipe the diff and invalidate any
+    in-flight stream — bumping the token alone is enough; the
+    streaming worker's call_from_thread for the stale token is a
+    no-op via the `_diff_append_file` token check."""
+
+    def test_clear_detail_bumps_token_and_drops_pending(self):
+        app = _bare_app()
+        app._diff_build_token = 3
+        app._diff_build_pending = True
+        app._diff_streamed_token = 3
+        app._diff_last_applied_key = ("alice", "x", 100)
+        # _bare_app doesn't include the full DOM — substitute mocks
+        # for what `_clear_detail` queries.
+        info = MagicMock()
+        log = MagicMock()
+        log.lines = []
+        table = MagicMock()
+        scroll = MagicMock()
+
+        def query_one(selector, *_args):
+            if "info" in selector:
+                return info
+            if "logs" in selector:
+                return log
+            if "runs" in selector:
+                return table
+            return scroll
+
+        app._log_cursors = {}
+        with patch.object(app, "query_one", side_effect=query_one), \
+             patch.object(app, "_update_diff_tab_label"):
+            app._clear_detail()
+        self.assertEqual(app._diff_build_token, 4)
+        self.assertFalse(app._diff_build_pending)
+        self.assertIsNone(app._diff_last_applied_key)
+        # Subsequent `_diff_append_file` calls for the OLD token now
+        # fall through the stale-token guard.
+        scroll.reset_mock()
+        with patch.object(app, "query_one", return_value=scroll):
+            app._diff_append_file(token=3, file_path="x.py",
+                                  renderable=Text("x"))
+        scroll.mount.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -39,7 +39,7 @@ from .omarchy_theme import (
 )
 from .themes import CLAUDE_DARK, CLAUDE_LIGHT
 from .tree import ActorTree
-from .diff_render import build_diff_renderables
+from .diff_render import iter_diff_renderables
 from .helpers import (
     compute_diff,
     compute_diff_shortstat,
@@ -224,6 +224,12 @@ class ActorWatchApp(App):
     _diff_build_target_width: int = 0
     _diff_last_applied_key: tuple | None = None
     _diff_pending_actor: str | None = None
+    # Stage-4 streaming: which token's first-file append landed on
+    # `#diff-scroll`. The first append for a given kick clears the
+    # scroll (placeholder + any prior content); subsequent appends
+    # for the same token just mount. -1 is a sentinel that never
+    # matches a live token.
+    _diff_streamed_token: int = -1
 
     # Cheap-badge-first state. Independent of the full build path —
     # the badge worker runs `git diff --shortstat` to produce a
@@ -989,41 +995,86 @@ class ActorWatchApp(App):
             )
             return
 
+        # Stream files into `#diff-scroll` one Static per file as
+        # they finish rendering. The first append for this token
+        # clears placeholder/prior content on the main thread (see
+        # `_diff_append_file`); subsequent appends just mount.
         is_dark = self.current_theme.dark if self.current_theme else True
+        total_added = 0
+        total_removed = 0
         try:
-            built = build_diff_renderables(result.files, is_dark, is_cancelled)
+            for path, renderable, added, removed in iter_diff_renderables(
+                result.files, is_dark, is_cancelled,
+            ):
+                self.call_from_thread(
+                    self._diff_append_file, token, path, renderable,
+                )
+                total_added += added
+                total_removed += removed
         except Exception as e:
+            # Mid-stream render error → wipe whatever's mounted and
+            # surface the error message in its place. `_apply_diff_text`
+            # remove_children's the scroll first, so partial appends
+            # don't linger above the error.
             self.call_from_thread(
                 self._apply_diff_text, token, cache_key, f"Diff error: {e}",
             )
             return
-        if built is None:
-            # Cancelled mid-build; the newer worker owns the apply.
+        if is_cancelled():
+            # Stream stopped mid-flight; the partial mounts already on
+            # screen stay until the newer kick's first append clears
+            # them. We deliberately don't finalize cache_key here so
+            # the next build re-renders rather than seeing a cache hit.
             return
-        parts, total_added, total_removed = built
         self.call_from_thread(
-            self._apply_diff_build,
-            token, cache_key, parts, total_added, total_removed,
+            self._apply_diff_build_done,
+            token, cache_key, total_added, total_removed,
         )
 
-    def _apply_diff_build(
+    def _diff_append_file(
         self,
         token: int,
-        cache_key: tuple,
-        parts: list,
-        total_added: int,
-        total_removed: int,
+        file_path: str,
+        renderable: object,
     ) -> None:
+        """Streaming mount of a single rendered file onto
+        `#diff-scroll`. Stale tokens (newer kick already in flight)
+        skip the mount.
+
+        The first append for a given token clears the scroll —
+        wiping the 300ms placeholder if it fired and any leftover
+        Statics from a prior kick. From there, each subsequent
+        append for the same token mounts one more Static at the
+        bottom, so the user sees files appear in order as they
+        render. Pending is flipped off on first append too: real
+        content is on screen, the placeholder must not fire."""
         if token != self._diff_build_token:
             return
         try:
             scroll = self.query_one("#diff-scroll", VerticalScroll)
         except Exception:
-            self._diff_build_pending = False
             return
+        if self._diff_streamed_token != token:
+            scroll.remove_children()
+            self._diff_streamed_token = token
+            self._diff_build_pending = False
         from rich.console import Group
-        scroll.remove_children()
-        scroll.mount(Static(Group(*parts)))
+        scroll.mount(Static(Group(renderable, Text(""))))
+
+    def _apply_diff_build_done(
+        self,
+        token: int,
+        cache_key: tuple,
+        total_added: int,
+        total_removed: int,
+    ) -> None:
+        """Finalize a streamed build: lock in the cache key + tab
+        label totals, drop the pending flag. Idempotent against
+        per-file appends — only the cache key + label promotion need
+        to ride this finalizer; the scroll is already populated by
+        the streaming `_diff_append_file` calls."""
+        if token != self._diff_build_token:
+            return
         self._diff_build_pending = False
         self._diff_last_applied_key = cache_key
         self._update_diff_tab_label(total_added, total_removed)
