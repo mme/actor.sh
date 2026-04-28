@@ -80,9 +80,14 @@ class PrerenderedDiff(Widget):
     PrerenderedDiff {
         height: auto;
         width: 1fr;
-        background: ansi_default;
+        background: $background;
     }
     """
+    # Concrete `$background` (not `ansi_default`) so Textual's dim-baking
+    # filter has an RGB triplet to mix against. Pre-rendered strips
+    # carry `dim=True` flags from Rich without a baked-in bgcolor —
+    # `ansi_default` resolves to Rich's DEFAULT color (no triplet) and
+    # the dim_color() pass crashes when it tries to unpack it.
 
     def __init__(self, strips: list[Strip], **kwargs) -> None:
         super().__init__(**kwargs)
