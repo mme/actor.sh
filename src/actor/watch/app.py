@@ -40,6 +40,7 @@ from .omarchy_theme import (
 from .themes import CLAUDE_DARK, CLAUDE_LIGHT
 from .tree import ActorTree
 from .diff_render import iter_diff_renderables
+from .prerendered_diff import PrerenderedDiff, renderable_to_strips
 from .helpers import (
     compute_diff,
     compute_diff_shortstat,
@@ -1013,10 +1014,18 @@ class ActorWatchApp(App):
             )
             return
 
-        # Stream files into `#diff-scroll` one Static per file as
-        # they finish rendering. The first append for this token
-        # clears placeholder/prior content on the main thread (see
-        # `_diff_append_file`); subsequent appends just mount.
+        # Stream files into `#diff-scroll` one PrerenderedDiff widget
+        # per file as they finish rendering. The first append for this
+        # token clears placeholder/prior content on the main thread
+        # (see `_diff_append_file`); subsequent appends just mount.
+        #
+        # Each file's Rich renderable is converted to a list of
+        # textual `Strip`s **here in the worker thread** — that's the
+        # CPU-bound Segment-generation pass that previously happened
+        # on the main thread at paint time and showed up as a UI hang.
+        # By the time we call_from_thread, the strips are pre-baked;
+        # the main thread's mount + paint becomes effectively
+        # constant-time per file.
         is_dark = self.current_theme.dark if self.current_theme else True
         total_added = 0
         total_removed = 0
@@ -1024,8 +1033,13 @@ class ActorWatchApp(App):
             for path, renderable, added, removed in iter_diff_renderables(
                 result.files, is_dark, is_cancelled,
             ):
+                if is_cancelled():
+                    return
+                strips = renderable_to_strips(renderable, width)
+                if is_cancelled():
+                    return
                 self.call_from_thread(
-                    self._diff_append_file, token, path, renderable,
+                    self._diff_append_file, token, path, strips,
                 )
                 total_added += added
                 total_removed += removed
@@ -1053,19 +1067,23 @@ class ActorWatchApp(App):
         self,
         token: int,
         file_path: str,
-        renderable: object,
+        strips: list,
     ) -> None:
-        """Streaming mount of a single rendered file onto
+        """Streaming mount of a single pre-rendered file onto
         `#diff-scroll`. Stale tokens (newer kick already in flight)
         skip the mount.
 
         The first append for a given token clears the scroll —
         wiping the 300ms placeholder if it fired and any leftover
-        Statics from a prior kick. From there, each subsequent
-        append for the same token mounts one more Static at the
-        bottom, so the user sees files appear in order as they
-        render. Pending is flipped off on first append too: real
-        content is on screen, the placeholder must not fire."""
+        widgets from a prior kick. From there, each subsequent
+        append for the same token mounts one more PrerenderedDiff
+        at the bottom, so the user sees files appear in order as
+        they render. Pending is flipped off on first append too:
+        real content is on screen, the placeholder must not fire.
+
+        `strips` is a list of `textual.strip.Strip` produced off-thread
+        by `renderable_to_strips` — mounting + painting the widget is
+        effectively constant-time, no CPU-bound Rich render at paint."""
         if token != self._diff_build_token:
             return
         try:
@@ -1076,8 +1094,7 @@ class ActorWatchApp(App):
             scroll.remove_children()
             self._diff_streamed_token = token
             self._diff_build_pending = False
-        from rich.console import Group
-        scroll.mount(Static(Group(renderable, Text(""))))
+        scroll.mount(PrerenderedDiff(strips))
 
     def _apply_diff_build_done(
         self,

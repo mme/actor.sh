@@ -20,10 +20,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock, patch
 
+from rich.segment import Segment
 from rich.text import Text
+from textual.strip import Strip
 
 from actor.watch.app import ActorWatchApp
 from actor.watch.diff_render import build_diff_renderables
+from actor.watch.prerendered_diff import PrerenderedDiff
 from actor.watch.helpers import (
     FileDiff,
     _git_cat_file_batch,
@@ -236,7 +239,7 @@ class ApplyDiffBuildTokenDiscardTests(unittest.TestCase):
             app._diff_append_file(
                 token=3,  # stale
                 file_path="x.py",
-                renderable=Text("hi"),
+                strips=[Strip([Segment("hi")])],
             )
         scroll.remove_children.assert_not_called()
         scroll.mount.assert_not_called()
@@ -1030,10 +1033,13 @@ class DiffAppendFileTests(unittest.TestCase):
         scroll = _scroll_with_width(100)
         with patch.object(app, "query_one", return_value=scroll):
             app._diff_append_file(
-                token=4, file_path="a.py", renderable=Text("rendered a"),
+                token=4, file_path="a.py", strips=[Strip([Segment("a")])],
             )
         scroll.remove_children.assert_called_once()
         scroll.mount.assert_called_once()
+        # The mounted widget is a PrerenderedDiff carrying our strips.
+        mounted = scroll.mount.call_args.args[0]
+        self.assertIsInstance(mounted, PrerenderedDiff)
         self.assertEqual(app._diff_streamed_token, 4)
         # Pending must be flipped off — real content is on screen
         # so the 300ms placeholder timer must NOT fire.
@@ -1046,7 +1052,7 @@ class DiffAppendFileTests(unittest.TestCase):
         scroll = _scroll_with_width(100)
         with patch.object(app, "query_one", return_value=scroll):
             app._diff_append_file(
-                token=4, file_path="b.py", renderable=Text("b"),
+                token=4, file_path="b.py", strips=[Strip([Segment("b")])],
             )
         scroll.remove_children.assert_not_called()
         scroll.mount.assert_called_once()
@@ -1061,22 +1067,21 @@ class DiffAppendFileTests(unittest.TestCase):
         mount_args: list[object] = []
         scroll.mount.side_effect = lambda widget: mount_args.append(widget)
 
-        def fresh_renderable(label: str) -> Text:
-            return Text(label)
+        def fresh_strips(label: str) -> list[Strip]:
+            return [Strip([Segment(label)])]
 
         with patch.object(app, "query_one", return_value=scroll):
-            app._diff_append_file(1, "a.py", fresh_renderable("A"))
-            app._diff_append_file(1, "b.py", fresh_renderable("B"))
-            app._diff_append_file(1, "c.py", fresh_renderable("C"))
+            app._diff_append_file(1, "a.py", fresh_strips("A"))
+            app._diff_append_file(1, "b.py", fresh_strips("B"))
+            app._diff_append_file(1, "c.py", fresh_strips("C"))
 
         self.assertEqual(len(mount_args), 3)
-        # Each mount holds a Static wrapping a Group(renderable, Text("")).
-        # The label letter sits inside the Group's first child.
+        # Each mount is a PrerenderedDiff; pull the label out of the
+        # first segment of its first strip.
         for widget, expected in zip(mount_args, ["A", "B", "C"]):
-            # widget is Static; Static.content is the Group; the first
-            # element of the Group is our supplied Text.
-            inner = widget.content
-            self.assertEqual(inner.renderables[0].plain, expected)
+            self.assertIsInstance(widget, PrerenderedDiff)
+            first_strip = widget._strips[0]
+            self.assertEqual(first_strip._segments[0].text, expected)
         # First call also cleared the scroll once; subsequent two did
         # not.
         scroll.remove_children.assert_called_once()
@@ -1272,7 +1277,7 @@ class ClearDetailCancelsStreamingTests(unittest.TestCase):
         scroll.reset_mock()
         with patch.object(app, "query_one", return_value=scroll):
             app._diff_append_file(token=3, file_path="x.py",
-                                  renderable=Text("x"))
+                                  strips=[Strip([Segment("x")])])
         scroll.mount.assert_not_called()
 
 
