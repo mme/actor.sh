@@ -1225,6 +1225,13 @@ class ActorWatchApp(App):
         scroll.mount(Static(text, markup=False))
         self._diff_build_pending = False
         self._diff_last_applied_key = None
+        # Same badge-race guard as `_apply_diff_build_done` and
+        # `_apply_diff_text`: a badge worker from this same kick
+        # (still in flight with shortstat counts) must not later
+        # land "+5 -3" on top of the error message we just mounted
+        # — that would split the tab label and the scroll pane into
+        # contradictory states.
+        self._diff_badge_token += 1
         self._update_diff_tab_label()
 
     def _mark_diff_build_done(self, token: int) -> None:
@@ -1501,6 +1508,11 @@ class ActorWatchApp(App):
                 (a for a in self._current_actors if a.name == name), None,
             )
             if actor is None:
+                # Actor was discarded between the stash and the
+                # flush. Clear the stash so subsequent tab
+                # activations don't repeatedly try (and fail) to
+                # resolve a stale name.
+                self._diff_pending_actor = None
                 return
             self._kick_diff_build(actor)
 

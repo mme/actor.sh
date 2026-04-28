@@ -2310,5 +2310,113 @@ class GitLocaleEnvTests(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+# -- CR-loop fixes Round 3 ---------------------------------------------------
+
+
+class ApplyDiffErrorBadgeRaceGuardTests(unittest.TestCase):
+    """`_apply_diff_error` must invalidate any in-flight badge from
+    the same kick. Otherwise a badge worker that captured shortstat
+    counts before the build raised would land "+5 -3" on top of the
+    error message, producing a contradictory tab label vs. scroll
+    pane state. Symmetric with the existing guards in
+    `_apply_diff_build_done` and `_apply_diff_text`."""
+
+    def test_apply_diff_error_bumps_badge_token(self):
+        app = _bare_app()
+        app._diff_build_token = 7
+        app._diff_badge_token = 7
+        scroll = _scroll_with_width(100)
+        with patch.object(app, "query_one", return_value=scroll), \
+             patch.object(app, "_refresh_tab_arrows"):
+            app._apply_diff_error(token=7, text="Diff error: kaboom")
+        # Badge token bumped past 7 → a late `_apply_diff_badge(token=7)`
+        # from the same kick will see the mismatch and skip.
+        self.assertGreater(app._diff_badge_token, 7)
+
+    def test_late_badge_after_error_does_not_overwrite_label(self):
+        """End-to-end: build raises and `_apply_diff_error` mounts
+        the error. Then the same kick's badge worker arrives with
+        valid shortstat counts. It must drop without committing
+        a label."""
+        app = _bare_app()
+        app._diff_build_token = 7
+        app._diff_badge_token = 7
+
+        scroll = _scroll_with_width(100)
+        with patch.object(app, "query_one", return_value=scroll), \
+             patch.object(app, "_refresh_tab_arrows"):
+            app._apply_diff_error(token=7, text="Diff error: kaboom")
+
+        # Capture the post-error label so we can verify the late
+        # badge doesn't change it.
+        label_after_error = str(app._tab_base_labels["diff"])
+
+        with patch.object(app, "_refresh_tab_arrows"):
+            app._apply_diff_badge(token=7, added=5, removed=3)
+
+        # Label unchanged — late badge dropped via token check.
+        self.assertEqual(str(app._tab_base_labels["diff"]), label_after_error)
+
+
+class FlushPendingDiffStaleActorTests(unittest.TestCase):
+    """`_flush_pending_diff_if_visible` looks up the stashed actor
+    by name in `_current_actors`. If the actor was discarded between
+    the stash and the flush, the lookup returns None — and the
+    stash must be cleared so subsequent tab activations don't
+    repeatedly attempt (and silently fail) to resolve a name that
+    will never appear again."""
+
+    def test_flush_clears_pending_actor_when_actor_discarded(self):
+        app = _bare_app()
+        app._diff_pending_actor = "ghost"
+        # `ghost` is NOT in `_current_actors` — simulating a discard
+        # that happened between the kick (which stashed) and the
+        # tab activation (which flushes).
+        app._current_actors = []
+
+        captured: dict = {}
+        def fake_after_refresh(fn):
+            captured["fn"] = fn
+
+        with patch.object(app, "call_after_refresh", side_effect=fake_after_refresh):
+            app._flush_pending_diff_if_visible()
+        self.assertIn("fn", captured)
+
+        # Drive the inner attempt with a non-zero-width scroll so it
+        # gets to the actor lookup branch.
+        scroll = _scroll_with_width(100)
+        with patch.object(app, "query_one", return_value=scroll), \
+             patch.object(app, "_kick_diff_build") as kick:
+            captured["fn"]()
+        kick.assert_not_called()
+        # Stash cleared — next tab activation won't re-attempt the
+        # same dead lookup.
+        self.assertIsNone(app._diff_pending_actor)
+
+    def test_flush_keeps_pending_actor_on_zero_width(self):
+        """Sanity: when the scroll is still zero-width (DIFF still
+        hidden somehow when the closure runs), the stash must
+        remain so a later activation can flush it."""
+        app = _bare_app()
+        app._diff_pending_actor = "alice"
+        actor = _fake_actor("alice")
+        app._current_actors = [actor]
+
+        captured: dict = {}
+        def fake_after_refresh(fn):
+            captured["fn"] = fn
+
+        with patch.object(app, "call_after_refresh", side_effect=fake_after_refresh):
+            app._flush_pending_diff_if_visible()
+
+        scroll = _scroll_with_width(0)
+        with patch.object(app, "query_one", return_value=scroll), \
+             patch.object(app, "_kick_diff_build") as kick:
+            captured["fn"]()
+        kick.assert_not_called()
+        # Stash retained so the next activation can try again.
+        self.assertEqual(app._diff_pending_actor, "alice")
+
+
 if __name__ == "__main__":
     unittest.main()
