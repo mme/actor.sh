@@ -405,10 +405,11 @@ def build_diff_renderables(
     drop its result and return silently — a newer build is running and
     will own the apply.
 
-    The duplicate `difflib.unified_diff` for ± counts is intentional
-    Stage-1 carry-over from the original `_refresh_diff`. Stage 2
-    folds the count into the parsed diff to drop this redundant work.
-    """
+    Per-file ± counts come straight from ``FileDiff.added /
+    FileDiff.removed``, which are populated by `compute_diff` from
+    parsed `git diff` output. Stage 1 ran a duplicate
+    `difflib.unified_diff` here just for the counts; Stage 2 wires the
+    counts through the FileDiff so this loop only renders."""
     if is_cancelled():
         return None
     parts: list = []
@@ -424,17 +425,10 @@ def build_diff_renderables(
             )
         )
         parts.append(Text(""))
+        total_added += fd.added
+        total_removed += fd.removed
         if is_cancelled():
             return None
-        for line in difflib.unified_diff(
-            fd.old_content.splitlines(),
-            fd.new_content.splitlines(),
-            lineterm="",
-        ):
-            if line.startswith("+") and not line.startswith("+++"):
-                total_added += 1
-            elif line.startswith("-") and not line.startswith("---"):
-                total_removed += 1
     if is_cancelled():
         return None
     return parts, total_added, total_removed

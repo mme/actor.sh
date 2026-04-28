@@ -1,17 +1,32 @@
-"""Stage-1 logs-pattern parity for the watch DIFF tab.
+"""Stage-1 + Stage-2 tests for the watch DIFF tab.
 
-Covers cancellation, token discard, hidden-tab stash + flush, and
-width-aware cache invalidation. Mirrors the patterns the logs view
-already uses; see `actor.watch.log_renderer` and the `_kick_log_build`
-state machine in `actor.watch.app` for the reference implementation."""
+Stage 1 — logs-pattern parity: cancellation, token discard, hidden-tab
+stash + flush, width-aware cache invalidation. Mirrors the patterns
+the logs view already uses; see `actor.watch.log_renderer` and the
+`_kick_log_build` state machine in `actor.watch.app`.
+
+Stage 2 — batched git invocations: `compute_diff` collapses N+5
+subprocess spawns into a constant ≤4 regardless of file count, and
+parsed ± counts ride through `FileDiff.added` / `removed` so the
+renderer doesn't re-run difflib just to label the tab."""
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from actor.watch.app import ActorWatchApp
 from actor.watch.diff_render import build_diff_renderables
-from actor.watch.helpers import FileDiff
+from actor.watch.helpers import (
+    FileDiff,
+    _git_cat_file_batch,
+    _parse_diff_files,
+    compute_diff,
+)
 
 
 def _bare_app() -> ActorWatchApp:
@@ -333,6 +348,358 @@ class WorkerCancellationTests(unittest.TestCase):
             )
         compute.assert_not_called()
         cft.assert_not_called()
+
+
+# -- Stage 2: batched git invocations ---------------------------------------
+
+
+def _git(*args: str, cwd: str) -> subprocess.CompletedProcess:
+    """Run a git subprocess in `cwd`, raise on failure. Configured to
+    skip the user's commit signing / hooks so the temp repo doesn't
+    inherit machine-specific git config."""
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+    }
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd, env=env, check=True,
+        capture_output=True, text=True,
+    )
+
+
+def _build_repo(n_files: int) -> str:
+    """Create a temporary git repo with `n_files` files committed and
+    then modified in the working tree. Returns the worktree path. The
+    caller is responsible for cleanup."""
+    tmp = tempfile.mkdtemp(prefix="actor-diff-stress-")
+    _git("init", "-q", "-b", "main", tmp, cwd=tmp)
+    for i in range(n_files):
+        Path(tmp, f"file_{i:03d}.txt").write_text(f"old content {i}\nline 2\n")
+    _git("add", "-A", cwd=tmp)
+    _git("commit", "-q", "-m", "initial", cwd=tmp)
+    # Modify every file so all show up in the merge-base diff.
+    for i in range(n_files):
+        Path(tmp, f"file_{i:03d}.txt").write_text(f"new content {i}\nline 2\n")
+    return tmp
+
+
+def _fake_actor_for_repo(tmp: str) -> MagicMock:
+    a = MagicMock()
+    a.dir = tmp
+    a.base_branch = "main"
+    a.name = "stress"
+    return a
+
+
+class _SubprocessCounter:
+    """Wraps the real `subprocess` module and records every spawn the
+    helpers module triggers via `subprocess.run` / `subprocess.Popen`.
+
+    Patching the module-attribute (e.g. ``subprocess.run``) directly
+    has a nasty interaction: ``subprocess.run`` internally calls
+    ``Popen`` through the same module object, so a patched run + a
+    patched Popen would each record one extra call per `run`. This
+    wrapper sidesteps that by replacing the entire `subprocess`
+    reference inside `actor.watch.helpers` — only that module's
+    explicit calls get recorded; the implementation-detail Popen
+    calls inside the real `subprocess.run` are unaffected."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+        self.PIPE = subprocess.PIPE
+
+    def run(self, args, *a, **kw):
+        self.calls.append(list(args))
+        return subprocess.run(args, *a, **kw)
+
+    def Popen(self, args, *a, **kw):
+        self.calls.append(list(args))
+        return subprocess.Popen(args, *a, **kw)
+
+
+class ComputeDiffSubprocessCountTests(unittest.TestCase):
+    """The whole point of Stage 2: subprocess count is bounded
+    regardless of how many files changed. Each test below spawns a
+    real temp git repo so the parser + cat-file batch are exercised
+    end-to-end against actual git output, not a hand-rolled fixture."""
+
+    def test_50_file_diff_uses_bounded_subprocess_count(self):
+        if shutil.which("git") is None:
+            self.skipTest("git not available")
+        tmp = _build_repo(n_files=50)
+        try:
+            actor = _fake_actor_for_repo(tmp)
+            counter = _SubprocessCounter()
+            with patch("actor.watch.helpers.subprocess", counter):
+                result = compute_diff(actor)
+
+            # Acceptance bar from the plan: ~3 git calls plus 1
+            # ls-files. Stage 2 hits exactly four for a tracked-only
+            # diff:
+            #   1. git merge-base
+            #   2. git diff --no-color <base>
+            #   3. git ls-files --others --exclude-standard
+            #   4. git cat-file --batch
+            self.assertLessEqual(
+                len(counter.calls), 4,
+                f"compute_diff spawned {len(counter.calls)} "
+                f"subprocesses for 50 files; commands were "
+                f"{counter.calls!r}",
+            )
+            # cat-file was the one that used to scale with N — make
+            # sure it's now a single call.
+            cat_file_calls = [
+                c for c in counter.calls if c[:2] == ["git", "cat-file"]
+            ]
+            self.assertEqual(
+                len(cat_file_calls), 1,
+                f"expected a single cat-file batch; got {cat_file_calls!r}",
+            )
+            # Result is correct — every modified file shows up with
+            # ± counts pulled straight from git diff (no extra
+            # difflib pass).
+            self.assertIsNotNone(result.files)
+            self.assertEqual(len(result.files), 50)
+            for fd in result.files:
+                self.assertEqual(fd.added, 1)
+                self.assertEqual(fd.removed, 1)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_pure_untracked_skips_cat_file_batch(self):
+        """No tracked changes → no old-content reads needed → no
+        cat-file invocation. Bounded above by 3 subprocesses."""
+        if shutil.which("git") is None:
+            self.skipTest("git not available")
+        tmp = tempfile.mkdtemp(prefix="actor-diff-untracked-")
+        try:
+            _git("init", "-q", "-b", "main", tmp, cwd=tmp)
+            Path(tmp, "seed.txt").write_text("seed\n")
+            _git("add", "-A", cwd=tmp)
+            _git("commit", "-q", "-m", "seed", cwd=tmp)
+            for i in range(10):
+                Path(tmp, f"new_{i}.txt").write_text(f"hi {i}\n")
+            actor = _fake_actor_for_repo(tmp)
+
+            counter = _SubprocessCounter()
+            with patch("actor.watch.helpers.subprocess", counter):
+                result = compute_diff(actor)
+
+            cat_file_calls = [
+                c for c in counter.calls if c[:2] == ["git", "cat-file"]
+            ]
+            self.assertEqual(
+                cat_file_calls, [],
+                "no tracked changes → cat-file --batch shouldn't run",
+            )
+            self.assertLessEqual(len(counter.calls), 3)
+            self.assertIsNotNone(result.files)
+            self.assertEqual(len(result.files), 10)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class ParseDiffFilesTests(unittest.TestCase):
+    """Per-file metadata extraction from `git diff --no-color` output.
+    Drives the ± counts that ride through FileDiff into the renderer."""
+
+    def test_modified_file_counts(self):
+        diff = (
+            "diff --git a/foo.py b/foo.py\n"
+            "index abc..def 100644\n"
+            "--- a/foo.py\n"
+            "+++ b/foo.py\n"
+            "@@ -1,3 +1,4 @@\n"
+            " ctx\n"
+            "-removed\n"
+            "+added one\n"
+            "+added two\n"
+        )
+        files = _parse_diff_files(diff)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]["path"], "foo.py")
+        self.assertEqual(files[0]["added"], 2)
+        self.assertEqual(files[0]["removed"], 1)
+        self.assertFalse(files[0]["is_new"])
+        self.assertFalse(files[0]["is_deleted"])
+        self.assertFalse(files[0]["is_binary"])
+
+    def test_new_file(self):
+        diff = (
+            "diff --git a/new.py b/new.py\n"
+            "new file mode 100644\n"
+            "index 0000000..abc\n"
+            "--- /dev/null\n"
+            "+++ b/new.py\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+line one\n"
+            "+line two\n"
+        )
+        files = _parse_diff_files(diff)
+        self.assertEqual(len(files), 1)
+        self.assertTrue(files[0]["is_new"])
+        self.assertEqual(files[0]["added"], 2)
+        self.assertEqual(files[0]["removed"], 0)
+        self.assertEqual(files[0]["path"], "new.py")
+
+    def test_deleted_file(self):
+        diff = (
+            "diff --git a/gone.py b/gone.py\n"
+            "deleted file mode 100644\n"
+            "index abc..0000000\n"
+            "--- a/gone.py\n"
+            "+++ /dev/null\n"
+            "@@ -1,2 +0,0 @@\n"
+            "-bye\n"
+            "-bye again\n"
+        )
+        files = _parse_diff_files(diff)
+        self.assertEqual(len(files), 1)
+        self.assertTrue(files[0]["is_deleted"])
+        self.assertEqual(files[0]["removed"], 2)
+        # The path lives on `--- a/...` for deletes — used to look up
+        # the merge-base content via cat-file.
+        self.assertEqual(files[0]["path"], "gone.py")
+
+    def test_binary_file_marked_no_counts(self):
+        diff = (
+            "diff --git a/img.png b/img.png\n"
+            "index abc..def 100644\n"
+            "Binary files a/img.png and b/img.png differ\n"
+        )
+        files = _parse_diff_files(diff)
+        self.assertEqual(len(files), 1)
+        self.assertTrue(files[0]["is_binary"])
+        self.assertEqual(files[0]["added"], 0)
+        self.assertEqual(files[0]["removed"], 0)
+
+    def test_multiple_hunks_aggregate(self):
+        diff = (
+            "diff --git a/multi.py b/multi.py\n"
+            "--- a/multi.py\n"
+            "+++ b/multi.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            "-a\n"
+            "+a2\n"
+            "@@ -10,2 +10,3 @@\n"
+            " ctx\n"
+            "+b\n"
+            "+c\n"
+        )
+        files = _parse_diff_files(diff)
+        self.assertEqual(files[0]["added"], 3)
+        self.assertEqual(files[0]["removed"], 1)
+
+    def test_no_newline_marker_ignored(self):
+        diff = (
+            "diff --git a/x.txt b/x.txt\n"
+            "--- a/x.txt\n"
+            "+++ b/x.txt\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "\\ No newline at end of file\n"
+            "+new\n"
+            "\\ No newline at end of file\n"
+        )
+        files = _parse_diff_files(diff)
+        self.assertEqual(files[0]["added"], 1)
+        self.assertEqual(files[0]["removed"], 1)
+
+
+class GitCatFileBatchTests(unittest.TestCase):
+    """One cat-file --batch call satisfies all old-content reads.
+    Round-trip with a real git invocation to keep the protocol-parsing
+    honest — easy to break in subtle ways without an integration test."""
+
+    def test_batch_returns_contents_for_existing_refs(self):
+        if shutil.which("git") is None:
+            self.skipTest("git not available")
+        tmp = tempfile.mkdtemp(prefix="actor-cat-file-")
+        try:
+            _git("init", "-q", "-b", "main", tmp, cwd=tmp)
+            Path(tmp, "a.txt").write_text("alpha\n")
+            Path(tmp, "b.txt").write_text("bravo\nbravo2\n")
+            _git("add", "-A", cwd=tmp)
+            _git("commit", "-q", "-m", "seed", cwd=tmp)
+            head = _git("rev-parse", "HEAD", cwd=tmp).stdout.strip()
+
+            contents = _git_cat_file_batch(
+                [f"{head}:a.txt", f"{head}:b.txt"], tmp,
+            )
+            self.assertEqual(contents[f"{head}:a.txt"], "alpha\n")
+            self.assertEqual(contents[f"{head}:b.txt"], "bravo\nbravo2\n")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_missing_ref_returns_empty_string(self):
+        if shutil.which("git") is None:
+            self.skipTest("git not available")
+        tmp = tempfile.mkdtemp(prefix="actor-cat-file-missing-")
+        try:
+            _git("init", "-q", "-b", "main", tmp, cwd=tmp)
+            Path(tmp, "real.txt").write_text("real\n")
+            _git("add", "-A", cwd=tmp)
+            _git("commit", "-q", "-m", "seed", cwd=tmp)
+            head = _git("rev-parse", "HEAD", cwd=tmp).stdout.strip()
+
+            contents = _git_cat_file_batch(
+                [f"{head}:real.txt", f"{head}:does-not-exist.txt"], tmp,
+            )
+            self.assertEqual(contents[f"{head}:real.txt"], "real\n")
+            # Missing refs map to "" — used for new files in the
+            # tracked diff, where the merge-base side has no blob.
+            self.assertEqual(contents[f"{head}:does-not-exist.txt"], "")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_empty_input_no_subprocess(self):
+        with patch("actor.watch.helpers.subprocess.Popen") as p:
+            result = _git_cat_file_batch([], "/tmp")
+        self.assertEqual(result, {})
+        p.assert_not_called()
+
+
+class FileDiffCountsPlumbingTests(unittest.TestCase):
+    """Stage 2 plumbs ± counts from `git diff` parse → FileDiff →
+    build_diff_renderables, skipping the duplicate difflib pass."""
+
+    def test_explicit_counts_take_precedence_over_fallback(self):
+        # If caller passes counts, they're used verbatim — even when
+        # they contradict the contents (e.g. a synthetic test fixture).
+        fd = FileDiff(
+            "x.py", old_content="a\nb\n", new_content="a\nb\nc\n",
+            added=99, removed=88,
+        )
+        self.assertEqual(fd.added, 99)
+        self.assertEqual(fd.removed, 88)
+
+    def test_missing_counts_fall_back_to_difflib(self):
+        # Backwards-compat: callers (incl. the Stage-1 test helpers)
+        # that didn't pre-compute counts get them computed from the
+        # contents, so the FileDiff API stays usable in tests and ad-hoc
+        # debug scripts.
+        fd = FileDiff("x.py", old_content="a\nb\n", new_content="a\nc\n")
+        self.assertEqual(fd.added, 1)
+        self.assertEqual(fd.removed, 1)
+
+    def test_build_uses_filediff_counts_not_content(self):
+        """Renderer must trust FileDiff.added/removed and not re-derive
+        them. Use mismatched counts to prove no re-derivation."""
+        fd = FileDiff(
+            "x.py", old_content="a\n", new_content="b\n",
+            # Lying counts — content shows +1/-1 but we report
+            # +5/-3. The renderer must surface the reported numbers.
+            added=5, removed=3,
+        )
+        result = build_diff_renderables([fd], dark=True)
+        self.assertIsNotNone(result)
+        _parts, total_added, total_removed = result
+        self.assertEqual(total_added, 5)
+        self.assertEqual(total_removed, 3)
 
 
 if __name__ == "__main__":
