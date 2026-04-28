@@ -259,7 +259,10 @@ class ActorWatchApp(App):
     # from the rendered tab.label so we can re-apply the "active +
     # focused → arrow" decoration whenever focus moves or the active
     # tab changes.
-    _tab_base_labels: dict[str, str] = {
+    # `diff` may hold a Rich Text (with green +N / red -M segments) when
+    # there are changes; the others stay strings. `_refresh_tab_arrows`
+    # handles either shape when prepending the focus arrow.
+    _tab_base_labels: dict[str, str | Text] = {
         "logs": "LIVE",
         "diff": "DIFF",
         "info": "OVERVIEW",
@@ -1231,8 +1234,29 @@ class ActorWatchApp(App):
         self._diff_poll_last_shortstat = None
 
     def _update_diff_tab_label(self, added: int = 0, removed: int = 0) -> None:
+        # Classic diff-style ` +N -M` badge with theme `$success` / `$error`
+        # for the colors so omarchy palette flips carry through. We hold a
+        # Rich Text in `_tab_base_labels["diff"]` instead of a plain string
+        # — Tab.label accepts Rich renderables, and `_refresh_tab_arrows`
+        # special-cases Text bases to preserve the styling when it
+        # prepends the focus-arrow.
         if added or removed:
-            base = f"DIFF (±{added + removed})"
+            # `current_theme` raises ReactiveError before super().__init__
+            # runs (some tests construct a bare App without init). Falling
+            # back to brand defaults keeps label generation pure-data-in.
+            try:
+                t = self.current_theme
+            except Exception:
+                t = None
+            success = (t.success if t else None) or "#50C850"
+            error = (t.error if t else None) or "#DC5A5A"
+            base: str | Text = Text("DIFF")
+            if added:
+                base.append(" +", style=success)
+                base.append(str(added), style=success)
+            if removed:
+                base.append(" -", style=error)
+                base.append(str(removed), style=error)
         else:
             base = "DIFF"
         self._tab_base_labels["diff"] = base
@@ -1259,7 +1283,14 @@ class ActorWatchApp(App):
             if tab is None:
                 continue
             if tab_id == active_id and focused:
-                tab.label = f"→ {base}"
+                if isinstance(base, Text):
+                    # Preserve segment styles in the Text base when
+                    # prepending the focus arrow. f"→ {text}" would
+                    # stringify it and drop the colors.
+                    label: str | Text = Text("→ ").append_text(base)
+                else:
+                    label = f"→ {base}"
+                tab.label = label
             else:
                 tab.label = base
 

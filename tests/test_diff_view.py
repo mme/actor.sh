@@ -277,7 +277,9 @@ class ApplyDiffBuildTokenDiscardTests(unittest.TestCase):
             )
         self.assertEqual(app._diff_last_applied_key, ("alice", "deadbeef", 100))
         self.assertFalse(app._diff_build_pending)
-        self.assertIn("±7", app._tab_base_labels["diff"])
+        # New label shape: "DIFF +3 -4" (added 3, removed 4); colors live
+        # in segments. Assert on the plain text.
+        self.assertEqual(app._tab_base_labels["diff"].plain, "DIFF +3 -4")
 
     def test_apply_diff_text_drops_when_token_stale(self):
         app = _bare_app()
@@ -833,8 +835,9 @@ class ApplyDiffBadgeTests(unittest.TestCase):
         app._diff_badge_token = 7
         with patch.object(app, "_refresh_tab_arrows"):
             app._apply_diff_badge(token=7, added=5, removed=3)
-        # Label rendered with the combined ± total.
-        self.assertEqual(app._tab_base_labels["diff"], "DIFF (±8)")
+        # Label rendered with separate +/- spans (colors come from the
+        # theme; assert on the plain text shape).
+        self.assertEqual(app._tab_base_labels["diff"].plain, "DIFF +5 -3")
 
 
 class KickDiffBadgeTests(unittest.TestCase):
@@ -900,7 +903,7 @@ class BadgeBeforeBuildTests(unittest.TestCase):
         # Badge fires first.
         with patch.object(app, "_refresh_tab_arrows"):
             app._apply_diff_badge(token=1, added=12, removed=3)
-        self.assertEqual(app._tab_base_labels["diff"], "DIFF (±15)")
+        self.assertEqual(app._tab_base_labels["diff"].plain, "DIFF +12 -3")
         # Build path's token is untouched — it can still land.
         self.assertEqual(app._diff_build_token, 1)
         self.assertTrue(app._diff_build_pending)
@@ -916,7 +919,7 @@ class BadgeBeforeBuildTests(unittest.TestCase):
                 total_added=14,  # diverges from badge's 12 (untracked)
                 total_removed=3,
             )
-        self.assertEqual(app._tab_base_labels["diff"], "DIFF (±17)")
+        self.assertEqual(app._tab_base_labels["diff"].plain, "DIFF +14 -3")
         self.assertFalse(app._diff_build_pending)
 
 
