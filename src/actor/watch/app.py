@@ -39,7 +39,16 @@ from .omarchy_theme import (
 )
 from .themes import CLAUDE_DARK, CLAUDE_LIGHT
 from .tree import ActorTree
-from .helpers import compute_diff, read_log_entries_since
+from .diff_render import iter_diff_renderables
+from .prerendered_diff import PrerenderedDiff, renderable_to_strips
+from .helpers import (
+    compute_diff,
+    compute_diff_shortstat,
+    git_index_mtime,
+    git_untracked_count,
+    read_head_oid,
+    read_log_entries_since,
+)
 from .log_renderer import (
     append_log_entries,
     apply_log_renderables,
@@ -202,11 +211,61 @@ class ActorWatchApp(App):
     _current_actors: list[Actor] = []
     _diff_loaded_for: str | None = None
 
+    # Two-phase diff build state — mirrors the logs pattern. The kick
+    # path bumps `_diff_build_token` and starts a worker; the worker
+    # checks the token cooperatively and only commits its result when
+    # the token still matches at apply time. `_diff_build_pending`
+    # gates the 300ms placeholder. `_diff_last_applied_key` stores the
+    # `(actor.name, head_oid, content_width)` cache key from the most
+    # recent successful apply — kicks early-out when the request key
+    # matches. `_diff_pending_actor` stashes the actor whose diff was
+    # requested while the DIFF tab was hidden (width 0); the next tab
+    # activation flushes it.
+    _diff_build_token: int = 0
+    _diff_build_pending: bool = False
+    _diff_build_target_actor: str | None = None
+    _diff_build_target_width: int = 0
+    _diff_last_applied_key: tuple | None = None
+    _diff_pending_actor: str | None = None
+    # Stage-4 streaming: which token's first-file append landed on
+    # `#diff-scroll`. The first append for a given kick clears the
+    # scroll (placeholder + any prior content); subsequent appends
+    # for the same token just mount. -1 is a sentinel that never
+    # matches a live token.
+    _diff_streamed_token: int = -1
+
+    # Cheap-badge-first state. Independent of the full build path —
+    # the badge worker runs `git diff --shortstat` to produce a
+    # near-instant ±N for the tab label while the heavier full build
+    # is still parsing diffs and rendering Tables. Token discipline
+    # mirrors the build path but uses its own counter so the two
+    # paths cancel independently.
+    _diff_badge_token: int = 0
+    _diff_badge_target_actor: str | None = None
+
+    # Live-refresh poll state. While DIFF is active and the selected
+    # actor is RUNNING, a 2s interval ticks
+    # `_poll_diff_for_running`, which captures index mtime + shortstat
+    # and force-refreshes the diff if either flipped vs the last
+    # observation. The first observation after conditions become
+    # true is treated as the baseline (no refresh — the user just
+    # got here, the build is presumably already correct); subsequent
+    # ticks compare. When conditions stop holding, the baseline
+    # resets so a later re-entry baselines cleanly.
+    _diff_poll_initialized: bool = False
+    _diff_poll_last_actor: str | None = None
+    _diff_poll_last_index_mtime: float | None = None
+    _diff_poll_last_shortstat: tuple[int, int] | None = None
+    _diff_poll_last_untracked: int | None = None
+
     # Base labels for each tab (without the arrow prefix). Kept separate
     # from the rendered tab.label so we can re-apply the "active +
     # focused → arrow" decoration whenever focus moves or the active
     # tab changes.
-    _tab_base_labels: dict[str, str] = {
+    # `diff` may hold a Rich Text (with green +N / red -M segments) when
+    # there are changes; the others stay strings. `_refresh_tab_arrows`
+    # handles either shape when prepending the focus arrow.
+    _tab_base_labels: dict[str, str | Text] = {
         "logs": "LIVE",
         "diff": "DIFF",
         "info": "OVERVIEW",
@@ -294,6 +353,10 @@ class ActorWatchApp(App):
         # 3s cadence is fine and we don't need inotify / platform-specific
         # machinery. No-op on non-omarchy systems.
         self.set_interval(3.0, self._poll_omarchy_theme)
+        # Live DIFF refresh while the selected actor is RUNNING and
+        # DIFF is active. Same 2s cadence as the actor poller; the
+        # handler early-outs cheaply when conditions don't hold.
+        self.set_interval(2.0, self._poll_diff_for_running)
 
         # Start with focus on the actor tree. call_after_refresh so
         # the focus call runs AFTER any pending focus-changes queued
@@ -532,6 +595,14 @@ class ActorWatchApp(App):
         scroll = self.query_one("#diff-scroll", VerticalScroll)
         scroll.remove_children()
         self._diff_loaded_for = None
+        # Cancel any in-flight diff build / badge worker by bumping
+        # both tokens; their applies will see a mismatch and drop
+        # their output.
+        self._diff_build_token += 1
+        self._diff_badge_token += 1
+        self._diff_build_pending = False
+        self._diff_last_applied_key = None
+        self._diff_pending_actor = None
         self._update_diff_tab_label()
 
     # -- Logs ----------------------------------------------------------------
@@ -591,6 +662,27 @@ class ActorWatchApp(App):
         if log.size.width != self._last_log_width and self._last_log_entries:
             self._last_log_count = 0
             self._set_logs(self._last_log_actor, self._last_log_entries)
+
+        # Diff: width is part of the cache key, so a real width change
+        # invalidates the last apply. Re-kick for the currently-loaded
+        # actor; the kick's own width-0 guard handles the hidden case.
+        try:
+            scroll = self.query_one("#diff-scroll", VerticalScroll)
+        except Exception:
+            return
+        last_key = self._diff_last_applied_key
+        if last_key is None:
+            return
+        last_actor_name, _last_oid, last_width = last_key
+        if scroll.size.width == last_width:
+            return
+        actor = next(
+            (a for a in self._current_actors if a.name == last_actor_name),
+            None,
+        )
+        if actor is None:
+            return
+        self._kick_diff_build(actor)
 
     def _append_logs(self, actor_name: str, new_entries: list) -> None:
         """Main-thread callback from _refresh_logs worker. The cursor
@@ -803,41 +895,525 @@ class ActorWatchApp(App):
         if not force and self._diff_loaded_for == actor.name:
             return
         self._diff_loaded_for = actor.name
-        self._refresh_diff(actor)
+        # Kick both paths together. The badge is independent of the
+        # full build — even if the build is stashed because DIFF is
+        # hidden, the badge still fires and updates the always-visible
+        # tab label. `force` propagates to the build kick so the
+        # cache-key short-circuit doesn't suppress live-poll-driven
+        # refreshes (HEAD doesn't move during a typical run, so the
+        # cache key matches, but the worktree HAS changed).
+        self._kick_diff_badge(actor)
+        self._kick_diff_build(actor, force=force)
 
-    @work(thread=True, exclusive=True, group="diff")
-    def _refresh_diff(self, actor: Actor) -> None:
-        from .diff_render import render_edit_diff
+    def _kick_diff_badge(self, actor: Actor) -> None:
+        """Fire a quick `git diff --shortstat` worker just to populate
+        the DIFF (±N) tab label. Independent of the full build path
+        so the label appears in <100ms even when the full render is
+        still parsing diffs and building Tables.
 
-        result = compute_diff(actor)
+        Fires regardless of whether the DIFF tab is currently active —
+        the label sits in the tabs bar, which is always visible, so a
+        user looking at LIVE still benefits from seeing what's pending
+        on DIFF. (The full build path's hidden-tab stash is about
+        avoiding zero-width RichLog renders; the badge has no widget
+        to render into, so the same constraint doesn't apply.)"""
+        self._diff_badge_token += 1
+        self._diff_badge_target_actor = actor.name
+        self._build_diff_badge_worker(self._diff_badge_token, actor)
 
-        if result.files is None:
-            self.call_from_thread(self._set_diff_text, result.reason)
+    @work(thread=True, exclusive=True, group="diff_badge")
+    def _build_diff_badge_worker(self, token: int, actor: Actor) -> None:
+        # Cooperative cancel — same discipline as the build worker.
+        if self._diff_badge_token != token:
+            return
+        counts = compute_diff_shortstat(actor)
+        if self._diff_badge_token != token or counts is None:
+            return
+        added, removed = counts
+        self.call_from_thread(self._apply_diff_badge, token, added, removed)
+
+    def _apply_diff_badge(self, token: int, added: int, removed: int) -> None:
+        """Main-thread commit of badge counts. Stale tokens drop
+        silently; the build-path apply will land its own (possibly
+        higher, if untracked files contributed) counts later either
+        way. The two paths share `_update_diff_tab_label` — last
+        write wins, which is fine because the build's number is
+        authoritative and arrives last."""
+        if token != self._diff_badge_token:
+            return
+        self._update_diff_tab_label(added, removed)
+
+    def _kick_diff_build(self, actor: Actor, force: bool = False) -> None:
+        """Start an off-thread diff build with token + 300ms placeholder.
+
+        Skips work entirely when `#diff-scroll` has zero width — that
+        means the DIFF tab is hidden (TabbedContent collapses inactive
+        panes). The actor is stashed on `_diff_pending_actor` and
+        replayed by `_flush_pending_diff_if_visible` once the tab is
+        activated.
+
+        Token discipline mirrors the logs path: every kick bumps
+        `_diff_build_token`, every worker captures its own token, and
+        `_apply_diff_build` only commits when the captured token still
+        matches. Stale workers drop their output silently.
+
+        `force=True` skips the cache-key short-circuit in the worker
+        — used by the live-refresh poller, which kicks precisely
+        BECAUSE the worktree changed even though HEAD didn't move.
+        Without this bypass the cache check would early-out and the
+        diff would stay stale despite the user editing files."""
+        try:
+            scroll = self.query_one("#diff-scroll", VerticalScroll)
+        except Exception:
+            return
+        width = scroll.size.width
+        if width == 0:
+            self._diff_pending_actor = actor.name
+            return
+        self._diff_pending_actor = None
+
+        self._diff_build_token += 1
+        self._diff_build_pending = True
+        self._diff_build_target_actor = actor.name
+        self._diff_build_target_width = width
+        token = self._diff_build_token
+
+        def _maybe_show_placeholder() -> None:
+            # Fire only if this build is still the latest one AND
+            # hasn't already applied. Any newer kick-off bumps the
+            # token; a committed apply clears the pending flag.
+            if token != self._diff_build_token or not self._diff_build_pending:
+                return
+            # Skip the placeholder when we already have content for
+            # this actor — wiping fresh content with "Loading diff..."
+            # for a few hundred milliseconds is jarring and recurs
+            # every 2s while the live poll force-refreshes a slow
+            # render. The cache-key actor field tells us whether the
+            # currently mounted scroll content matches the actor of
+            # this kick; if so, leave it alone until the new build
+            # streams or the finalizer commits.
+            last_key = self._diff_last_applied_key
+            if (
+                last_key is not None
+                and last_key[0] == self._diff_build_target_actor
+            ):
+                return
+            try:
+                scroll = self.query_one("#diff-scroll", VerticalScroll)
+            except Exception:
+                return
+            scroll.remove_children()
+            scroll.mount(Static(Text("Loading diff...", style="dim")))
+
+        self.set_timer(0.3, _maybe_show_placeholder)
+        self._build_diff_worker(token, actor, width, force)
+
+    @work(thread=True, exclusive=True, group="diff_build")
+    def _build_diff_worker(
+        self, token: int, actor: Actor, width: int, force: bool = False,
+    ) -> None:
+        # Cooperative cancel: when a newer build supersedes this one,
+        # `_diff_build_token` is already the new value on the main
+        # thread. Check at every coarse-grained boundary so we don't
+        # keep burning subprocess + render work on output that will be
+        # discarded anyway.
+        def is_cancelled() -> bool:
+            return self._diff_build_token != token
+
+        if is_cancelled():
             return
 
+        head_oid = read_head_oid(actor)
+        cache_key = (actor.name, head_oid, width)
+        if not force and cache_key == self._diff_last_applied_key:
+            # Nothing relevant changed since the last applied build —
+            # skip the expensive `compute_diff` + render. Hand control
+            # back to the main thread to clear the pending flag.
+            # `force=True` (live poll) bypasses this; the worktree
+            # has changed even when HEAD hasn't, so the cache key is
+            # not a reliable "nothing to redo" signal there.
+            self.call_from_thread(self._mark_diff_build_done, token)
+            return
+
+        if is_cancelled():
+            return
+
+        result = compute_diff(actor)
+        if is_cancelled():
+            return
+
+        if result.files is None:
+            # `compute_diff` reports two flavors of file-less result:
+            # benign reasons ("working tree clean", "no repository")
+            # which CACHE — repeat kicks at the same key correctly
+            # early-out — and "error" which signals a transient
+            # internal failure that must NOT be cached, otherwise
+            # the user is stuck on the error state until HEAD or
+            # width changes. Route the error reason through
+            # `_apply_diff_error` (cache-invalidating) and benign
+            # reasons through `_apply_diff_text` (cache-promoting).
+            if result.reason == "error":
+                self.call_from_thread(
+                    self._apply_diff_error, token,
+                    "Diff error: compute failed",
+                )
+            else:
+                self.call_from_thread(
+                    self._apply_diff_text, token, cache_key, result.reason,
+                )
+            return
+
+        # Stream files into `#diff-scroll` one PrerenderedDiff widget
+        # per file as they finish rendering. The first append for this
+        # token clears placeholder/prior content on the main thread
+        # (see `_diff_append_file`); subsequent appends just mount.
+        #
+        # Each file's Rich renderable is converted to a list of
+        # textual `Strip`s **here in the worker thread** — that's the
+        # CPU-bound Segment-generation pass that previously happened
+        # on the main thread at paint time and showed up as a UI hang.
+        # By the time we call_from_thread, the strips are pre-baked;
+        # the main thread's mount + paint becomes effectively
+        # constant-time per file.
+        is_dark = self.current_theme.dark if self.current_theme else True
+        total_added = 0
+        total_removed = 0
         try:
-            is_dark = self.current_theme.dark if self.current_theme else True
-            from rich.console import Group
-            import difflib
-            parts = []
-            total_added = 0
-            total_removed = 0
-            from rich.text import Text as RichText
-            for fd in result.files:
-                parts.append(render_edit_diff(fd.file_path, fd.old_content, fd.new_content, dark=is_dark, style="diff"))
-                parts.append(RichText(""))
-                for line in difflib.unified_diff(fd.old_content.splitlines(), fd.new_content.splitlines(), lineterm=""):
-                    if line.startswith("+") and not line.startswith("+++"):
-                        total_added += 1
-                    elif line.startswith("-") and not line.startswith("---"):
-                        total_removed += 1
-            self.call_from_thread(self._set_diff_widget, Static(Group(*parts)), total_added, total_removed)
+            for path, renderable, added, removed in iter_diff_renderables(
+                result.files, is_dark, is_cancelled,
+            ):
+                if is_cancelled():
+                    return self._on_stream_cancelled(token)
+                strips = renderable_to_strips(renderable, width)
+                if is_cancelled():
+                    return self._on_stream_cancelled(token)
+                self.call_from_thread(
+                    self._diff_append_file, token, path, strips,
+                )
+                total_added += added
+                total_removed += removed
         except Exception as e:
-            self.call_from_thread(self._set_diff_text, f"Diff error: {e}")
+            # Mid-stream render error → wipe whatever's mounted and
+            # surface the error message in its place. `_apply_diff_error`
+            # remove_children's the scroll first, so partial appends
+            # don't linger above the error. The error path does NOT
+            # promote the cache key, so the next kick at the same
+            # (actor, head, width) retries instead of cache-hitting on
+            # a stale error mount.
+            self.call_from_thread(
+                self._apply_diff_error, token, f"Diff error: {e}",
+            )
+            return
+        if is_cancelled():
+            return self._on_stream_cancelled(token)
+        self.call_from_thread(
+            self._apply_diff_build_done,
+            token, cache_key, total_added, total_removed,
+        )
+
+    def _on_stream_cancelled(self, token: int) -> None:
+        """Worker bailout when cancellation flips True mid-stream.
+
+        Partial mounts already on screen STAY (clearing on cancel
+        would make every fast actor switch flicker). The catch: the
+        scroll no longer reflects `_diff_last_applied_key`, so a
+        subsequent kick at the same (actor, head, width) must NOT
+        cache-hit. We invalidate the key here when this token had
+        actually streamed at least one file (i.e. owns the scroll
+        content); without that, the next kick's worker takes the
+        early-out path and the partial state stays stuck on screen
+        forever."""
+        if self._diff_streamed_token == token:
+            self.call_from_thread(self._invalidate_diff_cache_key)
+
+    def _invalidate_diff_cache_key(self) -> None:
+        """Drop the cached `_diff_last_applied_key` so the next
+        build can't short-circuit. Runs on the main thread."""
+        self._diff_last_applied_key = None
+
+    def _diff_append_file(
+        self,
+        token: int,
+        file_path: str,
+        strips: list,
+    ) -> None:
+        """Streaming mount of a single pre-rendered file onto
+        `#diff-scroll`. Stale tokens (newer kick already in flight)
+        skip the mount.
+
+        The first append for a given token clears the scroll —
+        wiping the 300ms placeholder if it fired and any leftover
+        widgets from a prior kick. From there, each subsequent
+        append for the same token mounts one more PrerenderedDiff
+        at the bottom, so the user sees files appear in order as
+        they render. Pending is flipped off on first append too:
+        real content is on screen, the placeholder must not fire.
+
+        `strips` is a list of `textual.strip.Strip` produced off-thread
+        by `renderable_to_strips` — mounting + painting the widget is
+        effectively constant-time, no CPU-bound Rich render at paint."""
+        if token != self._diff_build_token:
+            return
+        try:
+            scroll = self.query_one("#diff-scroll", VerticalScroll)
+        except Exception:
+            return
+        if self._diff_streamed_token != token:
+            scroll.remove_children()
+            self._diff_streamed_token = token
+            self._diff_build_pending = False
+        scroll.mount(PrerenderedDiff(strips))
+
+    def _apply_diff_build_done(
+        self,
+        token: int,
+        cache_key: tuple,
+        total_added: int,
+        total_removed: int,
+    ) -> None:
+        """Finalize a streamed build: lock in the cache key + tab
+        label totals, drop the pending flag. Idempotent against
+        per-file appends — only the cache key + label promotion need
+        to ride this finalizer; the scroll is already populated by
+        the streaming `_diff_append_file` calls.
+
+        Bumps `_diff_badge_token` so any in-flight badge worker
+        from the same kick can no longer apply: the build's count
+        includes untracked files (which shortstat misses), so a
+        late-arriving badge would otherwise revise our authoritative
+        number downward and visually flicker."""
+        if token != self._diff_build_token:
+            return
+        self._diff_build_pending = False
+        self._diff_last_applied_key = cache_key
+        self._diff_badge_token += 1
+        self._update_diff_tab_label(total_added, total_removed)
+
+    def _apply_diff_text(
+        self, token: int, cache_key: tuple, text: str,
+    ) -> None:
+        """Mount a benign reason text (e.g. "working tree clean",
+        "no repository") and CACHE the key. Repeat kicks at the same
+        (actor, head, width) early-out via the cache check — the
+        text mount is still on screen, so that's correct."""
+        if token != self._diff_build_token:
+            return
+        try:
+            scroll = self.query_one("#diff-scroll", VerticalScroll)
+        except Exception:
+            self._diff_build_pending = False
+            return
+        scroll.remove_children()
+        # `markup=False` — exception messages and reason strings can
+        # contain `[brackets]` that Rich would otherwise interpret as
+        # markup (e.g. `[red]` colorizing) and either crash or render
+        # unexpectedly. We want literal text.
+        scroll.mount(Static(text, markup=False))
+        self._diff_build_pending = False
+        self._diff_last_applied_key = cache_key
+        # Same badge-race guard as `_apply_diff_build_done`: an
+        # in-flight badge from this kick must not later overwrite
+        # the no-changes / no-repo label we just committed.
+        self._diff_badge_token += 1
+        self._update_diff_tab_label()
+
+    def _apply_diff_error(self, token: int, text: str) -> None:
+        """Mount a render-error message and INVALIDATE the cache key.
+
+        Two reasons the cache must drop here:
+        1. The scroll now shows error text, not the diff a prior
+           successful build's cache_key represented. Leaving the key
+           cached would let the next non-force kick early-out via
+           `_mark_diff_build_done` and never repaint the diff.
+        2. The render error itself may be transient. The user
+           shouldn't have to wait for HEAD or width to change before
+           a retry succeeds."""
+        if token != self._diff_build_token:
+            return
+        try:
+            scroll = self.query_one("#diff-scroll", VerticalScroll)
+        except Exception:
+            self._diff_build_pending = False
+            return
+        scroll.remove_children()
+        scroll.mount(Static(text, markup=False))
+        self._diff_build_pending = False
+        self._diff_last_applied_key = None
+        # Reset `_diff_loaded_for` so re-selecting the same actor in
+        # the tree retries the build instead of short-circuiting at
+        # the `_maybe_refresh_diff` actor-already-loaded check. Without
+        # this, the user would be stuck on the error message and have
+        # to switch actors and back (or wait for a live-poll force
+        # refresh) just to retry. With this reset, a simple re-click
+        # in the actor tree fires a fresh build.
+        self._diff_loaded_for = None
+        # Same badge-race guard as `_apply_diff_build_done` and
+        # `_apply_diff_text`: a badge worker from this same kick
+        # (still in flight with shortstat counts) must not later
+        # land "+5 -3" on top of the error message we just mounted
+        # — that would split the tab label and the scroll pane into
+        # contradictory states.
+        self._diff_badge_token += 1
+        self._update_diff_tab_label()
+
+    def _mark_diff_build_done(self, token: int) -> None:
+        """Cache-hit early-out path: the worker decided no rebuild was
+        needed. Clear the pending flag so the placeholder doesn't fire
+        and so a subsequent kick can start a new build cleanly."""
+        if token == self._diff_build_token:
+            self._diff_build_pending = False
+
+    # -- Live DIFF refresh while a run is in progress ----------------------
+
+    def _poll_diff_for_running(self) -> None:
+        """2s tick (set_interval). Picks up worktree changes for the
+        currently-selected RUNNING actor and force-refreshes the
+        diff so the tab tracks edits without manual interaction.
+
+        Conditions checked synchronously here on the main thread;
+        the subprocess-bound signal capture (`shortstat`) is then
+        delegated to a worker, which calls back via
+        `_evaluate_diff_poll_signals` for the comparison + refresh
+        decision.
+
+        When conditions don't hold (no actor / not RUNNING / DIFF
+        not the active tab), the recorded baseline resets so a
+        later re-entry doesn't think a stale signal "changed"."""
+        actor = self._diff_poll_actor()
+        if actor is None:
+            self._reset_diff_poll_state()
+            return
+        self._poll_diff_signals_worker(actor)
+
+    def _diff_poll_actor(self) -> Actor | None:
+        """The actor whose diff is eligible for live polling, or
+        None if any of (selection, RUNNING/INTERACTIVE status,
+        DIFF tab active) doesn't hold.
+
+        `Status.INTERACTIVE` is a display-only overlay applied to
+        actors with a live interactive session — under the hood
+        they're typically still RUNNING, and the user is driving
+        them by hand which can absolutely modify the worktree.
+        Excluding INTERACTIVE here would silently disable live
+        diff refresh for one of the most common use cases (a user
+        running an agent interactively while watching its edits)."""
+        try:
+            tree = self.query_one(ActorTree)
+        except Exception:
+            return None
+        actor = tree.selected_actor
+        if actor is None:
+            return None
+        status = self._prev_statuses.get(actor.name)
+        if status not in (Status.RUNNING, Status.INTERACTIVE):
+            return None
+        try:
+            tabs = self.query_one("#tabs", TabbedContent)
+        except Exception:
+            return None
+        if tabs.active != "diff":
+            return None
+        return actor
+
+    @work(thread=True, exclusive=True, group="diff_poll")
+    def _poll_diff_signals_worker(self, actor: Actor) -> None:
+        """Off-main-thread signal capture: stat the index file, run
+        shortstat, and count untracked files. All three are cheap
+        individually, but each is a subprocess and on the main
+        thread that can drop a frame; threading keeps the TUI smooth.
+
+        The untracked count is the third signal because index mtime
+        and shortstat between them miss the most common actor edit:
+        creating a new file. Without this, an actor that runs `Write`
+        on a file the worktree didn't have wouldn't trigger a diff
+        refresh."""
+        mtime = git_index_mtime(actor)
+        shortstat = compute_diff_shortstat(actor)
+        untracked = git_untracked_count(actor)
+        self.call_from_thread(
+            self._evaluate_diff_poll_signals,
+            actor.name, mtime, shortstat, untracked,
+        )
+
+    def _evaluate_diff_poll_signals(
+        self,
+        actor_name: str,
+        mtime: float | None,
+        shortstat: tuple[int, int] | None,
+        untracked: int | None,
+    ) -> None:
+        """Main-thread signal comparison + refresh decision.
+
+        Re-checks polling conditions because the worker may have
+        raced with a tab/actor change since the kick: stale signals
+        from a prior selection must not refresh the diff for a
+        different actor.
+
+        Re-baselines whenever the actor changes — without that, the
+        baseline from alice's signals would compare against bob's on
+        the next tick after a switch, falsely "detect a change", and
+        fire a redundant force-refresh on top of the actor-switch
+        kick `on_tree_node_highlighted` already triggered."""
+        actor = self._diff_poll_actor()
+        if actor is None or actor.name != actor_name:
+            return
+        if (
+            not self._diff_poll_initialized
+            or self._diff_poll_last_actor != actor_name
+        ):
+            # First observation since conditions became true OR the
+            # selected actor changed. The user has just landed on
+            # this actor's DIFF, so the active build / cache key is
+            # presumably already correct — we don't refresh, just
+            # record the baseline for next time.
+            self._diff_poll_initialized = True
+            self._diff_poll_last_actor = actor_name
+            self._diff_poll_last_index_mtime = mtime
+            self._diff_poll_last_shortstat = shortstat
+            self._diff_poll_last_untracked = untracked
+            return
+        changed = (
+            mtime != self._diff_poll_last_index_mtime
+            or shortstat != self._diff_poll_last_shortstat
+            or untracked != self._diff_poll_last_untracked
+        )
+        self._diff_poll_last_index_mtime = mtime
+        self._diff_poll_last_shortstat = shortstat
+        self._diff_poll_last_untracked = untracked
+        if changed:
+            self._maybe_refresh_diff(force=True)
+
+    def _reset_diff_poll_state(self) -> None:
+        self._diff_poll_initialized = False
+        self._diff_poll_last_actor = None
+        self._diff_poll_last_index_mtime = None
+        self._diff_poll_last_shortstat = None
+        self._diff_poll_last_untracked = None
 
     def _update_diff_tab_label(self, added: int = 0, removed: int = 0) -> None:
+        # Pill-style ` +N -M` badge using the same fg/bg the diff body
+        # uses for added/removed lines (`DARK_COLORS` / `LIGHT_COLORS`
+        # in diff_render). Inactive tab → colored pills; active tab →
+        # plain text (Textual's focus-background overrides our colors
+        # there and would produce unreadable contrast). The
+        # active-state stripping happens in `_refresh_tab_arrows`.
         if added or removed:
-            base = f"DIFF (±{added + removed})"
+            from .diff_render import DARK_COLORS, LIGHT_COLORS
+            # `current_theme` raises ReactiveError before super().__init__
+            # runs (some tests bypass init). Default to dark on failure.
+            try:
+                t = self.current_theme
+                is_dark = t.dark if t else True
+            except Exception:
+                is_dark = True
+            dc = DARK_COLORS if is_dark else LIGHT_COLORS
+            added_style = f"{dc.added_marker} on {dc.added_bg}"
+            removed_style = f"{dc.removed_marker} on {dc.removed_bg}"
+            base: str | Text = Text("DIFF")
+            if added:
+                base.append(f" +{added}", style=added_style)
+            if removed:
+                base.append(f" -{removed}", style=removed_style)
         else:
             base = "DIFF"
         self._tab_base_labels["diff"] = base
@@ -864,7 +1440,13 @@ class ActorWatchApp(App):
             if tab is None:
                 continue
             if tab_id == active_id and focused:
-                tab.label = f"→ {base}"
+                # Drop styles when this tab is the focused-active one —
+                # Textual paints its own reverse-video focus background
+                # over the label, and our pill colors fight it (e.g.
+                # green-on-darkgreen badge becomes unreadable on the
+                # active-tab background). Use the plain text form.
+                plain = base.plain if isinstance(base, Text) else base
+                tab.label = f"→ {plain}"
             else:
                 tab.label = base
 
@@ -884,6 +1466,9 @@ class ActorWatchApp(App):
         # first paint sees real content at the real width instead
         # of a stale/empty cache that then gets corrected.
         self._flush_pending_logs_if_visible()
+        # Same story for DIFF: kicks that happened while the tab was
+        # hidden stash on `_diff_pending_actor`; flush them now.
+        self._flush_pending_diff_if_visible()
 
     def _flush_pending_logs_if_visible(self) -> None:
         """Re-run the logs renderer once LIVE has a non-zero width,
@@ -921,17 +1506,39 @@ class ActorWatchApp(App):
     def on_descendant_blur(self, event) -> None:
         self._refresh_tab_arrows()
 
-    def _set_diff_text(self, text: str) -> None:
-        scroll = self.query_one("#diff-scroll", VerticalScroll)
-        scroll.remove_children()
-        scroll.mount(Static(text))
-        self._update_diff_tab_label()
+    def _flush_pending_diff_if_visible(self) -> None:
+        """Re-kick the stashed diff build once DIFF has a non-zero
+        width, mirroring `_flush_pending_logs_if_visible`. Called from
+        the tab-activated handler.
 
-    def _set_diff_widget(self, dv: object, added: int = 0, removed: int = 0) -> None:
-        scroll = self.query_one("#diff-scroll", VerticalScroll)
-        scroll.remove_children()
-        scroll.mount(dv)
-        self._update_diff_tab_label(added, removed)
+        `_kick_diff_build`'s width-0 guard handles the "still hidden"
+        case (it just re-stashes), and the cache-key comparison in
+        the worker short-circuits the "user toggled tabs but nothing
+        else changed" case so we don't pay for redundant rebuilds."""
+        if self._diff_pending_actor is None:
+            return
+        name = self._diff_pending_actor
+
+        def _attempt() -> None:
+            try:
+                scroll = self.query_one("#diff-scroll", VerticalScroll)
+            except Exception:
+                return
+            if scroll.size.width == 0:
+                return
+            actor = next(
+                (a for a in self._current_actors if a.name == name), None,
+            )
+            if actor is None:
+                # Actor was discarded between the stash and the
+                # flush. Clear the stash so subsequent tab
+                # activations don't repeatedly try (and fail) to
+                # resolve a stale name.
+                self._diff_pending_actor = None
+                return
+            self._kick_diff_build(actor)
+
+        self.call_after_refresh(_attempt)
 
     # -- Runs ----------------------------------------------------------------
 

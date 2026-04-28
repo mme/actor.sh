@@ -6,13 +6,27 @@ import difflib
 import json
 import re
 from pathlib import Path
-from typing import NamedTuple
+from typing import Callable, NamedTuple, TYPE_CHECKING
 
 from pygments.lexers import get_lexer_for_filename, TextLexer
 from pygments.token import Token
 from rich.console import Group
 from rich.table import Table
 from rich.text import Text
+
+if TYPE_CHECKING:
+    from .helpers import FileDiff
+
+
+# Callable returning True when the build should abort. Builders check
+# between files and after each per-file render; the default never
+# cancels, so synchronous callers can ignore this entirely. Mirrors
+# the `CancelCheck` contract used by the logs renderer.
+CancelCheck = Callable[[], bool]
+
+
+def _never_cancelled() -> bool:
+    return False
 
 
 
@@ -62,17 +76,27 @@ def _tokenize(s: str) -> list[str]:
     return re.findall(r'\S+|\s+', s)
 
 
-def _word_diff(old: str, new: str) -> tuple[list[tuple[str, bool]], list[tuple[str, bool]]]:
-    """Compute word-level diff. Returns (old_tokens, new_tokens) with changed flag."""
+def _word_diff(
+    old: str, new: str,
+) -> tuple[list[tuple[str, bool]], list[tuple[str, bool]]] | None:
+    """Compute word-level diff. Returns ``(old_tokens, new_tokens)``
+    with per-token changed flags, or ``None`` when the lines are too
+    dissimilar to make per-word highlighting useful (>40% of tokens
+    changed). Callers should treat None as "skip the word-diff path
+    and render this line with the standard line-bg + syntax
+    highlighting"."""
     old_tokens = _tokenize(old)
     new_tokens = _tokenize(new)
 
     sm = difflib.SequenceMatcher(None, old_tokens, new_tokens)
 
-    # If more than 40% changed, don't do word highlighting
+    # If more than 40% changed, don't do word highlighting — the
+    # whole line ends up smeared with `*_word_bg` which is louder
+    # than the standard line-bg and obscures rather than highlights
+    # the actual change. The caller falls back to the no-pair path.
     ratio = sm.ratio()
     if ratio < 0.6:
-        return [(old, True)], [(new, True)]
+        return None
 
     old_result: list[tuple[str, bool]] = []
     new_result: list[tuple[str, bool]] = []
@@ -217,10 +241,7 @@ def render_edit_diff(
             if match:
                 old_num = int(match.group(1))
                 new_num = int(match.group(2))
-                if entries:
-                    entries.append({"type": "hunk", "header": line})
-                else:
-                    entries.append({"type": "hunk", "header": line})
+                entries.append({"type": "hunk", "header": line})
             continue
         if line.startswith('---') or line.startswith('+++'):
             continue
@@ -244,12 +265,21 @@ def render_edit_diff(
     max_num = max((e.get("num", 0) for e in entries if e["type"] != "ellipsis"), default=0)
     num_width = len(str(max_num))
 
-    # Compute word-diff ranges for adjacent del+add pairs
+    # Compute word-diff ranges for adjacent del+add pairs. Lines
+    # too dissimilar (>40% changed) get a None back — those entries
+    # never enter `word_diffs`, so the per-line render below falls
+    # through to the standard syntax-highlighted line-bg path
+    # instead of smearing the whole line with `*_word_bg`.
     markers = [e.get("marker", "") for e in entries]
     pairs = _find_adjacent_pairs(markers)
     word_diffs: dict[int, list[tuple[str, bool]]] = {}
     for del_idx, add_idx in pairs:
-        old_tokens, new_tokens = _word_diff(entries[del_idx]["code"], entries[add_idx]["code"])
+        result = _word_diff(
+            entries[del_idx]["code"], entries[add_idx]["code"],
+        )
+        if result is None:
+            continue
+        old_tokens, new_tokens = result
         word_diffs[del_idx] = old_tokens
         word_diffs[add_idx] = new_tokens
 
@@ -374,6 +404,73 @@ def render_write_diff(
 ) -> Group:
     """Render a file write as all-added lines."""
     return render_edit_diff(file_path, "", content, dark=dark)
+
+
+def iter_diff_renderables(
+    files: list["FileDiff"],
+    dark: bool,
+    is_cancelled: CancelCheck = _never_cancelled,
+):
+    """Generator that yields ``(file_path, renderable, added, removed)``
+    per file, suitable for streaming mounts onto the DIFF pane.
+
+    The watch app's build worker iterates this generator and calls
+    ``call_from_thread(_diff_append_file, ...)`` for each yielded
+    tuple, so a 50-file diff appears progressively rather than after
+    one giant final mount. Stays safe to call from a worker thread —
+    no widget state is touched here.
+
+    Cancellation: ``is_cancelled()`` is checked BEFORE rendering each
+    file and AFTER rendering but BEFORE yielding. On cancel, the
+    generator returns silently — the consumer should check
+    ``is_cancelled()`` after the loop to distinguish "drained
+    naturally" from "stopped mid-stream", and skip the
+    finalize/commit step in the latter case.
+
+    Per-file ± counts come straight from `FileDiff.added` /
+    `FileDiff.removed`, which `compute_diff` populates by parsing
+    `git diff` output (Stage 2)."""
+    for fd in files:
+        if is_cancelled():
+            return
+        renderable = render_edit_diff(
+            fd.file_path, fd.old_content, fd.new_content,
+            dark=dark, style="diff",
+        )
+        if is_cancelled():
+            return
+        yield fd.file_path, renderable, fd.added, fd.removed
+
+
+def build_diff_renderables(
+    files: list["FileDiff"],
+    dark: bool,
+    is_cancelled: CancelCheck = _never_cancelled,
+) -> tuple[list, int, int] | None:
+    """Synchronous full-build wrapper around `iter_diff_renderables`.
+
+    Returns ``(parts, total_added, total_removed)`` on success or
+    ``None`` when cancellation aborted the iteration. Each rendered
+    file gets a trailing blank Text separator inside ``parts`` to
+    match the previous mount layout for callers that still want a
+    single `Group(*parts)` mount (e.g. tests, ad-hoc tools).
+
+    The watch app's build worker bypasses this wrapper and consumes
+    the iterator directly so it can mount per-file as renders complete
+    — see `_build_diff_worker` in `actor.watch.app`."""
+    parts: list = []
+    total_added = 0
+    total_removed = 0
+    for _path, renderable, added, removed in iter_diff_renderables(
+        files, dark, is_cancelled,
+    ):
+        parts.append(renderable)
+        parts.append(Text(""))
+        total_added += added
+        total_removed += removed
+    if is_cancelled():
+        return None
+    return parts, total_added, total_removed
 
 
 def try_render_tool_diff(name: str, input_json: str, dark: bool = True) -> Group | None:
