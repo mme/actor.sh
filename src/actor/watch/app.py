@@ -891,9 +891,23 @@ class ActorWatchApp(App):
     def _maybe_refresh_diff(self, force: bool = False) -> None:
         actor = self.query_one(ActorTree).selected_actor
         if actor is None:
+            # Selection cleared (e.g. previously-selected actor was
+            # discarded with no replacement). Wipe the badge so the
+            # tabs bar doesn't display stale ±N from the prior actor.
+            if self._diff_loaded_for is not None:
+                self._update_diff_tab_label()
+                self._diff_loaded_for = None
             return
         if not force and self._diff_loaded_for == actor.name:
             return
+        # Actor change: reset the badge before kicking. If the new
+        # actor's shortstat call fails (broken base ref, no repo,
+        # etc.) `_apply_diff_badge` is never called and the previous
+        # actor's ±N would otherwise stick on the label. Clearing
+        # here means a failed kick falls back to plain "DIFF" rather
+        # than misleading numbers from a different worktree.
+        if self._diff_loaded_for != actor.name:
+            self._update_diff_tab_label()
         self._diff_loaded_for = actor.name
         # Kick both paths together. The badge is independent of the
         # full build — even if the build is stashed because DIFF is
