@@ -164,6 +164,74 @@ def read_head_oid(actor: Actor) -> str | None:
     return oid or None
 
 
+def parse_shortstat(line: str) -> tuple[int, int]:
+    """Parse `git diff --shortstat` summary line into (added, removed).
+
+    Output format examples (note the leading space):
+      `` 3 files changed, 7 insertions(+), 2 deletions(-)``
+      `` 1 file changed, 1 insertion(+)``         (no deletions case)
+      `` 1 file changed, 1 deletion(-)``          (no insertions case)
+      ``""``                                      (no changes)
+
+    Returns (0, 0) for empty / unparseable input rather than raising —
+    the badge is best-effort UX, not a correctness gate."""
+    added = 0
+    removed = 0
+    for chunk in line.split(","):
+        chunk = chunk.strip()
+        if "insertion" in chunk:
+            try:
+                added = int(chunk.split()[0])
+            except (ValueError, IndexError):
+                pass
+        elif "deletion" in chunk:
+            try:
+                removed = int(chunk.split()[0])
+            except (ValueError, IndexError):
+                pass
+    return added, removed
+
+
+def compute_diff_shortstat(actor: Actor) -> tuple[int, int] | None:
+    """Quick `git diff --shortstat` against the merge base — used by
+    the watch DIFF tab to populate the (±N) badge label in <100ms
+    while the heavier `compute_diff` + render path is still running.
+
+    Two subprocesses (`merge-base` + `diff --shortstat`); returns the
+    combined (added, removed) line counts. Untracked files are NOT
+    included — shortstat only sees the index. The full build's later
+    `_update_diff_tab_label` call lands the authoritative number when
+    it commits, which may revise the badge upward if untracked files
+    contributed lines.
+
+    Returns None when git fails (no repo, missing base, etc.)."""
+    base_branch = actor.base_branch or "HEAD"
+    try:
+        mb = subprocess.run(
+            ["git", "merge-base", base_branch, "HEAD"],
+            capture_output=True, text=True, cwd=actor.dir,
+        )
+    except Exception:
+        return None
+    if mb.returncode != 0:
+        if "not a git repository" in (mb.stderr or "").lower():
+            return None
+        diff_ref = base_branch
+    else:
+        diff_ref = mb.stdout.strip() or base_branch
+
+    try:
+        ss = subprocess.run(
+            ["git", "diff", "--shortstat", diff_ref],
+            capture_output=True, text=True, cwd=actor.dir,
+        )
+    except Exception:
+        return None
+    if ss.returncode != 0:
+        return None
+    return parse_shortstat(ss.stdout)
+
+
 def _parse_diff_files(diff_output: str) -> list[dict]:
     """Parse `git diff --no-color` output into per-file metadata.
 

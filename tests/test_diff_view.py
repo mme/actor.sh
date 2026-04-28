@@ -26,6 +26,8 @@ from actor.watch.helpers import (
     _git_cat_file_batch,
     _parse_diff_files,
     compute_diff,
+    compute_diff_shortstat,
+    parse_shortstat,
 )
 
 
@@ -43,6 +45,8 @@ def _bare_app() -> ActorWatchApp:
     app._diff_build_target_width = 0
     app._diff_last_applied_key = None
     app._diff_pending_actor = None
+    app._diff_badge_token = 0
+    app._diff_badge_target_actor = None
     app._current_actors = []
     app._tab_base_labels = {
         "logs": "LIVE", "diff": "DIFF",
@@ -700,6 +704,238 @@ class FileDiffCountsPlumbingTests(unittest.TestCase):
         _parts, total_added, total_removed = result
         self.assertEqual(total_added, 5)
         self.assertEqual(total_removed, 3)
+
+
+# -- Stage 3: cheap-badge-first ----------------------------------------------
+
+
+class ParseShortstatTests(unittest.TestCase):
+    """`git diff --shortstat` summary line parser. Drives the
+    near-instant DIFF (±N) badge so the user sees diff size before
+    the full render commits."""
+
+    def test_modifications(self):
+        line = " 3 files changed, 7 insertions(+), 2 deletions(-)\n"
+        self.assertEqual(parse_shortstat(line), (7, 2))
+
+    def test_only_insertions(self):
+        line = " 1 file changed, 1 insertion(+)\n"
+        self.assertEqual(parse_shortstat(line), (1, 0))
+
+    def test_only_deletions(self):
+        line = " 1 file changed, 1 deletion(-)\n"
+        self.assertEqual(parse_shortstat(line), (0, 1))
+
+    def test_empty_input(self):
+        self.assertEqual(parse_shortstat(""), (0, 0))
+
+    def test_garbled_input_returns_zeros(self):
+        # The badge is best-effort — a malformed line shouldn't crash
+        # the worker, just produce zeros.
+        self.assertEqual(parse_shortstat("nonsense\n"), (0, 0))
+
+
+class ComputeDiffShortstatTests(unittest.TestCase):
+    """End-to-end: shortstat against a real temp repo. Verifies the
+    two-subprocess path (merge-base + shortstat) returns the right
+    counts for a working-tree diff."""
+
+    def test_returns_added_removed_for_modified_files(self):
+        if shutil.which("git") is None:
+            self.skipTest("git not available")
+        tmp = _build_repo(n_files=5)
+        try:
+            actor = _fake_actor_for_repo(tmp)
+            counts = compute_diff_shortstat(actor)
+            self.assertEqual(counts, (5, 5))  # 1 add + 1 del per file
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_returns_zeros_when_no_changes(self):
+        if shutil.which("git") is None:
+            self.skipTest("git not available")
+        tmp = tempfile.mkdtemp(prefix="actor-shortstat-clean-")
+        try:
+            _git("init", "-q", "-b", "main", tmp, cwd=tmp)
+            Path(tmp, "seed.txt").write_text("seed\n")
+            _git("add", "-A", cwd=tmp)
+            _git("commit", "-q", "-m", "seed", cwd=tmp)
+            actor = _fake_actor_for_repo(tmp)
+            counts = compute_diff_shortstat(actor)
+            self.assertEqual(counts, (0, 0))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_returns_none_when_not_a_repo(self):
+        tmp = tempfile.mkdtemp(prefix="actor-shortstat-notrepo-")
+        try:
+            actor = MagicMock()
+            actor.dir = tmp
+            actor.base_branch = "main"
+            actor.name = "x"
+            self.assertIsNone(compute_diff_shortstat(actor))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class ApplyDiffBadgeTests(unittest.TestCase):
+    """Token discipline mirrors the build apply path: stale badge
+    workers (whose token was superseded by a newer kick) drop their
+    output silently."""
+
+    def test_apply_diff_badge_drops_when_token_stale(self):
+        app = _bare_app()
+        app._diff_badge_token = 5
+        # Older worker calls back with a stale token; nothing happens.
+        with patch.object(app, "_update_diff_tab_label") as upd:
+            app._apply_diff_badge(token=3, added=10, removed=2)
+        upd.assert_not_called()
+
+    def test_apply_diff_badge_updates_label_when_token_matches(self):
+        app = _bare_app()
+        app._diff_badge_token = 7
+        with patch.object(app, "_refresh_tab_arrows"):
+            app._apply_diff_badge(token=7, added=5, removed=3)
+        # Label rendered with the combined ± total.
+        self.assertEqual(app._tab_base_labels["diff"], "DIFF (±8)")
+
+
+class KickDiffBadgeTests(unittest.TestCase):
+    """The badge kick is independent of the build kick — it fires
+    even when DIFF is hidden, doesn't depend on widget width, and
+    bumps its own token counter."""
+
+    def test_kick_bumps_token_and_starts_worker(self):
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        with patch.object(app, "_build_diff_badge_worker") as worker:
+            app._kick_diff_badge(actor)
+        self.assertEqual(app._diff_badge_token, 1)
+        self.assertEqual(app._diff_badge_target_actor, "alice")
+        worker.assert_called_once()
+        args, _kwargs = worker.call_args
+        self.assertEqual(args[0], 1)
+        self.assertIs(args[1], actor)
+
+    def test_kick_fires_even_when_diff_pane_hidden(self):
+        """The badge sits in the always-visible tabs bar, so it must
+        update independently of which tab is currently active."""
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        # Simulate hidden DIFF pane (width 0) — Stage 1's build kick
+        # would stash. The badge kick MUST NOT consult widget width.
+        with patch.object(app, "query_one",
+                          return_value=_scroll_with_width(0)), \
+             patch.object(app, "_build_diff_badge_worker") as worker:
+            app._kick_diff_badge(actor)
+        worker.assert_called_once()
+
+
+class BadgeBeforeBuildTests(unittest.TestCase):
+    """Acceptance bar from the plan: badge appears before the full
+    build commits. Both paths fire from the same kick; their
+    completion ordering is independent (worker → main-thread apply
+    via call_from_thread)."""
+
+    def test_maybe_refresh_diff_kicks_both_paths(self):
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        tree = MagicMock()
+        tree.selected_actor = actor
+        with patch.object(app, "query_one", return_value=tree), \
+             patch.object(app, "_kick_diff_badge") as badge_kick, \
+             patch.object(app, "_kick_diff_build") as build_kick:
+            app._maybe_refresh_diff()
+        badge_kick.assert_called_once_with(actor)
+        build_kick.assert_called_once_with(actor)
+
+    def test_badge_apply_can_land_before_build_apply(self):
+        """Their tokens are independent counters, so a fast badge
+        worker committing first doesn't bump the build token. The
+        build's later apply still has its token intact and lands."""
+        app = _bare_app()
+        # Both paths kicked together.
+        app._diff_badge_token = 1
+        app._diff_build_token = 1
+        app._diff_build_pending = True
+
+        # Badge fires first.
+        with patch.object(app, "_refresh_tab_arrows"):
+            app._apply_diff_badge(token=1, added=12, removed=3)
+        self.assertEqual(app._tab_base_labels["diff"], "DIFF (±15)")
+        # Build path's token is untouched — it can still land.
+        self.assertEqual(app._diff_build_token, 1)
+        self.assertTrue(app._diff_build_pending)
+
+        # Build commits later with its own counts. Last write wins;
+        # the build's number is authoritative (e.g. it includes
+        # untracked files that shortstat misses).
+        scroll = _scroll_with_width(100)
+        with patch.object(app, "query_one", return_value=scroll), \
+             patch.object(app, "_refresh_tab_arrows"):
+            app._apply_diff_build(
+                token=1,
+                cache_key=("alice", "deadbeef", 100),
+                parts=[],
+                total_added=14,  # diverges from badge's 12 (untracked)
+                total_removed=3,
+            )
+        self.assertEqual(app._tab_base_labels["diff"], "DIFF (±17)")
+        self.assertFalse(app._diff_build_pending)
+
+
+class BadgeWorkerCancellationTests(unittest.TestCase):
+    """Newer kicks supersede older badge workers via the token. The
+    worker checks its token both before and after the subprocess
+    work so a stale result never reaches the apply step."""
+
+    def test_worker_bails_when_token_advances_before_shortstat(self):
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        # Newer kick already advanced the token.
+        app._diff_badge_token = 99
+        with patch("actor.watch.app.compute_diff_shortstat") as ss, \
+             patch.object(app, "call_from_thread") as cft:
+            ActorWatchApp._build_diff_badge_worker.__wrapped__(
+                app, 1, actor,  # stale token = 1, current = 99
+            )
+        ss.assert_not_called()
+        cft.assert_not_called()
+
+    def test_worker_bails_when_token_advances_after_shortstat(self):
+        """Token can advance during the subprocess call — a faster
+        kick from a tab activation, for example. The post-shortstat
+        check must catch that."""
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._diff_badge_token = 1
+        # compute_diff_shortstat returns counts but in the meantime a
+        # newer kick bumped the token.
+        def shortstat_then_advance(_actor):
+            app._diff_badge_token = 2
+            return (5, 3)
+        with patch("actor.watch.app.compute_diff_shortstat",
+                   side_effect=shortstat_then_advance), \
+             patch.object(app, "call_from_thread") as cft:
+            ActorWatchApp._build_diff_badge_worker.__wrapped__(
+                app, 1, actor,
+            )
+        cft.assert_not_called()
+
+    def test_worker_skips_apply_when_shortstat_returns_none(self):
+        """compute_diff_shortstat returns None on git failure (no
+        repo, missing base, etc.) — the worker just returns rather
+        than committing zeros, leaving any prior badge intact."""
+        app = _bare_app()
+        actor = _fake_actor("alice")
+        app._diff_badge_token = 1
+        with patch("actor.watch.app.compute_diff_shortstat",
+                   return_value=None), \
+             patch.object(app, "call_from_thread") as cft:
+            ActorWatchApp._build_diff_badge_worker.__wrapped__(
+                app, 1, actor,
+            )
+        cft.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -40,7 +40,12 @@ from .omarchy_theme import (
 from .themes import CLAUDE_DARK, CLAUDE_LIGHT
 from .tree import ActorTree
 from .diff_render import build_diff_renderables
-from .helpers import compute_diff, read_head_oid, read_log_entries_since
+from .helpers import (
+    compute_diff,
+    compute_diff_shortstat,
+    read_head_oid,
+    read_log_entries_since,
+)
 from .log_renderer import (
     append_log_entries,
     apply_log_renderables,
@@ -219,6 +224,15 @@ class ActorWatchApp(App):
     _diff_build_target_width: int = 0
     _diff_last_applied_key: tuple | None = None
     _diff_pending_actor: str | None = None
+
+    # Cheap-badge-first state. Independent of the full build path —
+    # the badge worker runs `git diff --shortstat` to produce a
+    # near-instant ±N for the tab label while the heavier full build
+    # is still parsing diffs and rendering Tables. Token discipline
+    # mirrors the build path but uses its own counter so the two
+    # paths cancel independently.
+    _diff_badge_token: int = 0
+    _diff_badge_target_actor: str | None = None
 
     # Base labels for each tab (without the arrow prefix). Kept separate
     # from the rendered tab.label so we can re-apply the "active +
@@ -550,9 +564,11 @@ class ActorWatchApp(App):
         scroll = self.query_one("#diff-scroll", VerticalScroll)
         scroll.remove_children()
         self._diff_loaded_for = None
-        # Cancel any in-flight diff build by bumping the token; the
-        # worker's apply will see a mismatch and drop its output.
+        # Cancel any in-flight diff build / badge worker by bumping
+        # both tokens; their applies will see a mismatch and drop
+        # their output.
         self._diff_build_token += 1
+        self._diff_badge_token += 1
         self._diff_build_pending = False
         self._diff_last_applied_key = None
         self._diff_pending_actor = None
@@ -848,7 +864,50 @@ class ActorWatchApp(App):
         if not force and self._diff_loaded_for == actor.name:
             return
         self._diff_loaded_for = actor.name
+        # Kick both paths together. The badge is independent of the
+        # full build — even if the build is stashed because DIFF is
+        # hidden, the badge still fires and updates the always-visible
+        # tab label.
+        self._kick_diff_badge(actor)
         self._kick_diff_build(actor)
+
+    def _kick_diff_badge(self, actor: Actor) -> None:
+        """Fire a quick `git diff --shortstat` worker just to populate
+        the DIFF (±N) tab label. Independent of the full build path
+        so the label appears in <100ms even when the full render is
+        still parsing diffs and building Tables.
+
+        Fires regardless of whether the DIFF tab is currently active —
+        the label sits in the tabs bar, which is always visible, so a
+        user looking at LIVE still benefits from seeing what's pending
+        on DIFF. (The full build path's hidden-tab stash is about
+        avoiding zero-width RichLog renders; the badge has no widget
+        to render into, so the same constraint doesn't apply.)"""
+        self._diff_badge_token += 1
+        self._diff_badge_target_actor = actor.name
+        self._build_diff_badge_worker(self._diff_badge_token, actor)
+
+    @work(thread=True, exclusive=True, group="diff_badge")
+    def _build_diff_badge_worker(self, token: int, actor: Actor) -> None:
+        # Cooperative cancel — same discipline as the build worker.
+        if self._diff_badge_token != token:
+            return
+        counts = compute_diff_shortstat(actor)
+        if self._diff_badge_token != token or counts is None:
+            return
+        added, removed = counts
+        self.call_from_thread(self._apply_diff_badge, token, added, removed)
+
+    def _apply_diff_badge(self, token: int, added: int, removed: int) -> None:
+        """Main-thread commit of badge counts. Stale tokens drop
+        silently; the build-path apply will land its own (possibly
+        higher, if untracked files contributed) counts later either
+        way. The two paths share `_update_diff_tab_label` — last
+        write wins, which is fine because the build's number is
+        authoritative and arrives last."""
+        if token != self._diff_badge_token:
+            return
+        self._update_diff_tab_label(added, removed)
 
     def _kick_diff_build(self, actor: Actor) -> None:
         """Start an off-thread diff build with token + 300ms placeholder.
