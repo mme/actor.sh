@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from actor import (
     # Exceptions
@@ -1332,12 +1333,19 @@ class TestCmdList(unittest.TestCase):
             self.assertGreater(len(line), status_col, f"line too short: {line!r}")
 
     def test_running_no_pid_stays_running(self):
+        """A RUNNING row with `pid=None` is the brief gap between
+        `db.insert_run` and `db.update_run_pid` while `agent.start()`
+        is in flight. Treat it as RUNNING (not ERROR) — flipping it
+        would turn every fresh codex actor into a momentary error
+        flash because codex's `start()` blocks on the first stdout
+        line for ~1-2s."""
         db = self._db()
         pm = FakeProcessManager()
         db.insert_actor(make_actor("no-pid"))
         db.insert_run(make_run("no-pid", "mystery", Status.RUNNING, pid=None))
         output = cmd_list(db, pm, status_filter=None)
-        self.assertIn("error", output)
+        self.assertIn("running", output)
+        self.assertNotIn("error", output)
 
     def test_multiline_prompt_uses_first_line(self):
         db = self._db()
@@ -1479,13 +1487,17 @@ class TestCmdShow(unittest.TestCase):
         self.assertEqual(run.status, Status.ERROR)
 
     def test_show_running_no_pid_stays_running(self):
+        """Mirror of the cmd_list test for cmd_show. RUNNING + null
+        pid is the in-flight window before `agent.start()` returns;
+        treat it as RUNNING, not ERROR."""
         db = self._db()
         pm = FakeProcessManager()
         db.insert_actor(make_actor("no-pid"))
         db.insert_run(make_run("no-pid", "mystery", Status.RUNNING, pid=None,
                                started_at="2026-01-01T00:00:00Z"))
         output = cmd_show(db, pm, name="no-pid", runs_limit=5)
-        self.assertIn("Status:    error", output)
+        self.assertIn("Status:    running", output)
+        self.assertNotIn("Status:    error", output)
 
     # -- Runs table tests (17) --
 
@@ -2621,6 +2633,278 @@ class TestCodexAgent(unittest.TestCase):
         v = json.loads(line)
         thread_id = v.get("thread_id")
         self.assertEqual(thread_id, "019d685b-6ed6-7f72-bdaa-19533aad1f43")
+
+
+class TestResolveActorStatusPidRace(unittest.TestCase):
+    """`cmd_run` inserts a RUNNING run row with `pid=None`, then calls
+    `agent.start()` and writes the pid back. Codex's `start()` blocks
+    reading the first stdout line and can take a second or two — long
+    enough for the watch's status poll to observe the pid-less row.
+    Without the guard, that poll concluded the run was dead and
+    flipped it to ERROR, producing a momentary error flash on every
+    fresh codex actor."""
+
+    def _db(self):
+        from actor.db import Database
+        return Database.open(":memory:")
+
+    def _insert_actor_and_run(self, db, *, status, pid):
+        from actor.types import Actor, ActorConfig, AgentKind, Run, Status
+        actor = Actor(
+            name="alice",
+            agent=AgentKind.CLAUDE,
+            agent_session=None,
+            dir="/tmp/alice",
+            source_repo=None,
+            base_branch=None,
+            worktree=False,
+            parent=None,
+            config=ActorConfig(),
+            created_at="2026-04-30T00:00:00Z",
+            updated_at="2026-04-30T00:00:00Z",
+        )
+        db.insert_actor(actor)
+        run_id = db.insert_run(Run(
+            id=0,
+            actor_name="alice",
+            prompt="hi",
+            status=status,
+            exit_code=None,
+            pid=pid,
+            config=ActorConfig(),
+            started_at="2026-04-30T00:00:00Z",
+            finished_at=None,
+        ))
+        return run_id
+
+    def test_running_with_null_pid_stays_running(self):
+        """The pid hasn't been observed yet; don't flip to ERROR."""
+        from actor.types import Status
+        db = self._db()
+        self._insert_actor_and_run(db, status=Status.RUNNING, pid=None)
+        pm = MagicMock()
+        pm.is_alive = MagicMock(return_value=False)  # never consulted
+        status = db.resolve_actor_status("alice", pm)
+        self.assertEqual(status, Status.RUNNING)
+        # is_alive must NOT have been queried — pid=None means "no
+        # observation yet", we don't probe a non-existent pid.
+        pm.is_alive.assert_not_called()
+
+    def test_running_with_dead_pid_flips_to_error(self):
+        """Pid is set but the process is gone — that's still ERROR."""
+        from actor.types import Status
+        db = self._db()
+        run_id = self._insert_actor_and_run(db, status=Status.RUNNING, pid=99999)
+        pm = MagicMock()
+        pm.is_alive = MagicMock(return_value=False)
+        status = db.resolve_actor_status("alice", pm)
+        self.assertEqual(status, Status.ERROR)
+        run = db.get_run(run_id)
+        self.assertEqual(run.status, Status.ERROR)
+        self.assertEqual(run.exit_code, -1)
+
+    def test_running_with_alive_pid_stays_running(self):
+        from actor.types import Status
+        db = self._db()
+        self._insert_actor_and_run(db, status=Status.RUNNING, pid=42)
+        pm = MagicMock()
+        pm.is_alive = MagicMock(return_value=True)
+        status = db.resolve_actor_status("alice", pm)
+        self.assertEqual(status, Status.RUNNING)
+        pm.is_alive.assert_called_once_with(42)
+
+
+class TestCodexParser(unittest.TestCase):
+    """Codex JSONL parser surface — covers the modern rollout shape
+    where tool calls / outputs / token counts live under the
+    `response_item` and `event_msg.token_count` channels rather than
+    the older `event_msg.exec_command*` events the parser used to
+    target. Each test exercises one record kind in isolation, plus
+    one integration test that walks the four-turn shape from the
+    sample session."""
+
+    @staticmethod
+    def _parse(record: dict):
+        from actor.agents.codex import CodexAgent
+        return CodexAgent._parse_log_dict(record)
+
+    def test_event_msg_user_message_extracts_user_with_timestamp(self):
+        entries, usage = self._parse({
+            "timestamp": "2026-04-30T13:43:29.722Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "hey codex"},
+        })
+        self.assertIsNone(usage)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].kind.value, "user")
+        self.assertEqual(entries[0].text, "hey codex")
+        self.assertEqual(entries[0].timestamp, "2026-04-30T13:43:29.722Z")
+
+    def test_event_msg_agent_message_extracts_assistant(self):
+        entries, _ = self._parse({
+            "timestamp": "2026-04-30T13:43:33.608Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "Hey."},
+        })
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].kind.value, "assistant")
+        self.assertEqual(entries[0].text, "Hey.")
+
+    def test_response_item_function_call_extracts_tool_use(self):
+        entries, _ = self._parse({
+            "timestamp": "2026-04-30T13:43:55.040Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": '{"cmd":"ls"}',
+                "call_id": "call_x",
+            },
+        })
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].kind.value, "tool_use")
+        self.assertEqual(entries[0].name, "exec_command")
+        self.assertEqual(entries[0].input, '{"cmd":"ls"}')
+
+    def test_response_item_custom_tool_call_extracts_tool_use(self):
+        entries, _ = self._parse({
+            "timestamp": "2026-04-30T13:43:46.783Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "input": "*** Begin Patch\n+x\n*** End Patch\n",
+                "call_id": "call_y",
+            },
+        })
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].kind.value, "tool_use")
+        self.assertEqual(entries[0].name, "apply_patch")
+        self.assertIn("Begin Patch", entries[0].input)
+
+    def test_response_item_function_call_output_extracts_tool_result(self):
+        entries, _ = self._parse({
+            "timestamp": "2026-04-30T13:43:55.093Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_x",
+                "output": "exit=0\nstdout: ok\n",
+            },
+        })
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].kind.value, "tool_result")
+        self.assertIn("stdout: ok", entries[0].content)
+
+    def test_token_count_returns_usage_only(self):
+        """`token_count` carries no message text — it returns an
+        empty entry list plus a `usage` dict for the running parser
+        to attach to the prior assistant entry."""
+        entries, usage = self._parse({
+            "timestamp": "2026-04-30T13:43:33.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 13362,
+                        "output_tokens": 12,
+                    },
+                    "total_token_usage": {
+                        "input_tokens": 26945,
+                        "output_tokens": 79,
+                    },
+                },
+            },
+        })
+        self.assertEqual(entries, [])
+        self.assertEqual(usage, {"input_tokens": 13362, "output_tokens": 12})
+
+    def test_token_count_with_null_info_returns_no_usage(self):
+        """The startup `token_count` ping (sent right after
+        `task_started`) has `info=null` — must not produce a usage
+        attachment, otherwise the prior turn's count gets clobbered
+        with zeros."""
+        entries, usage = self._parse({
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": None},
+        })
+        self.assertEqual(entries, [])
+        self.assertIsNone(usage)
+
+    def test_response_item_message_skipped_to_avoid_duplicate(self):
+        """User-typed prompts and final agent replies appear in BOTH
+        `event_msg.user_message`/`agent_message` AND
+        `response_item.message`. The parser reads from `event_msg`
+        and skips the duplicate to avoid double rows in the logs."""
+        entries, _ = self._parse({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hey"}],
+            },
+        })
+        self.assertEqual(entries, [])
+
+    def test_reasoning_with_empty_summary_skipped(self):
+        """Modern Codex emits `summary=[]` plus an `encrypted_content`
+        we can't read. No phantom THINKING rows in that case."""
+        entries, _ = self._parse({
+            "type": "response_item",
+            "payload": {
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": "gAAAAA...",
+            },
+        })
+        self.assertEqual(entries, [])
+
+    def test_reasoning_with_summary_extracts_thinking(self):
+        entries, _ = self._parse({
+            "type": "response_item",
+            "payload": {
+                "type": "reasoning",
+                "summary": [{"text": "thinking out loud"}],
+            },
+        })
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].kind.value, "thinking")
+        self.assertEqual(entries[0].text, "thinking out loud")
+
+    def test_full_session_attaches_usage_to_prior_assistant(self):
+        """Integration: token_count records arrive AFTER the
+        agent_message they describe, so `_parse_entries` patches
+        usage onto the most recent ASSISTANT entry rather than
+        emitting a phantom row."""
+        from actor.agents.codex import CodexAgent
+        content = "\n".join([
+            json.dumps({
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "hi"},
+            }),
+            json.dumps({
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "hey back"},
+            }),
+            json.dumps({
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 100, "output_tokens": 5,
+                        },
+                    },
+                },
+            }),
+        ])
+        entries = CodexAgent._parse_entries(content)
+        kinds = [e.kind.value for e in entries]
+        self.assertEqual(kinds, ["user", "assistant"])
+        self.assertIsNone(entries[0].usage)
+        self.assertEqual(entries[1].usage,
+                         {"input_tokens": 100, "output_tokens": 5})
 
 
 # ──────────────────────────────────────────────────────────────────────

@@ -300,8 +300,20 @@ class Database:
         if run is None:
             return Status.IDLE
         if run.status == Status.RUNNING:
-            alive = run.pid is not None and pm.is_alive(run.pid)
-            if not alive:
+            if run.pid is None:
+                # `cmd_run` inserts the RUNNING row BEFORE calling
+                # `agent.start()` so the watch sees the run land
+                # immediately, then updates the pid once start
+                # returns. For Claude that's a few ms; for Codex,
+                # `start()` blocks reading the first stdout line
+                # (the `thread.started` event) which can take a
+                # second or two. A poll landing in that window would
+                # otherwise see `pid=None`, conclude "not alive",
+                # and flip the row to ERROR — turning every fresh
+                # codex actor into a momentary error flash. Treat
+                # the missing pid as "not observed yet" instead.
+                return Status.RUNNING
+            if not pm.is_alive(run.pid):
                 self.update_run_status(run.id, Status.ERROR, -1)
                 return Status.ERROR
         return run.status

@@ -26,6 +26,12 @@ class LogEntry:
     name: str = ""        # for TOOL_USE
     input: str = ""       # for TOOL_USE
     content: str = ""     # for TOOL_RESULT
+    # Token usage for the LLM call this entry came from. Set on at most
+    # one LogEntry per JSONL message — typically the first block that
+    # produces an entry — so a downstream aggregator can sum it without
+    # double-counting. None for message types that don't carry usage
+    # info (USER prompts, TOOL_RESULT echoes, etc.).
+    usage: Optional[Dict[str, int]] = None
 
 
 class Agent(abc.ABC):
