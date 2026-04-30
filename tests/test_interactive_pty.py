@@ -295,5 +295,75 @@ class PtySessionFailurePathsTests(unittest.IsolatedAsyncioTestCase):
             session.close()
 
 
+class TestQueryReplies(unittest.TestCase):
+    """`_build_query_replies` auto-answers terminal-capability queries
+    that codex (and other modern TUIs) emit on startup. Without these
+    replies, the child stalls waiting for a real terminal and never
+    paints its full UI."""
+
+    @staticmethod
+    def _build(data: bytes) -> bytes:
+        from actor.watch.interactive.pty_session import _build_query_replies
+        return _build_query_replies(data)
+
+    def test_dsr_cursor_position_reply(self):
+        """CSI 6 n → CSI 1;1 R."""
+        self.assertEqual(self._build(b"\x1b[6n"), b"\x1b[1;1R")
+
+    def test_dsr_device_status_reply(self):
+        """CSI 5 n → CSI 0 n (terminal OK)."""
+        self.assertEqual(self._build(b"\x1b[5n"), b"\x1b[0n")
+
+    def test_da1_primary_attributes_reply(self):
+        """CSI c → DA1 advertising xterm-256color modules."""
+        self.assertEqual(
+            self._build(b"\x1b[c"),
+            b"\x1b[?64;1;2;6;9;15;22c",
+        )
+        # CSI 0 c is the same query with an explicit zero parameter.
+        self.assertEqual(
+            self._build(b"\x1b[0c"),
+            b"\x1b[?64;1;2;6;9;15;22c",
+        )
+
+    def test_kitty_keyboard_query_reply(self):
+        """CSI ? u → CSI ? 0 u (no flags)."""
+        self.assertEqual(self._build(b"\x1b[?u"), b"\x1b[?0u")
+
+    def test_osc_color_queries(self):
+        """OSC 10/11 ?ST get rgb: replies. Both ST forms (ESC \\ and
+        BEL) terminate the query; we accept either."""
+        out = self._build(b"\x1b]10;?\x1b\\")
+        self.assertIn(b"\x1b]10;rgb:", out)
+        out = self._build(b"\x1b]11;?\x07")
+        self.assertIn(b"\x1b]11;rgb:", out)
+
+    def test_codex_startup_burst_produces_combined_reply(self):
+        """The ~47-byte capture from codex's startup contains DSR +
+        DA1 + OSC 10 + OSC 11 + kitty-keyboard, in one chunk. The
+        reply buffer must contain answers for all of them."""
+        burst = (
+            b"\x1b[6n"             # DSR cursor pos
+            b"\x1b[?u"             # kitty keyboard
+            b"\x1b[c"              # DA1
+            b"\x1b]10;?\x1b\\"     # OSC 10 fg
+            b"\x1b]11;?\x1b\\"     # OSC 11 bg
+        )
+        out = self._build(burst)
+        self.assertIn(b"\x1b[1;1R", out)
+        self.assertIn(b"\x1b[?0u", out)
+        self.assertIn(b"\x1b[?64;1;2;6;9;15;22c", out)
+        self.assertIn(b"\x1b]10;rgb:", out)
+        self.assertIn(b"\x1b]11;rgb:", out)
+
+    def test_no_queries_no_replies(self):
+        """A chunk of plain text or unrelated escape codes must
+        produce zero reply bytes — fast path."""
+        self.assertEqual(self._build(b""), b"")
+        self.assertEqual(self._build(b"hello world"), b"")
+        # A 256-palette SGR shouldn't be confused with a query.
+        self.assertEqual(self._build(b"\x1b[38;5;42m"), b"")
+
+
 if __name__ == "__main__":
     unittest.main()

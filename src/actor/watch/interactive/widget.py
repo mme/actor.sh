@@ -4,6 +4,8 @@ from __future__ import annotations
 import time
 from typing import Optional
 
+from rich.segment import Segment
+from rich.style import Style
 from textual import events
 from textual.geometry import Size
 from textual.message import Message
@@ -22,6 +24,18 @@ from .input import (
 )
 from .pty_session import PtySession
 from .screen import TerminalScreen
+
+
+_BLANK_STYLE = Style()
+
+
+def _ensure_segment_styles(segments) -> list[Segment]:
+    return [
+        segment
+        if segment.style is not None
+        else Segment(segment.text, _BLANK_STYLE, segment.control)
+        for segment in segments
+    ]
 
 
 class TerminalWidget(ScrollView, can_focus=True):
@@ -173,7 +187,7 @@ class TerminalWidget(ScrollView, can_focus=True):
         strips = self._get_strips()
         if 0 <= virtual_y < len(strips):
             return strips[virtual_y]
-        return Strip.blank(self.size.width)
+        return Strip.blank(self.size.width, _BLANK_STYLE)
 
     def _placeholder_line(self, y: int) -> Strip:
         """Rendered while waiting for the child's first frame. Shows a
@@ -182,15 +196,12 @@ class TerminalWidget(ScrollView, can_focus=True):
         width = self.size.width
         height = self.size.height
         if width <= 0 or height <= 0 or y != height // 2:
-            return Strip.blank(width)
+            return Strip.blank(width, _BLANK_STYLE)
         msg = "Connecting…"
         pad = max(0, (width - len(msg)) // 2)
         text = " " * pad + msg
         text += " " * max(0, width - len(text))
-        from rich.text import Text
-        from rich.style import Style
-        line = Text(text, style=Style(dim=True))
-        return Strip(list(line.render(self.app.console)))
+        return Strip([Segment(text, Style(dim=True))], width)
 
     def _get_strips(self) -> list[Strip]:
         if self._cached_at_frame == self._frame_counter and self._cached_strips is not None:
@@ -199,7 +210,7 @@ class TerminalWidget(ScrollView, can_focus=True):
         # render_all_lines covers scrollback + the visible buffer; virtual
         # row y maps 1:1 into this list.
         self._cached_strips = [
-            Strip(list(line.render(console)))
+            Strip(_ensure_segment_styles(line.render(console)))
             for line in self._screen.render_all_lines()
         ]
         self._cached_at_frame = self._frame_counter

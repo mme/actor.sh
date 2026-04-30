@@ -75,6 +75,72 @@ def _render_bash(ctx: ToolRenderContext) -> None:
         ctx.log.write(_connector("(No output)"), expand=True)
 
 
+def _strip_codex_exec_envelope(result: str) -> str:
+    """Codex's `exec_command` tool wraps stdout in a metadata envelope:
+
+        Chunk ID: e92555
+        Wall time: 0.0000 seconds
+        Process exited with code 0
+        Original token count: 19
+        Output:
+        <actual stdout>
+
+    Strip the envelope and return only the bytes after the
+    `Output:\\n` marker so the connector line shows what `ls` (or
+    whatever) actually printed — matching how Claude's Bash tool's
+    direct-stdout capture renders. Returns the original string when
+    the marker is absent (e.g. older codex versions or different
+    output shapes), so callers degrade to "envelope visible" rather
+    than blank."""
+    marker = "Output:\n"
+    idx = result.find(marker)
+    if idx < 0:
+        return result
+    return result[idx + len(marker):]
+
+
+def _render_exec_command(ctx: ToolRenderContext) -> None:
+    """Render Codex's `exec_command` tool the same way as Claude's
+    Bash tool. The args dict carries the command under `cmd` (vs
+    Claude's `command`); the result is wrapped in a metadata
+    envelope that we strip before truncating."""
+    command = ctx.data.get("cmd", "")
+    display = _truncate_command(command).replace("\n", " ")
+    ctx.log.write(_tool_header("Bash", display, ctx.colors), expand=True)
+    if ctx.result:
+        stdout = _strip_codex_exec_envelope(ctx.result)
+        if stdout.strip():
+            ctx.log.write(_connector(_truncate_result(stdout)), expand=True)
+        else:
+            ctx.log.write(_connector("(No output)"), expand=True)
+    else:
+        ctx.log.write(_connector("(No output)"), expand=True)
+
+
+def _render_apply_patch(ctx: ToolRenderContext) -> None:
+    """Render Codex's `apply_patch` tool. The patch body is the
+    `input` field; we surface the file paths it touches in the
+    header (one Add/Update/Delete tag per file) and let the
+    connector line carry the success/failure tail of the result."""
+    patch = ctx.data.get("input", "")
+    if not isinstance(patch, str):
+        patch = str(patch) if patch is not None else ""
+    targets: list[str] = []
+    for line in patch.splitlines():
+        for prefix in ("*** Add File: ", "*** Update File: ", "*** Delete File: "):
+            if line.startswith(prefix):
+                verb = prefix.split()[1]  # Add / Update / Delete
+                path = line[len(prefix):].strip()
+                targets.append(f"{verb} {path}")
+                break
+    summary = ", ".join(targets) if targets else "patch"
+    if len(summary) > 120:
+        summary = summary[:117] + "…"
+    ctx.log.write(_tool_header("Patch", summary, ctx.colors), expand=True)
+    if ctx.result:
+        ctx.log.write(_connector(_truncate_result(ctx.result)), expand=True)
+
+
 def _render_read(ctx: ToolRenderContext) -> None:
     """Render Read tool call."""
     file_path = ctx.data.get("file_path", "")
@@ -181,6 +247,7 @@ def _render_fallback(ctx: ToolRenderContext) -> None:
 # -- Tool renderer dispatch --------------------------------------------------
 
 TOOL_RENDERERS = {
+    # Claude Code's tool surface
     "Bash": _render_bash,
     "Read": _render_read,
     "Write": _render_write,
@@ -190,6 +257,11 @@ TOOL_RENDERERS = {
     "WebFetch": _render_web_fetch,
     "WebSearch": _render_web_search,
     "Agent": _render_agent,
+    # Codex's tool surface — render with the same visual shape as
+    # the Claude analogues so a watcher reading two actors side-by-
+    # side doesn't have to context-switch between layouts.
+    "exec_command": _render_exec_command,
+    "apply_patch": _render_apply_patch,
 }
 
 HIDDEN_TOOLS = {"TodoWrite", "TodoRead", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "ToolSearch"}

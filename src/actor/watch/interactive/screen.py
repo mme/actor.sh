@@ -117,15 +117,38 @@ class TerminalScreen:
         return self._render_rows(self._screen.buffer, cursor=True)
 
     def history_size(self) -> int:
-        """Lines of scrollback above the visible frame."""
-        return len(self._screen.history.top)
+        """Lines of MEANINGFUL scrollback above the visible frame.
+
+        Skips leading blank rows from pyte's history. TUIs (codex,
+        claude code, vim) frequently push one or more empty rows into
+        scrollback at startup — e.g. a trailing newline that scrolls
+        the screen up by one. Counting those would expose a phantom
+        scroll range to ScrollView and produce a thumb that scrolls
+        nowhere visible. The same filter is applied by `_meaningful_history`
+        when rendering, so virtual height stays in sync with the
+        actually-rendered row count."""
+        return len(self._meaningful_history())
+
+    def _meaningful_history(self) -> list:
+        """Return the slice of `history.top` starting at the first row
+        that has any non-blank cell. Pyte history rows are sparse
+        dicts (`row.get(x)` may be None) of `Char`s; "blank" means
+        every present cell has data == ' ' and no fg/bg/styling that
+        a user would notice."""
+        rows = list(self._screen.history.top)
+        first_meaningful = 0
+        for row in rows:
+            if not _is_history_row_blank(row):
+                break
+            first_meaningful += 1
+        return rows[first_meaningful:]
 
     def render_all_lines(self) -> List[Text]:
         """Full virtual content: scrollback-top rows followed by the
         visible frame. Used by the Textual-native scroll path so
         virtual_size can be set correctly and render_line indexes
         across the combined range."""
-        lines: List[Text] = list(self._render_history(self._screen.history.top))
+        lines: List[Text] = list(self._render_history(self._meaningful_history()))
         lines.extend(self._render_rows(self._screen.buffer, cursor=True))
         return lines
 
@@ -224,6 +247,31 @@ _PYTE_COLOR_ALIASES = {
 
 
 _HEX_RE = re.compile(r"^#?[0-9a-fA-F]{6}$")
+
+
+def _is_history_row_blank(row) -> bool:
+    """A pyte history row is "blank" when every present cell has data
+    == ' ' and no fg/bg/bold/etc. that a viewer would see. Pyte stores
+    history rows as sparse dicts keyed by column index; a missing key
+    is treated as blank. Used to strip leading blank rows from the
+    meaningful-history slice — a TUI's startup-newline-into-history
+    is the most common cause of a phantom scroll range."""
+    try:
+        items = row.items()
+    except AttributeError:
+        return True
+    for _x, char in items:
+        if char is None:
+            continue
+        if char.data and char.data != " ":
+            return False
+        if char.fg and char.fg != "default":
+            return False
+        if char.bg and char.bg != "default":
+            return False
+        if char.bold or char.italics or char.underscore or char.reverse:
+            return False
+    return True
 
 
 def _resolve_color(color: str) -> str | None:

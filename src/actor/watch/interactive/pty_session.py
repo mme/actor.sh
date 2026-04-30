@@ -11,6 +11,7 @@ import errno
 import fcntl
 import os
 import pty
+import re
 import signal
 import struct
 import termios
@@ -19,6 +20,60 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from .diagnostics import DiagnosticRecorder, EventKind
+
+
+# Terminal-capability queries emitted by modern TUIs on startup. A real
+# terminal answers these by writing back to the program's stdin; our pty
+# wrapper has no terminal layer, so without auto-replies the program
+# blocks waiting for the answer and falls back to degraded rendering
+# (or, in codex's case, never paints its input box at all).
+#
+# Patterns and canned replies — all targeted at "xterm-256color" since
+# that's what we set TERM to in the child env. The replies are written
+# back to the pty master, which the child reads as ordinary stdin
+# input (same path a keypress would take).
+_QUERY_REPLIES: list[tuple[re.Pattern[bytes], bytes]] = [
+    # CSI 6 n — DSR cursor position. Real terminals reply with the
+    # current row/col; for our purposes "1;1" is fine — TUIs use this
+    # as a liveness check, not to position content.
+    (re.compile(rb"\x1b\[6n"), b"\x1b[1;1R"),
+    # CSI 5 n — DSR device status (terminal OK).
+    (re.compile(rb"\x1b\[5n"), b"\x1b[0n"),
+    # CSI c / CSI 0 c — DA1 primary device attributes. xterm-256color
+    # advertises: 64 (VT420), plus modules 1 (132-col), 2 (printer),
+    # 6 (selective erase), 9 (national replacement), 15 (DEC tech),
+    # 22 (ANSI color).
+    (re.compile(rb"\x1b\[c"), b"\x1b[?64;1;2;6;9;15;22c"),
+    (re.compile(rb"\x1b\[0c"), b"\x1b[?64;1;2;6;9;15;22c"),
+    # CSI ? u — kitty keyboard protocol query. Reply 0 = no flags
+    # supported, which keeps codex on its plain-CSI keymap.
+    (re.compile(rb"\x1b\[\?u"), b"\x1b[?0u"),
+    # OSC 10 ? ST — foreground color query. Reply with a neutral
+    # light-gray; codex uses this to compute contrast for its own
+    # palette but the exact value isn't load-bearing.
+    (
+        re.compile(rb"\x1b\]10;\?(\x1b\\|\x07)"),
+        b"\x1b]10;rgb:cccc/cccc/cccc\x1b\\",
+    ),
+    # OSC 11 ? ST — background color query. Reply dark; same caveat.
+    (
+        re.compile(rb"\x1b\]11;\?(\x1b\\|\x07)"),
+        b"\x1b]11;rgb:1111/1414/1c1c\x1b\\",
+    ),
+]
+
+
+def _build_query_replies(data: bytes) -> bytes:
+    """Scan `data` for terminal-capability queries and concatenate the
+    canned replies for every match. Returns `b""` when nothing matched
+    so a fast no-write path is possible. Idempotent: each pattern is
+    matched independently so a chunk carrying e.g. one DSR + one DA1
+    produces both replies in one buffer."""
+    out = bytearray()
+    for pattern, reply in _QUERY_REPLIES:
+        for _ in pattern.finditer(data):
+            out.extend(reply)
+    return bytes(out)
 
 
 # 64 KiB chunk keeps latency low without overwhelming the parser.
@@ -288,6 +343,15 @@ class PtySession:
         if not data:
             self._handle_exit()
             return
+        # Auto-reply to terminal-capability queries before forwarding
+        # the chunk to the screen. Without these replies, codex (and
+        # other modern TUIs that gate startup on a DA1 / OSC 11 round-
+        # trip) stall indefinitely or render in degraded mode. Replies
+        # are written to the pty master via the same write() path
+        # keypresses use.
+        replies = _build_query_replies(data)
+        if replies:
+            self.write(replies)
         if self._on_output is not None:
             try:
                 self._on_output(data)

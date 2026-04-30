@@ -230,6 +230,14 @@ class ClaudeAgent(Agent):
 
         elif msg_type == "assistant":
             content_arr = message.get("content")
+            # Token usage lives at the message level (per LLM call),
+            # not the block level. Attach it to the first content
+            # block that produces a LogEntry so a downstream sum
+            # doesn't double-count multi-block messages (e.g. a
+            # message that emits both `thinking` and `text`).
+            raw_usage = message.get("usage") if isinstance(message, dict) else None
+            usage = raw_usage if isinstance(raw_usage, dict) else None
+            usage_attached = False
             if isinstance(content_arr, list):
                 for block in content_arr:
                     if not isinstance(block, dict):
@@ -238,29 +246,41 @@ class ClaudeAgent(Agent):
                     if block_type == "text":
                         text = block.get("text")
                         if isinstance(text, str):
-                            out.append(LogEntry(
+                            entry = LogEntry(
                                 kind=LogEntryKind.ASSISTANT,
                                 timestamp=ts,
                                 text=text,
-                            ))
+                            )
+                            if usage is not None and not usage_attached:
+                                entry.usage = usage
+                                usage_attached = True
+                            out.append(entry)
                     elif block_type == "thinking":
                         text = block.get("thinking")
                         if isinstance(text, str):
-                            out.append(LogEntry(
+                            entry = LogEntry(
                                 kind=LogEntryKind.THINKING,
                                 timestamp=ts,
                                 text=text,
-                            ))
+                            )
+                            if usage is not None and not usage_attached:
+                                entry.usage = usage
+                                usage_attached = True
+                            out.append(entry)
                     elif block_type == "tool_use":
                         name = block.get("name", "unknown")
                         inp = block.get("input")
                         inp_str = json.dumps(inp) if inp is not None else ""
-                        out.append(LogEntry(
+                        entry = LogEntry(
                             kind=LogEntryKind.TOOL_USE,
                             timestamp=ts,
                             name=name,
                             input=inp_str,
-                        ))
+                        )
+                        if usage is not None and not usage_attached:
+                            entry.usage = usage
+                            usage_attached = True
+                        out.append(entry)
 
         return out
 
