@@ -5,6 +5,7 @@ from __future__ import annotations
 from rich.style import Style
 from rich.text import Text
 
+from textual import events
 from textual.widgets import Tree
 from textual.widgets.tree import TreeNode
 
@@ -33,18 +34,21 @@ class ActorTree(Tree[Actor]):
         color: $foreground;
         text-style: bold;
     }
-    ActorTree:focus > .tree--cursor {
+    ActorTree:focus > .tree--cursor,
+    ActorTree.-focus-active > .tree--cursor {
         background: $primary;
     }
     """
 
     def __init__(self) -> None:
         super().__init__("Actors", id="actor-tree")
+        self.auto_expand = False
         self.show_root = False
         self.guide_depth = 3
         self._snapshot: dict[str, Status] = {}
         self._statuses: dict[str, Status] = {}
         self._anim_frame: int = 0
+        self._highlight_from_mouse = False
 
     def on_mount(self) -> None:
         self.set_interval(0.5, self._tick_animation)
@@ -60,7 +64,11 @@ class ActorTree(Tree[Actor]):
         label = super().render_label(node, base_style, style)
         if node.data is None:
             return label  # group / root nodes — no indicator
-        if node is self.cursor_node and self.has_focus:
+        try:
+            is_focused = self.screen.focused is self
+        except Exception:
+            is_focused = self.has_focus
+        if node is self.cursor_node and is_focused:
             return Text("→", style=style) + label
         return label
 
@@ -72,14 +80,50 @@ class ActorTree(Tree[Actor]):
         # Re-render so the arrow disappears.
         self.refresh()
 
+    async def _on_click(self, event: events.Click) -> None:
+        """Mouse clicks select/highlight rows only.
+
+        Textual's default Tree click handler runs the same
+        `select_cursor` action as Enter, which makes a plain actor
+        click indistinguishable from keyboard activation. Keep the
+        default disclosure-triangle toggle behavior, but do not post
+        NodeSelected for label clicks; the App treats NodeSelected as
+        an explicit Enter activation.
+        """
+        async with self.lock:
+            meta = event.style.meta
+            if "line" not in meta:
+                return
+            event.prevent_default()
+            event.stop()
+            cursor_line = meta["line"]
+            if meta.get("toggle", False):
+                node = self.get_node_at_line(cursor_line)
+                if node is not None:
+                    self._toggle_node(node)
+                return
+            previous_line = self.cursor_line
+            self._highlight_from_mouse = cursor_line != previous_line
+            self.cursor_line = cursor_line
+            if cursor_line == previous_line:
+                self._highlight_from_mouse = False
+
+    def consume_mouse_highlight(self) -> bool:
+        from_mouse = self._highlight_from_mouse
+        self._highlight_from_mouse = False
+        return from_mouse
+
     def _make_label(self, name: str, status: Status) -> str:
-        """Generate display label for an actor."""
+        """Generate display label for an actor. Status icon (running
+        animation / error glyph / etc.) sits to the RIGHT of the name
+        — the name column stays flush left so a glance scans names
+        without skipping over a leading icon column."""
         if status == Status.RUNNING:
             icon = RUNNING_FRAMES[self._anim_frame]
         else:
             icon = STATUS_ICON.get(status, "")
         if icon:
-            return f" {icon} {name} "
+            return f" {name} {icon} "
         return f" {name} "
 
     # -- Animation -------------------------------------------------------------

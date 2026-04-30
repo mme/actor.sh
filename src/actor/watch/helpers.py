@@ -275,16 +275,16 @@ def parse_shortstat(line: str) -> tuple[int, int]:
 
 
 def compute_diff_shortstat(actor: Actor) -> tuple[int, int] | None:
-    """Quick `git diff --shortstat` against the merge base — used by
-    the watch DIFF tab to populate the (±N) badge label in <100ms
-    while the heavier `compute_diff` + render path is still running.
+    """Quick line-count summary of everything that diverges from base
+    — committed changes since the merge base, working-tree edits to
+    tracked files, AND untracked files (every line counted as added).
 
-    Two subprocesses (`merge-base` + `diff --shortstat`); returns the
-    combined (added, removed) line counts. Untracked files are NOT
-    included — shortstat only sees the index. The full build's later
-    `_update_diff_tab_label` call lands the authoritative number when
-    it commits, which may revise the badge upward if untracked files
-    contributed lines.
+    Three subprocesses on the happy path (`merge-base` +
+    `diff --shortstat` + `ls-files --others`), so still fast enough to
+    run on a 2s background tick while the user is on any tab. The
+    full `compute_diff` build path uses the same untracked-files-as-
+    pure-adds rule, so the badge and the rendered diff agree on the
+    total — both before and after the user activates DIFF.
 
     Returns None when git fails (no repo, missing base, etc.)."""
     base_branch = actor.base_branch or "HEAD"
@@ -313,7 +313,32 @@ def compute_diff_shortstat(actor: Actor) -> tuple[int, int] | None:
         return None
     if ss.returncode != 0:
         return None
-    return parse_shortstat(ss.stdout)
+    added, removed = parse_shortstat(ss.stdout)
+
+    # Untracked files: count every line as added so a worktree whose
+    # only changes are new files (very common — actors that `Write`
+    # new files) still surfaces a count instead of showing "DIFF" /
+    # plain branch name. Mirrors `compute_diff`'s untracked branch.
+    try:
+        lf = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True, cwd=actor.dir,
+            env=_GIT_ENV,
+        )
+    except Exception:
+        return added, removed
+    if lf.returncode != 0:
+        return added, removed
+    wt = Path(actor.dir)
+    for path in lf.stdout.splitlines():
+        if not path:
+            continue
+        try:
+            content = (wt / path).read_text(errors="replace")
+        except (FileNotFoundError, OSError):
+            continue
+        added += len(content.splitlines())
+    return added, removed
 
 
 def _parse_diff_files(diff_output: str) -> list[dict]:

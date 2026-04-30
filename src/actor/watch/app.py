@@ -24,7 +24,7 @@ from textual.widgets import (
 )
 
 from ..db import Database
-from ..interfaces import binary_exists
+from ..interfaces import LogEntryKind, binary_exists
 from ..process import RealProcessManager
 from ..types import Actor, AgentKind, Status
 from ..cli import _db_path, _create_agent
@@ -84,7 +84,7 @@ class ActorWatchApp(App):
     }
     #actors-label {
         color: $foreground 60%;
-        text-style: bold;
+        text-style: none;
         padding: 0 1;
     }
     #actors-underline {
@@ -133,7 +133,8 @@ class ActorWatchApp(App):
        reverse video the focused tree cursor does: $primary bg with
        theme $background text. Arrow prefix is added in Python (see
        _refresh_tab_arrows) because Textual CSS has no ::before. */
-    #detail-panel:focus-within Tab.-active {
+    #detail-panel:focus-within Tab.-active,
+    #detail-panel.-focus-active Tab.-active {
         background: $primary;
         color: $background;
         text-style: bold;
@@ -148,19 +149,53 @@ class ActorWatchApp(App):
         scrollbar-background-active: $foreground 30%;
     }
     #logs-content {
+        /* Lives inside `#overview-scroll`, below the auto-height
+           header card. `1fr` claims the remaining vertical space so
+           the log feed fills from the bottom of the header to the
+           bottom of the OVERVIEW pane. */
+        height: 1fr;
         scrollbar-size-horizontal: 0;
-        /* Hide the track on the LIVE pane — only the thumb remains
-           visible as a floating indicator. `ansi_default` makes the
-           track blend into whatever the terminal's background is,
-           overriding the 30%-fg track color we apply globally via
-           `*`. */
+        /* Hide the track — only the thumb remains visible as a
+           floating indicator. `ansi_default` makes the track blend
+           into whatever the terminal's background is, overriding
+           the 30%-fg track color we apply globally via `*`. */
         scrollbar-background: ansi_default;
         scrollbar-background-hover: ansi_default;
         scrollbar-background-active: ansi_default;
     }
-    #info-content {
-        padding: 1;
+    /* OVERVIEW pane is a vertical stack of section widgets. Each
+       section paints its own Rich content (with headers / borders /
+       layout via Rich primitives), so the widget-level CSS just
+       handles spacing and the runs-table which Textual styles
+       directly. */
+    #overview-scroll {
+        padding: 1 0;
     }
+    #overview-header {
+        height: auto;
+        width: 1fr;
+        margin-bottom: 1;
+    }
+    #overview-last-interaction {
+        height: auto;
+        margin-bottom: 1;
+    }
+    #overview-runs-label {
+        height: 1;
+        color: $text-muted;
+        text-style: bold;
+        margin-bottom: 0;
+    }
+    #runs-table {
+        height: auto;
+        width: 1fr;
+    }
+    /* Experiment: hide LAST INTERACTION + runs sections so the
+       OVERVIEW pane is just the header card. Remove these three
+       `display: none` rules to bring everything back. */
+    #overview-last-interaction { display: none; }
+    #overview-runs-label { display: none; }
+    #runs-table { display: none; }
     SearchIcon {
         color: $text;
     }
@@ -176,32 +211,23 @@ class ActorWatchApp(App):
     #splash.-active, #main-layout.-active {
         display: block;
     }
-    /* Toast notifications appear at the top-right instead of
-       Textual's default bottom-right. Bottom-right collides with the
-       status bar / footer and with scrollbar thumbs in the LIVE pane;
-       top-right stays clear and matches where most terminal apps
-       surface transient info. */
-    ToastRack {
-        dock: top;
-        align: right top;
-    }
     """
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
-        Binding("left,ctrl+b", "navigate_left", show=False),
-        Binding("right,ctrl+f", "navigate_right", show=False),
+        Binding("left,ctrl+b", "navigate_left", show=False, priority=True),
+        Binding("right,ctrl+f", "navigate_right", show=False, priority=True),
         Binding("up,ctrl+p", "navigate_up", show=False),
         Binding("down,ctrl+n", "navigate_down", show=False),
         Binding("a", "focus_actors", "Actors"),
         Binding("p", "command_palette", "Palette"),
         Binding("i", "enter_interactive", "Interactive"),
-        Binding("l", "show_tab('logs')", "Live"),
         Binding("d", "show_tab('diff')", "Diff"),
         Binding("o", "show_tab('info')", "Overview"),
-        # Enter is handled by the Tree's NodeSelected message, not an app
-        # binding — a priority binding here would steal Enter from the
-        # embedded terminal widget.
+        # Enter is handled by focused widgets: ActorTree posts
+        # NodeSelected for actor activation, and the app-level on_key
+        # below handles the interactive tab bar. A priority binding
+        # here would steal Enter from the embedded terminal widget.
         Binding("ctrl+shift+d", "dump_diagnostics", show=False),
     ]
 
@@ -243,6 +269,14 @@ class ActorWatchApp(App):
     _diff_badge_token: int = 0
     _diff_badge_target_actor: str | None = None
 
+    # Per-actor (added, removed) line counts, written by both the
+    # cheap badge worker and the authoritative build worker. Single
+    # source of truth for the DIFF tab label and the OVERVIEW
+    # branch row's `+N -M` segment — both surfaces read from here so
+    # they can never drift. Missing entry → no counts known yet (the
+    # background poller fills it in within ~100ms of selection).
+    _diff_counts_by_actor: dict[str, tuple[int, int]] = {}
+
     # Live-refresh poll state. While DIFF is active and the selected
     # actor is RUNNING, a 2s interval ticks
     # `_poll_diff_for_running`, which captures index mtime + shortstat
@@ -266,9 +300,12 @@ class ActorWatchApp(App):
     # there are changes; the others stay strings. `_refresh_tab_arrows`
     # handles either shape when prepending the focus arrow.
     _tab_base_labels: dict[str, str | Text] = {
-        "logs": "LIVE",
         "diff": "DIFF",
         "info": "OVERVIEW",
+        # `interactive` is recomputed every paint by
+        # `_refresh_tab_arrows` so it reflects the live focus state
+        # ("[CTRL+Z TO EXIT]" / plain). The
+        # placeholder here just keeps the dict shape consistent.
         "interactive": "INTERACTIVE",
     }
     _splash_active: bool = False
@@ -291,8 +328,17 @@ class ActorWatchApp(App):
         )
         # Actor whose terminal widget is currently mounted, if any.
         self._interactive_active: str | None = None
+        self._pending_interactive_focus = None
+        self._interactive_pane_token = 0
+        self._preferred_detail_tab = "info"
+        self._skip_next_detail_preference_update = False
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if (
+            action in {"navigate_left", "navigate_right"}
+            and isinstance(self.focused, TerminalWidget)
+        ):
+            return False
         if self._splash_active and action != "quit":
             return False
         return True
@@ -300,23 +346,43 @@ class ActorWatchApp(App):
     def compose(self) -> ComposeResult:
         with Horizontal(id="main-layout"):
             with Vertical(id="actor-panel"):
-                yield Static("ACTORS", id="actors-label")
+                yield Static("ACTOR.SH", id="actors-label")
                 yield Rule(line_style="heavy", id="actors-underline")
                 yield ActorTree()
             with Vertical(id="detail-panel"):
                 with TabbedContent(id="tabs"):
-                    # Interactive tab is added dynamically via
-                    # _sync_detail_view when the selected actor has a
-                    # live session; removed again when the session ends.
-                    with TabPane("LIVE", id="logs"):
-                        yield RichLog(id="logs-content", wrap=True, markup=False, auto_scroll=False)
+                    # OVERVIEW is the actor's home page: header, last
+                    # interaction, activity stats, recent runs. First
+                    # in the tab order so it's the default landing
+                    # screen on actor selection. Interactive tab is
+                    # added dynamically via _sync_detail_view when
+                    # the selected actor has a live session; removed
+                    # again when the session ends.
+                    with TabPane("OVERVIEW", id="info"):
+                        # OVERVIEW pane is a non-scrolling stack: the
+                        # header card (auto height) on top, then the
+                        # log RichLog filling the remaining vertical
+                        # space (1fr). The RichLog has its own
+                        # internal scroll, so the log feed scrolls
+                        # smoothly under a fixed header. Hidden bits
+                        # (last-interaction / runs-table) stay in the
+                        # tree so the existing `display: none` rules
+                        # and re-render paths keep working unchanged.
+                        yield Vertical(
+                            Static("", id="overview-header"),
+                            Static("", id="overview-last-interaction"),
+                            Static("Runs", id="overview-runs-label"),
+                            Static("", id="runs-table"),
+                            RichLog(
+                                id="logs-content",
+                                wrap=True,
+                                markup=False,
+                                auto_scroll=False,
+                            ),
+                            id="overview-scroll",
+                        )
                     with TabPane("DIFF", id="diff"):
                         yield VerticalScroll(id="diff-scroll")
-                    with TabPane("OVERVIEW", id="info"):
-                        yield VerticalScroll(
-                            Static("Select an actor", id="info-content"),
-                            DataTable(id="runs-table"),
-                        )
         yield Splash(id="splash", animate=self._animate)
         yield Static("Loading...", id="status-bar")
         yield Footer(show_command_palette=False)
@@ -343,8 +409,10 @@ class ActorWatchApp(App):
         # Apply Claude Code markdown styles to the app console
         self._apply_markdown_styles()
 
-        for widget in self.query("Tabs, Tab, Footer, DataTable"):
+        for widget in self.query("Tab, Footer, DataTable"):
             widget.can_focus = False
+        for widget in self.query("Tabs"):
+            widget.can_focus = True
 
         actors, statuses = self._fetch_actors()
         self._update_ui(actors, statuses)
@@ -357,6 +425,23 @@ class ActorWatchApp(App):
         # DIFF is active. Same 2s cadence as the actor poller; the
         # handler early-outs cheaply when conditions don't hold.
         self.set_interval(2.0, self._poll_diff_for_running)
+        # Always-on cheap badge refresh — keeps the DIFF tab label
+        # and OVERVIEW `+N -M` honest regardless of tab/status. Two
+        # subprocs per tick on a worker thread; cheap enough that the
+        # handler doesn't even gate on selection changes.
+        self.set_interval(2.0, self._poll_diff_badge_for_selected)
+        # 1Hz tick to keep the OVERVIEW header's "running for Xs"
+        # counter live. No-ops when no actor is selected; otherwise
+        # cheap (one DB read for the most recent run + a Static
+        # update). Doesn't compete with the diff poll since they
+        # touch disjoint widgets.
+        self.set_interval(1.0, self._tick_overview_age)
+        # 0.5Hz tick — same cadence as the tree's running animation —
+        # so the OVERVIEW header icon advances frame-by-frame in sync
+        # with the actor list. Only re-renders when the selected actor
+        # is RUNNING (cheap predicate, header-only update).
+        self.set_interval(0.5, self._tick_overview_running_icon)
+        self.watch(self.screen, "focused", self._on_focused_changed)
 
         # Start with focus on the actor tree. call_after_refresh so
         # the focus call runs AFTER any pending focus-changes queued
@@ -560,31 +645,41 @@ class ActorWatchApp(App):
             return
 
         status = self._prev_statuses.get(actor.name, Status.IDLE)
-        info = self.query_one("#info-content", Static)
-        flat_config = {**actor.config.agent_args, **actor.config.actor_keys}
-        config_str = "\n".join(f"  {k}={v}" for k, v in sorted(flat_config.items())) if flat_config else "  (none)"
-        info.update(
-            f"Name:      {actor.name}\n"
-            f"Agent:     {actor.agent.value}\n"
-            f"Status:    {status.value}\n"
-            f"Dir:       {actor.dir}\n"
-            f"Source:    {actor.source_repo or '—'}\n"
-            f"Base:      {actor.base_branch or '—'}\n"
-            f"Parent:    {actor.parent or '—'}\n"
-            f"Session:   {actor.agent_session or '—'}\n"
-            f"Created:   {actor.created_at}\n"
-            f"Config:\n{config_str}"
-        )
-
+        # Drop cached repo info when the session_id moved — same
+        # discard+recreate-with-same-name discipline the log cache uses.
+        last_session = self._repo_info_session_for.get(actor.name)
+        if last_session != (actor.agent_session or ""):
+            self._repo_info_by_actor.pop(actor.name, None)
+            # Cached counts came from the prior incarnation's worktree;
+            # drop them so the OVERVIEW branch row + DIFF tab label both
+            # blank out until the badge poller fills the new ones in.
+            self._diff_counts_by_actor.pop(actor.name, None)
+        self._render_overview_header(actor, status)
+        self._render_last_interaction(actor)
         self._refresh_runs(actor)
         self._refresh_logs(actor)
 
     def _clear_detail(self) -> None:
-        info = self.query_one("#info-content", Static)
-        info.update("Select an actor")
+        # Reset all overview sections to empty/placeholder. A future
+        # selection re-populates each via `_refresh_detail`.
+        for selector in (
+            "#overview-header",
+            "#overview-last-interaction",
+        ):
+            try:
+                self.query_one(selector, Static).update("")
+            except Exception:
+                pass
+        try:
+            label = self.query_one("#overview-runs-label", Static)
+            label.update("Select an actor")
+        except Exception:
+            pass
 
-        table = self.query_one("#runs-table", DataTable)
-        table.clear(columns=True)
+        try:
+            self.query_one("#runs-table", Static).update("")
+        except Exception:
+            pass
 
         log = self.query_one("#logs-content", RichLog)
         log.clear()
@@ -604,6 +699,879 @@ class ActorWatchApp(App):
         self._diff_last_applied_key = None
         self._diff_pending_actor = None
         self._update_diff_tab_label()
+
+    # -- Overview ------------------------------------------------------------
+
+    # The most recently rendered (actor.name, status) for the header,
+    # so the 1s age tick can re-render in place without re-querying
+    # the tree / DB. None means no actor is selected and the tick
+    # should no-op.
+    _overview_header_actor: Actor | None = None
+
+    # Three-row LCD-style shapes for the actor monogram in the header
+    # icon panel. Each entry is a 3-tuple of strings (top / middle /
+    # bottom), each padded to 3 cells wide. We extend Textual's
+    # `DigitsRenderable` font with the rest of the alphabet so any
+    # actor name's first letter renders in the same seven-segment
+    # aesthetic. Letters A-F duplicate Textual's built-ins so we can
+    # treat the dict as the single source of truth.
+    _LCD_LETTERS: dict[str, tuple[str, str, str]] = {
+        "A": ("╭─╮", "├─┤", "╵ ╵"),
+        "B": ("┌─╮", "├─┤", "└─╯"),
+        "C": ("╭─╮", "│  ", "╰─╯"),
+        "D": ("┌─╮", "│ │", "└─╯"),
+        "E": ("╭─╴", "├─ ", "╰─╴"),
+        "F": ("╭─╴", "├─ ", "╵  "),
+        "G": ("╭─╴", "│╶╮", "╰─╯"),
+        "H": ("╷ ╷", "├─┤", "╵ ╵"),
+        "I": ("╶┬╴", " │ ", "╶┴╴"),
+        "J": ("╶─╮", "  │", "╰─╯"),
+        "K": ("╷ ╱", "├─╮", "╵ ╵"),
+        "L": ("╷  ", "│  ", "╰─╴"),
+        "M": ("╭╮╭╮", "│╰╯│", "╵  ╵"),
+        "N": ("╭╮╷", "│││", "╵╰╯"),
+        "O": ("╭─╮", "│ │", "╰─╯"),
+        "P": ("┌─╮", "├─╯", "╵  "),
+        "Q": ("╭─╮", "│ │", "╰─╲"),
+        "R": ("┌─╮", "├─┤", "╵ ╵"),
+        "S": ("╭─╴", "╰─╮", "╶─╯"),
+        "T": ("╶┬╴", " │ ", " ╵ "),
+        "U": ("╷ ╷", "│ │", "╰─╯"),
+        "V": ("   ", "│ │", "╰─╯"),
+        "W": ("╷  ╷", "│╭╮│", "╰╯╰╯"),
+        "X": ("╲ ╱", " ╳ ", "╱ ╲"),
+        "Y": ("╷ ╷", "╰┬╯", " ╵ "),
+        "Z": ("╶─╮", "╭─╯", "╰─╴"),
+    }
+
+    def _render_overview_header(
+        self, actor: Actor, status: Status,
+    ) -> None:
+        """Build and mount the OVERVIEW pane header — actor name, status
+        pill, agent + model + auth, and an age line. The age portion
+        is rebuilt every second by `_tick_overview_age`; we stash the
+        actor + status here so that tick can run without going back
+        through the full _refresh_detail path."""
+        from rich import box as rich_box
+        from rich.console import Group
+        from rich.panel import Panel
+        from rich.rule import Rule
+        from rich.table import Table
+        from rich.text import Text
+
+        self._overview_header_actor = actor
+
+        colors = self._overview_palette()
+        title_color, title_label = self._status_pill(status, colors)
+        info = self._repo_info_by_actor.get(actor.name)
+        if info is None:
+            self._kick_repo_info_build(actor)
+
+        # ── icon panel (left of card) ──────────────────────────────
+        # Actor name's first letter as a 3-row LCD-style monogram
+        # (Textual's `DigitsRenderable` only ships A-F + digits;
+        # we keep our own full-alphabet table in `_LCD_LETTERS` so
+        # any actor name's initial renders consistently).
+        initial = (actor.name[:1] or "?").upper()
+        shape = self._LCD_LETTERS.get(initial)
+        if shape is None:
+            icon_body = Text(
+                initial,
+                style=f"bold {colors['primary']}",
+                justify="center",
+            )
+        else:
+            # Rich's `justify="center"` strips trailing spaces per
+            # line before centering, which collapses rows like `│  `
+            # to `│` and pushes them to the middle of the panel.
+            # Substituting non-breaking spaces preserves the column
+            # alignment without affecting the visible glyph.
+            # Centering via `justify="center"` trims trailing spaces
+            # (Rich's per-line rstrip — NBSP counts as whitespace
+            # too, so U+00A0 substitution doesn't help). Pad each
+            # line on the LEFT so leading whitespace (which Rich
+            # doesn't strip) does the centering for us.
+            #
+            # Panel content width: 9 - 2 border - 2 padding = 5.
+            # LCD letters are 3 cols wide → 1 col of leading pad
+            # centers them.
+            _icon_inner = 5
+            letter_w = max(len(line) for line in shape)
+            left_pad = (_icon_inner - letter_w + 1) // 2
+            padded = [(" " * left_pad) + line for line in shape]
+            icon_body = Text(
+                "\n".join(padded),
+                style=f"bold {colors['primary']}",
+            )
+        icon_panel = Panel(
+            icon_body,
+            width=9,
+            height=5,
+            border_style=colors["primary"],
+            box=rich_box.ROUNDED,
+            padding=(0, 1),
+        )
+
+        # ── title row: name + status icon (mirrors the actor list) ──
+        # Same RUNNING_FRAMES animation cycle the tree uses, sampled
+        # off the tree's `_anim_frame` so the two surfaces share one
+        # source of truth and stay roughly in phase. Other statuses
+        # use the static STATUS_ICON glyph (DONE / IDLE map to "" so
+        # the row falls back to just the name). Icon inherits the
+        # title's secondary color so the row reads as one composite
+        # glyph instead of fighting between two palette slots.
+        title_row = Text()
+        title_row.append(
+            actor.name.upper(),
+            style=f"bold {colors['secondary']}",
+        )
+        icon = self._overview_status_icon(status)
+        if icon:
+            title_row.append(f" {icon}", style=colors["secondary"])
+
+        # ── first metadata strip: MODEL / LAST ACTIVITY / LOCATION ─
+        agent_line = self._format_agent_line(actor)
+        in_tok, out_tok = self._aggregate_token_usage(actor.name)
+        if in_tok or out_tok:
+            agent_line += (
+                f" · {self._humanize_count(in_tok)} ⇡ "
+                f"{self._humanize_count(out_tok)} ⇣"
+            )
+        meta1 = Table.grid(expand=True, padding=(0, 2))
+        meta1.add_column(ratio=1)
+        meta1.add_column(ratio=1)
+        meta1.add_row(
+            self._labeled_field("MODEL", agent_line),
+            self._labeled_field(
+                "LAST ACTIVITY",
+                self._format_age_line(actor, status),
+            ),
+        )
+
+        # Location row — folder Nerd icon + path, no label.
+        # Collapse $HOME → ~ for display compactness.
+        from pathlib import Path
+        display_dir = actor.dir or ""
+        home = str(Path.home())
+        if display_dir.startswith(home):
+            display_dir = "~" + display_dir[len(home):]
+        location_line = Text(no_wrap=True, overflow="ellipsis")
+        location_line.append("󰉋  ", style="dim")
+        location_line.append(display_dir or "—")
+
+        # ── second metadata strip: BRANCH on row 1, PR on row 2 ────
+        diff_counts = self._diff_counts_by_actor.get(actor.name)
+        meta2 = Group(
+            self._build_branch_field(actor, info, diff_counts, colors),
+            self._build_pr_field(info, colors),
+        )
+
+        # ── extra-config line (optional) ───────────────────────────
+        # Keys already shown in the MODEL line (model / m / use-
+        # subscription) are filtered out so we don't echo them.
+        # Everything else from agent_args + actor_keys lands here.
+        config_line = self._build_config_field(actor)
+
+        # ── compose right side stack ───────────────────────────────
+        sections: list = [
+            title_row,
+            Text(""),
+            meta1,
+            Rule(style="dim"),
+            Text(""),  # blank between rule and location row
+            location_line,
+            meta2,
+        ]
+        if config_line is not None:
+            # Blank row separates the BRANCH/PR block above from the
+            # CONFIG row — keeps the eye from grouping `permission-
+            # mode=plan` with the PR line. Only inserted when there
+            # IS a config row, otherwise the card ends flush.
+            sections.append(Text(""))
+            sections.append(config_line)
+        right = Group(*sections)
+
+        # ── outer two-col: icon | right ────────────────────────────
+        outer = Table.grid(expand=True, padding=(0, 2))
+        outer.add_column(width=9)
+        outer.add_column(ratio=1)
+        outer.add_row(icon_panel, right)
+
+        card = Panel(
+            outer,
+            border_style="dim",
+            box=rich_box.ROUNDED,
+            padding=(0, 2, 1, 2),
+        )
+
+        try:
+            widget = self.query_one("#overview-header", Static)
+        except Exception:
+            return
+        widget.update(card)
+
+    @staticmethod
+    def _labeled_field(label: str, value):
+        """Two-line cell used inside the header card: a small uppercase
+        muted label on top, the actual datum below. `value` may be a
+        plain string or a Rich Text — we keep the param loose so each
+        caller can colorize its own datum."""
+        from rich.console import Group
+        from rich.text import Text
+
+        label_text = Text(label, style="dim")
+        if isinstance(value, str):
+            value = Text(value, no_wrap=True, overflow="ellipsis")
+        else:
+            # Existing Rich Text — also force single-line with
+            # ellipsis overflow so MODEL · subscription · token-counts
+            # stays on one line even when the panel narrows.
+            value.no_wrap = True
+            value.overflow = "ellipsis"
+        return Group(label_text, value)
+
+    @staticmethod
+    def _build_branch_field(
+        actor: Actor,
+        info: dict | None,
+        diff_counts: tuple[int, int] | None,
+        colors: dict[str, str],
+    ):
+        """The BRANCH cell: `branchname → destination` (destination
+        muted), or just `branchname` when the actor's branch IS the
+        base/destination (i.e. it's on the main branch already).
+
+        We compare the live branch to `info["base"]` (or
+        `actor.base_branch` while the worker hasn't returned yet) —
+        the recorded base from `actor new`. That covers the
+        "checked out main directly" case without needing an extra
+        git query for the repo's HEAD default branch.
+
+        `diff_counts` is the same `(added, removed)` tuple the DIFF
+        tab label uses, sourced from `_diff_counts_by_actor`. When
+        present and non-zero, render it inline with success/error
+        colors so the OVERVIEW agrees with the tab label."""
+        from rich.text import Text
+
+        t = Text()
+        t.append("󰘬  ", style="dim")
+        if info is None:
+            t.append(actor.name)
+            return t
+        branch = info.get("branch") or actor.name
+        base = info.get("base") or actor.base_branch
+        t.append(branch)
+        # `*` immediately after the branch name when there are
+        # uncommitted changes — same convention `git status -sb` uses.
+        if info.get("dirty"):
+            t.append("*")
+        # `+N -M` line counts shared with the DIFF tab label. Colors
+        # live here only — the tab label stays plain. Wrapped in
+        # muted square brackets so the colored numbers read as a
+        # bracketed annotation rather than free-floating tokens.
+        added, removed = diff_counts or (0, 0)
+        if added or removed:
+            t.append(" [", style="dim")
+            if added:
+                t.append(f"+{added}", style=colors["success"])
+            if added and removed:
+                t.append(" ")
+            if removed:
+                t.append(f"-{removed}", style=colors["error"])
+            t.append("]", style="dim")
+        if base and branch != base:
+            t.append(" → ", style="dim")
+            t.append(base, style="dim")
+        return t
+
+    def _build_pr_field(
+        self, info: dict | None, colors: dict[str, str],
+    ):
+        """The WORKTREE STATUS cell on the right: GitHub icon + PR
+        number/state, or "(none)" when there's no PR for this branch."""
+        from rich.text import Text
+
+        t = Text()
+        t.append("󰊤  ", style="dim")
+        if info is None:
+            t.append("loading…", style="dim italic")
+            return t
+        pr_num = info.get("pr_number")
+        if isinstance(pr_num, int):
+            url = info.get("pr_url") or ""
+            # Terminal hyperlink: Rich's `link` style wraps the
+            # rendered span in OSC-8 escapes; clickable in
+            # iTerm2 / WezTerm / Kitty / Ghostty.
+            link_style = f"{colors['primary']}"
+            if url:
+                link_style += f" link {url}"
+            t.append(f"#{pr_num}", style=link_style)
+            state = info.get("pr_state")
+            if state:
+                t.append(
+                    f"  ({state.lower()})",
+                    style=self._pr_state_color(state, colors),
+                )
+        else:
+            t.append("no PR yet", style="dim")
+        return t
+
+    # Keys already surfaced in the MODEL line — filtered out of the
+    # extra-config row so we don't repeat them. Both Claude (`model`)
+    # and Codex (short flag `m`) are accounted for.
+    _CONFIG_KEYS_SHOWN_ELSEWHERE: frozenset[str] = frozenset({
+        "model", "m", "use-subscription",
+    })
+
+    @classmethod
+    def _build_config_field(cls, actor: Actor):
+        """Optional CONFIG row: agent_args / actor_keys that DIVERGE
+        from both `_CONFIG_KEYS_SHOWN_ELSEWHERE` (already echoed by
+        the MODEL line) and the agent class's hardcoded defaults
+        (`AGENT_DEFAULTS` + `ACTOR_DEFAULTS`). Returns None when
+        nothing remains so the header skips the row entirely.
+
+        The class-defaults filter is what makes this row meaningful —
+        `permission-mode=auto` on a vanilla Claude actor isn't 'extra
+        config', it's the baseline. We only want to surface things
+        the user actually customized (or that a template / kdl set
+        explicitly to something non-default)."""
+        from rich.text import Text
+
+        from ..commands import _agent_class
+        agent_cls = _agent_class(actor.agent)
+        defaults: dict[str, str] = {}
+        defaults.update(getattr(agent_cls, "AGENT_DEFAULTS", {}) or {})
+        defaults.update(getattr(agent_cls, "ACTOR_DEFAULTS", {}) or {})
+
+        merged: dict[str, str] = {}
+        merged.update(actor.config.actor_keys)
+        # agent_args wins on collision — same precedence as the
+        # underlying ActorConfig (actor_keys is a separate namespace
+        # but the union here is just for display, not behavior).
+        merged.update(actor.config.agent_args)
+        extras = [
+            (k, v) for k, v in sorted(merged.items())
+            if k not in cls._CONFIG_KEYS_SHOWN_ELSEWHERE
+            and defaults.get(k) != v
+        ]
+        if not extras:
+            return None
+        t = Text(no_wrap=True, overflow="ellipsis", style="dim")
+        # Material Design `cog` (U+F0493). Double-space after, like the
+        # branch (󰘬) and folder (󰉋) rows above. Whole row uses Rich's
+        # `dim` style — config is a low-priority detail next to MODEL /
+        # BRANCH / PR.
+        t.append("\U000F0493  ")
+        for i, (k, v) in enumerate(extras):
+            if i:
+                t.append(" · ")
+            t.append(k)
+            if v != "":
+                t.append("=")
+                t.append(v)
+        return t
+
+    def _aggregate_token_usage(self, actor_name: str) -> tuple[int, int]:
+        """Sum (input_tokens, output_tokens) across all assistant
+        messages in the cached log entries for this actor.
+
+        Only `input_tokens` is summed on the input side — i.e. the
+        non-cached portion of the prompt. Adding `cache_creation_*`
+        and `cache_read_*` would technically reflect the full context
+        size the model saw, but reads as confusingly large for a user
+        who just typed a short prompt: every Claude Code session
+        carries ~40K tokens of system-prompt/skill/tool bootstrap
+        that gets re-counted via cache_read on every subsequent turn.
+        Sticking to `input_tokens` keeps the displayed number close
+        to "what I actually sent this turn".
+
+        `usage` is attached to at most one LogEntry per JSONL message
+        (see `ClaudeAgent._parse_log_dict`), so a straight sum is
+        already deduped against multi-block messages. Returns
+        (0, 0) when no usage info is present (e.g. codex sessions
+        until that parser gets analogous plumbing)."""
+        entries = self._log_entries_by_actor.get(actor_name, [])
+        in_tok = 0
+        out_tok = 0
+        for e in entries:
+            usage = e.usage
+            if not isinstance(usage, dict):
+                continue
+            in_val = usage.get("input_tokens")
+            if isinstance(in_val, int):
+                in_tok += in_val
+            out_val = usage.get("output_tokens")
+            if isinstance(out_val, int):
+                out_tok += out_val
+        return in_tok, out_tok
+
+    @staticmethod
+    def _humanize_count(n: int) -> str:
+        """Compact rendering for token counts: 1234 → 1.2K,
+        1_234_567 → 1.2M. Anything under 1000 prints as-is so small
+        sessions don't read as 0.5K."""
+        if n < 1000:
+            return str(n)
+        if n < 1_000_000:
+            return f"{n / 1000:.1f}K"
+        return f"{n / 1_000_000:.1f}M"
+
+    def _overview_palette(self) -> dict[str, str]:
+        """Resolve theme variables to concrete hex colors for use in
+        Rich Style strings. Rich doesn't understand Textual's
+        `$primary` / `$success` / etc. variables — those only resolve
+        inside Textual CSS. We pull the same values out of the active
+        theme here so omarchy flavor flips still land on the OVERVIEW
+        sections.
+
+        Falls back to brand defaults when `current_theme` raises
+        before super().__init__ runs (some bare-construct tests)."""
+        try:
+            t = self.current_theme
+        except Exception:
+            t = None
+        return {
+            "primary": (t.primary if t else None) or "#B1B9F9",
+            "secondary": (t.secondary if t else None) or "#D77757",
+            "success": (t.success if t else None) or "#4EBA65",
+            "error": (t.error if t else None) or "#FF6B80",
+        }
+
+    def _overview_status_icon(self, status: Status) -> str:
+        """Pick the right status glyph for the OVERVIEW header. RUNNING
+        uses the tree's animation frame (so both surfaces tick in
+        phase); other statuses use the static STATUS_ICON map. Returns
+        '' for statuses that have no glyph (DONE / IDLE), so callers
+        can omit the icon entirely rather than rendering a blank cell."""
+        from .helpers import STATUS_ICON
+        from .tree import RUNNING_FRAMES
+        if status == Status.RUNNING:
+            try:
+                tree = self.query_one(ActorTree)
+                return RUNNING_FRAMES[tree._anim_frame % len(RUNNING_FRAMES)]
+            except Exception:
+                return RUNNING_FRAMES[0]
+        return STATUS_ICON.get(status, "")
+
+    @staticmethod
+    def _status_pill(
+        status: Status, colors: dict[str, str],
+    ) -> tuple[str, str]:
+        """Return (color, label) for the status pill on the right of
+        the header. The color is a resolved hex from the palette
+        dict so Rich can apply it without going through Textual's
+        CSS variable layer."""
+        mapping = {
+            Status.RUNNING: (colors["primary"], "RUNNING"),
+            Status.DONE: (colors["success"], "DONE"),
+            Status.ERROR: (colors["error"], "ERROR"),
+            Status.IDLE: ("dim", "IDLE"),
+        }
+        return mapping.get(status, ("dim", status.value.upper()))
+
+    @staticmethod
+    def _format_agent_line(actor: Actor) -> str:
+        """Build the `agent · model · auth` subtitle. Pulls model from
+        the resolved config; auth from the use-subscription actor
+        key. Falls back to bare agent name when bits are missing."""
+        agent = actor.agent.value
+        model = actor.config.agent_args.get("model")
+        if not model:
+            # Codex stores the model under `m` (short flag).
+            model = actor.config.agent_args.get("m")
+        use_sub = actor.config.actor_keys.get("use-subscription", "true")
+        auth = "subscription" if use_sub != "false" else "api key"
+        parts = [agent]
+        if model:
+            parts.append(model)
+        parts.append(auth)
+        return " · ".join(parts)
+
+    @staticmethod
+    def _format_age_line(actor: Actor, status: Status) -> str:
+        """LAST ACTIVITY line: `<DD Mon YYYY HH:MM> (<X units ago>)`.
+
+        Local timezone, time to the minute, date as day-month-year.
+        Anchor:
+          - RUNNING → most recent run's started_at (the ongoing run).
+          - other  → most recent run's finished_at, falling back to
+                     actor.created_at if no runs have completed yet.
+        Returns `—` when no anchor is resolvable."""
+        from datetime import datetime, timezone
+        from ..types import _parse_iso
+
+        now = datetime.now(timezone.utc)
+        if status == Status.RUNNING:
+            anchor = ActorWatchApp._most_recent_run_started_at(actor)
+            if anchor is None:
+                anchor = _parse_iso(actor.created_at)
+        else:
+            anchor = (
+                ActorWatchApp._most_recent_run_finished_at(actor)
+                or _parse_iso(actor.created_at)
+            )
+        if anchor is None:
+            return "—"
+        local = anchor.astimezone()
+        # `%-d` is GNU/BSD; on Windows you'd use `%#d`. actor.sh is
+        # POSIX-only (Textual + pty.fork in src/actor/watch/interactive),
+        # so stick with `%-d` rather than padding-to-two-digits.
+        date_part = local.strftime("%-d %b %Y %H:%M")
+        delta = (now - anchor).total_seconds()
+        return f"{date_part} ({ActorWatchApp._humanize_relative(delta)})"
+
+    @staticmethod
+    def _humanize_relative(seconds: float) -> str:
+        """`<N> <unit> ago` for minutes / hours / days. Sub-minute
+        deltas elide the number — "seconds ago" reads cleaner than a
+        digit that would be ticking in real time alongside an HH:MM
+        timestamp that doesn't change. Floors values (no rounding-up
+        surprises) and clamps negative deltas to zero."""
+        s = max(0, int(seconds))
+        if s < 60:
+            return "seconds ago"
+        if s < 3600:
+            n = s // 60
+            return f"{n} minute{'s' if n != 1 else ''} ago"
+        if s < 86400:
+            n = s // 3600
+            return f"{n} hour{'s' if n != 1 else ''} ago"
+        n = s // 86400
+        return f"{n} day{'s' if n != 1 else ''} ago"
+
+    @staticmethod
+    def _most_recent_run_started_at(actor: Actor):
+        from ..types import _parse_iso
+        with Database.open(_db_path()) as db:
+            runs, _total = db.list_runs(actor.name, limit=1)
+        if not runs:
+            return None
+        return _parse_iso(runs[0].started_at)
+
+    @staticmethod
+    def _most_recent_run_finished_at(actor: Actor):
+        from ..types import _parse_iso
+        with Database.open(_db_path()) as db:
+            runs, _total = db.list_runs(actor.name, limit=1)
+        if not runs:
+            return None
+        return _parse_iso(runs[0].finished_at) if runs[0].finished_at else None
+
+    @staticmethod
+    def _humanize_seconds(seconds: float) -> str:
+        """Human-readable duration — 'Xs' under a minute, 'XmYs'
+        under an hour, 'XhYm' otherwise. Negative values clamp to
+        zero (clock skew between actor host and watch host is
+        possible if those ever diverge)."""
+        s = max(0, int(seconds))
+        if s < 60:
+            return f"{s}s"
+        if s < 3600:
+            return f"{s // 60}m {s % 60}s"
+        return f"{s // 3600}h {(s % 3600) // 60}m"
+
+    def _tick_overview_age(self) -> None:
+        """1Hz refresh of the OVERVIEW header, last-interaction
+        timestamps, and the runs table — keeps everything that
+        depends on wall-clock time live: the 'running for Xs'
+        counter, the 'Xs ago' meta lines, the in-flight row in the
+        recent-runs table. No-ops when no actor is selected. Each
+        section is one Static / DataTable update with a small Rich
+        renderable; cumulative cost stays well under the 1Hz budget."""
+        actor = self._overview_header_actor
+        if actor is None:
+            return
+        status = self._prev_statuses.get(actor.name, Status.IDLE)
+        self._render_overview_header(actor, status)
+        self._render_last_interaction(actor)
+        # Only re-render the runs table while a run is in flight —
+        # otherwise nothing changes per second.
+        if any(
+            r == Status.RUNNING
+            for r in self._prev_statuses.values()
+        ):
+            self._refresh_runs(actor)
+
+    def _tick_overview_running_icon(self) -> None:
+        """Re-render the OVERVIEW header at the tree's animation
+        cadence (0.5s) ONLY while the selected actor is RUNNING — so
+        the spinner glyph advances frame-by-frame, in phase with the
+        actor list, without paying the cost of a full header re-render
+        twice a second when nothing's animating."""
+        actor = self._overview_header_actor
+        if actor is None:
+            return
+        status = self._prev_statuses.get(actor.name, Status.IDLE)
+        if status != Status.RUNNING:
+            return
+        self._render_overview_header(actor, status)
+
+    def _render_last_interaction(self, actor: Actor) -> None:
+        """Build the side-by-side `LAST PROMPT` / `LAST RESPONSE`
+        panels in the OVERVIEW pane.
+
+        Source is `_log_entries_by_actor[actor.name]` — the same
+        cache the LIVE pane reads from, so we don't pay for a
+        second JSONL parse. While LIVE has never been visited for
+        this actor the cache is empty; we still render the panel
+        scaffolding (with a 'no activity yet' line) so the user sees
+        the section exists. The next log poll will fill it in.
+
+        Entries are walked backwards: first user-prompt-with-string
+        is the latest user prompt, first assistant-with-text is the
+        latest agent response. Tool-result user messages and
+        thinking blocks are skipped."""
+        from rich import box as rich_box
+        from rich.panel import Panel
+        from rich.table import Table
+        from rich.text import Text
+
+        entries = self._log_entries_by_actor.get(actor.name, [])
+        last_prompt, prompt_meta = self._last_user_prompt(entries)
+        last_response, response_meta = self._last_assistant_text(entries)
+        colors = self._overview_palette()
+
+        # Panel title only accepts Text/str (Rich calls .copy() on it),
+        # so we build a Text with the icon + label and put the
+        # "Xs ago" timestamp in `subtitle` aligned right. Visually:
+        #   ╭ LAST PROMPT ──────────────────────╮
+        #   │  body                             │
+        #   ╰─────────────────────── 5m ago ────╯
+        def _title(icon: str, label: str, color: str) -> Text:
+            t = Text()
+            t.append(f"{icon}  ", style=color)
+            t.append(label, style=f"bold {color}")
+            return t
+
+        prompt_body = Text(
+            self._truncate_for_panel(last_prompt) if last_prompt
+            else "(no prompt yet)",
+            style="" if last_prompt else "dim",
+        )
+        response_body = Text(
+            self._truncate_for_panel(last_response) if last_response
+            else "(awaiting first response)",
+            style="" if last_response else "dim",
+        )
+
+        prompt_panel = Panel(
+            prompt_body,
+            title=_title("", "LAST PROMPT", colors["primary"]),
+            title_align="left",
+            subtitle=Text(prompt_meta, style="dim") if prompt_meta else None,
+            subtitle_align="right",
+            border_style=colors["primary"],
+            box=rich_box.ROUNDED,
+            padding=(1, 2),
+        )
+        response_panel = Panel(
+            response_body,
+            title=_title("", "LAST RESPONSE", colors["success"]),
+            title_align="left",
+            subtitle=Text(response_meta, style="dim") if response_meta else None,
+            subtitle_align="right",
+            border_style=colors["success"],
+            box=rich_box.ROUNDED,
+            padding=(1, 2),
+        )
+
+        # Two-column grid that stretches to widget width.
+        layout = Table.grid(expand=True, padding=(0, 1))
+        layout.add_column(ratio=1)
+        layout.add_column(ratio=1)
+        layout.add_row(prompt_panel, response_panel)
+
+        try:
+            widget = self.query_one("#overview-last-interaction", Static)
+        except Exception:
+            return
+        widget.update(layout)
+
+    # -- Repo info section ---------------------------------------------------
+
+    # `_repo_info_by_actor[name] = dict` cached per actor. Populated by
+    # `_refresh_repo_info` worker; consumed by `_render_repo_info`.
+    # Keys: dir, worktree, branch, base, ahead, dirty, pr_number,
+    # pr_state, pr_url. Missing values are None — render handles each
+    # absence individually so the section degrades gracefully when (e.g.)
+    # gh isn't installed.
+    _repo_info_by_actor: dict[str, dict] = {}
+    # Session_id last seen per actor name — same trick the log cache
+    # uses to invalidate on discard+recreate so a new actor doesn't
+    # inherit the prior incarnation's repo info.
+    _repo_info_session_for: dict[str, str] = {}
+
+    @staticmethod
+    def _pr_state_color(state: str, palette: dict[str, str]) -> str:
+        s = state.lower()
+        if s == "open":
+            return palette["success"]
+        if s == "merged":
+            return palette["primary"]
+        if s == "closed":
+            return palette["error"]
+        return "dim"
+
+    def _kick_repo_info_build(self, actor: Actor) -> None:
+        """Schedule the off-thread `_refresh_repo_info` worker for
+        the given actor. Fires on first render (when cache is empty)
+        and from `_refresh_detail` when the session_id changes.
+        Re-runs are cheap-ish (3 git subprocs + 1 gh subproc) and the
+        worker is `exclusive=True group="repo_info"` so a newer kick
+        cancels in-flight ones cleanly."""
+        # Record the session_id we're about to fetch info for; the
+        # apply path checks this against the live actor before
+        # committing to avoid stomping a newer kick's result.
+        self._repo_info_session_for[actor.name] = actor.agent_session or ""
+        self._refresh_repo_info(actor)
+
+    @work(thread=True, exclusive=True, group="repo_info")
+    def _refresh_repo_info(self, actor: Actor) -> None:
+        info = self._gather_repo_info(actor)
+        self.call_from_thread(self._apply_repo_info, actor, info)
+
+    @staticmethod
+    def _gather_repo_info(actor: Actor) -> dict:
+        """Run the git + gh queries that populate the repo section.
+        Pure function — safe to call from any thread; touches no
+        widget state."""
+        import subprocess
+        info: dict = {
+            "dir": actor.dir,
+            "worktree": bool(actor.worktree),
+            "branch": None,
+            "base": actor.base_branch,
+            "ahead": None,
+            "dirty": None,
+            "pr_number": None,
+            "pr_state": None,
+            "pr_url": None,
+        }
+
+        def run(cmd: list[str]) -> tuple[int, str]:
+            try:
+                r = subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    cwd=actor.dir, timeout=10,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return -1, ""
+            return r.returncode, (r.stdout or "")
+
+        # Branch (verify / pull current — usually matches actor.name).
+        rc, out = run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+        if rc == 0 and out.strip():
+            info["branch"] = out.strip()
+
+        # Commits ahead of base.
+        if actor.base_branch:
+            rc, out = run([
+                "git", "rev-list", "--count",
+                f"{actor.base_branch}..HEAD",
+            ])
+            if rc == 0 and out.strip().isdigit():
+                info["ahead"] = int(out.strip())
+
+        # Dirty file count — modified, staged, AND untracked
+        # (excluding ignored). `--porcelain` produces one line per
+        # path; counting lines is the cheapest portable signal.
+        rc, out = run([
+            "git", "status", "--porcelain", "--untracked-files=all",
+        ])
+        if rc == 0:
+            info["dirty"] = sum(1 for line in out.splitlines() if line.strip())
+
+        # PR via gh — silently skip when gh isn't on PATH or returns
+        # an error (no PR for this branch is the common case).
+        if info["branch"]:
+            rc, out = run([
+                "gh", "pr", "list",
+                "--head", info["branch"],
+                "--state", "all",
+                "--json", "number,state,url",
+                "--limit", "1",
+            ])
+            if rc == 0 and out.strip():
+                import json
+                try:
+                    items = json.loads(out)
+                except json.JSONDecodeError:
+                    items = []
+                if items:
+                    pr = items[0]
+                    info["pr_number"] = pr.get("number")
+                    info["pr_state"] = pr.get("state")
+                    info["pr_url"] = pr.get("url")
+
+        return info
+
+    def _apply_repo_info(self, actor: Actor, info: dict) -> None:
+        """Main-thread commit of repo info. Drops silently when the
+        actor's session_id has moved on since the worker started
+        (e.g. user switched actors before the gh call returned)."""
+        recorded = self._repo_info_session_for.get(actor.name)
+        if recorded != (actor.agent_session or ""):
+            return
+        self._repo_info_by_actor[actor.name] = info
+        # Repo info now lives inside the header; re-render the header
+        # only when the selected actor matches what the worker fetched
+        # (otherwise the user has moved on).
+        current = self._overview_header_actor
+        if current is not None and current.name == actor.name:
+            status = self._prev_statuses.get(current.name, Status.IDLE)
+            self._render_overview_header(current, status)
+
+    @staticmethod
+    def _last_user_prompt(entries: list) -> tuple[str, str]:
+        """Walk entries backwards; return (text, meta) for the most
+        recent user-typed prompt. Tool-result user messages have
+        kind=TOOL_RESULT in our parsed entries, so `kind == USER`
+        already filters those out."""
+        for e in reversed(entries):
+            if e.kind == LogEntryKind.USER and e.text:
+                return e.text, ActorWatchApp._format_relative(e.timestamp)
+        return "", ""
+
+    @staticmethod
+    def _last_assistant_text(entries: list) -> tuple[str, str]:
+        """Walk entries backwards for the latest assistant TEXT
+        block (not thinking, not tool_use). Real responses are what
+        the user wants to see; tool calls are mid-flight detail."""
+        for e in reversed(entries):
+            if e.kind == LogEntryKind.ASSISTANT and e.text:
+                return e.text, ActorWatchApp._format_relative(e.timestamp)
+        return "", ""
+
+    @staticmethod
+    def _truncate_for_panel(text: str, max_lines: int = 8, max_chars: int = 600) -> str:
+        """Soft-truncate a message body for the OVERVIEW panel.
+        Limits both line count and total characters — markdown
+        prompts can be very long single lines, while agent responses
+        can be very wide multi-line; both shapes need taming."""
+        if len(text) > max_chars:
+            text = text[:max_chars].rstrip() + " …"
+        lines = text.splitlines()
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+            lines.append("…")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_relative(timestamp: str | None) -> str:
+        """Format an ISO timestamp as 'Xs ago' / 'Xm ago' / 'XhYm
+        ago'. Returns empty string when the input is None or
+        unparseable so the caller can drop the meta line cleanly."""
+        if not timestamp:
+            return ""
+        from datetime import datetime, timezone
+        from ..types import _parse_iso
+
+        when = _parse_iso(timestamp)
+        if when is None:
+            return ""
+        delta = (datetime.now(timezone.utc) - when).total_seconds()
+        return f"{ActorWatchApp._humanize_seconds(delta)} ago"
 
     # -- Logs ----------------------------------------------------------------
 
@@ -715,6 +1683,14 @@ class ActorWatchApp(App):
         if new_entries:
             bucket.extend(new_entries)
         self._set_logs(actor_name, bucket)
+        # If this actor is the currently-selected one, refresh the
+        # OVERVIEW last-interaction panels so the latest user prompt
+        # / agent response appear without waiting for the 1Hz tick.
+        if (
+            self._overview_header_actor is not None
+            and self._overview_header_actor.name == actor_name
+        ):
+            self._render_last_interaction(self._overview_header_actor)
 
     def _set_logs(self, actor_name: str, entries: list) -> None:
         log = self.query_one("#logs-content", RichLog)
@@ -971,12 +1947,15 @@ class ActorWatchApp(App):
         """Main-thread commit of badge counts. Stale tokens drop
         silently; the build-path apply will land its own (possibly
         higher, if untracked files contributed) counts later either
-        way. The two paths share `_update_diff_tab_label` — last
+        way. Both paths funnel through `_apply_diff_counts` — last
         write wins, which is fine because the build's number is
         authoritative and arrives last."""
         if token != self._diff_badge_token:
             return
-        self._update_diff_tab_label(added, removed)
+        target = self._diff_badge_target_actor
+        if target is None:
+            return
+        self._apply_diff_counts(target, added, removed)
 
     def _kick_diff_build(self, actor: Actor, force: bool = False) -> None:
         """Start an off-thread diff build with token + 300ms placeholder.
@@ -1222,7 +2201,11 @@ class ActorWatchApp(App):
         self._diff_build_pending = False
         self._diff_last_applied_key = cache_key
         self._diff_badge_token += 1
-        self._update_diff_tab_label(total_added, total_removed)
+        target = self._diff_build_target_actor
+        if target is not None:
+            self._apply_diff_counts(target, total_added, total_removed)
+        else:
+            self._update_diff_tab_label()
 
     def _apply_diff_text(
         self, token: int, cache_key: tuple, text: str,
@@ -1250,7 +2233,11 @@ class ActorWatchApp(App):
         # in-flight badge from this kick must not later overwrite
         # the no-changes / no-repo label we just committed.
         self._diff_badge_token += 1
-        self._update_diff_tab_label()
+        target = self._diff_build_target_actor
+        if target is not None:
+            self._apply_diff_counts(target, 0, 0)
+        else:
+            self._update_diff_tab_label()
 
     def _apply_diff_error(self, token: int, text: str) -> None:
         """Mount a render-error message and INVALIDATE the cache key.
@@ -1289,7 +2276,11 @@ class ActorWatchApp(App):
         # — that would split the tab label and the scroll pane into
         # contradictory states.
         self._diff_badge_token += 1
-        self._update_diff_tab_label()
+        target = self._diff_build_target_actor
+        if target is not None:
+            self._apply_diff_counts(target, 0, 0)
+        else:
+            self._update_diff_tab_label()
 
     def _mark_diff_build_done(self, token: int) -> None:
         """Cache-hit early-out path: the worker decided no rebuild was
@@ -1297,6 +2288,26 @@ class ActorWatchApp(App):
         and so a subsequent kick can start a new build cleanly."""
         if token == self._diff_build_token:
             self._diff_build_pending = False
+
+    def _poll_diff_badge_for_selected(self) -> None:
+        """2s tick: re-kick the cheap shortstat badge for the
+        currently-selected actor regardless of tab/status. The DIFF
+        tab label and the OVERVIEW branch row's `+N -M` segment both
+        read from `_diff_counts_by_actor`, so a constant-cadence
+        refresh keeps both surfaces honest even when the user is on
+        another tab and the actor isn't RUNNING (e.g. they edited
+        files by hand in the worktree).
+
+        `_kick_diff_badge` is `exclusive=True group="diff_badge"`, so
+        a tick that lands while a previous worker is still in flight
+        cooperatively cancels it — no thundering herd."""
+        try:
+            actor = self.query_one(ActorTree).selected_actor
+        except Exception:
+            return
+        if actor is None:
+            return
+        self._kick_diff_badge(actor)
 
     # -- Live DIFF refresh while a run is in progress ----------------------
 
@@ -1425,41 +2436,74 @@ class ActorWatchApp(App):
         self._diff_poll_last_shortstat = None
         self._diff_poll_last_untracked = None
 
-    def _update_diff_tab_label(self, added: int = 0, removed: int = 0) -> None:
-        # Pill-style ` +N -M` badge using the same fg/bg the diff body
-        # uses for added/removed lines (`DARK_COLORS` / `LIGHT_COLORS`
-        # in diff_render). Inactive tab → colored pills; active tab →
-        # plain text (Textual's focus-background overrides our colors
-        # there and would produce unreadable contrast). The
-        # active-state stripping happens in `_refresh_tab_arrows`.
-        if added or removed:
-            from .diff_render import DARK_COLORS, LIGHT_COLORS
-            # `current_theme` raises ReactiveError before super().__init__
-            # runs (some tests bypass init). Default to dark on failure.
+    def _update_diff_tab_label(
+        self, added: int | None = None, removed: int | None = None,
+    ) -> None:
+        """Compose the DIFF tab base label. Plain text (no pill
+        colors) — the colored display now lives only in the OVERVIEW
+        branch row, where Textual's active-tab reverse-video doesn't
+        fight us.
+
+        `added`/`removed` are passed by apply paths that already know
+        the counts (badge / build finalizer). When omitted, the label
+        is composed from `_diff_counts_by_actor` for the currently
+        selected actor — used by polling and clear paths that don't
+        carry counts."""
+        if added is None or removed is None:
+            added = removed = 0
             try:
-                t = self.current_theme
-                is_dark = t.dark if t else True
+                actor = self.query_one(ActorTree).selected_actor
             except Exception:
-                is_dark = True
-            dc = DARK_COLORS if is_dark else LIGHT_COLORS
-            added_style = f"{dc.added_marker} on {dc.added_bg}"
-            removed_style = f"{dc.removed_marker} on {dc.removed_bg}"
-            base: str | Text = Text("DIFF")
-            if added:
-                base.append(f" +{added}", style=added_style)
-            if removed:
-                base.append(f" -{removed}", style=removed_style)
-        else:
-            base = "DIFF"
-        self._tab_base_labels["diff"] = base
+                actor = None
+            if actor is not None:
+                counts = self._diff_counts_by_actor.get(actor.name)
+                if counts is not None:
+                    added, removed = counts
+        bits: list[str] = []
+        if added:
+            bits.append(f"+{added}")
+        if removed:
+            bits.append(f"-{removed}")
+        label = "DIFF" if not bits else f"DIFF [{' '.join(bits)}]"
+        self._tab_base_labels["diff"] = label
         self._refresh_tab_arrows()
+
+    def _apply_diff_counts(
+        self, actor_name: str, added: int, removed: int,
+    ) -> None:
+        """Store the latest (added, removed) for an actor and refresh
+        the two surfaces that read from the cache: the DIFF tab label
+        and the OVERVIEW branch row. Skips the overview re-render
+        when the actor isn't the one currently shown — the next
+        selection / re-render naturally picks up the new value.
+
+        Token discipline in the callers ensures apply only fires for
+        the most recently kicked actor (which is the selected one),
+        so the tab label always reflects what the user is looking at."""
+        prev = self._diff_counts_by_actor.get(actor_name)
+        new_counts = (added, removed)
+        if prev == new_counts:
+            return
+        self._diff_counts_by_actor[actor_name] = new_counts
+        self._update_diff_tab_label(added, removed)
+        current = self._overview_header_actor
+        if current is not None and current.name == actor_name:
+            status = self._prev_statuses.get(current.name, Status.IDLE)
+            self._render_overview_header(current, status)
 
     def _refresh_tab_arrows(self) -> None:
         """Prefix the currently-active tab with `→` while any
         descendant of the detail panel has focus (tabs bar, the
         active tab's content, etc.). Matches the focus-gated
         reverse-video override in CSS. Safe to call before compose
-        finishes."""
+        finishes.
+
+        Also re-derives the INTERACTIVE label's two-state shape so
+        it reflects the live focus state without callers having to
+        update `_tab_base_labels` themselves:
+          - terminal focused → "INTERACTIVE [CTRL+Z TO EXIT]"
+          - terminal blurred or tab inactive → plain "INTERACTIVE"
+        """
         try:
             tabbed = self.query_one("#tabs", TabbedContent)
             detail = self.query_one("#detail-panel")
@@ -1467,6 +2511,12 @@ class ActorWatchApp(App):
             return
         focused = detail.has_focus_within
         active_id = tabbed.active
+        # Recompute the dynamic INTERACTIVE label up front so the loop
+        # below applies the freshest version. Done here rather than in
+        # a separate watcher because every event that should re-derive
+        # the label (focus change, tab activation, session
+        # add/remove) already routes through `_refresh_tab_arrows`.
+        self._tab_base_labels["interactive"] = self._interactive_tab_label()
         for tab_id, base in self._tab_base_labels.items():
             try:
                 tab = tabbed.get_tab(tab_id)
@@ -1485,6 +2535,30 @@ class ActorWatchApp(App):
             else:
                 tab.label = base
 
+    def _interactive_tab_label(self) -> str:
+        """Compose the INTERACTIVE tab label based on terminal focus
+        state. See `_refresh_tab_arrows` for the two-state semantics.
+
+        Brackets are escaped with a leading `\\` because Textual's
+        Content runs the label string through Rich-style markup
+        parsing — `[CTRL+Z TO EXIT]` looks like a style tag with
+        attributes (uppercase identifier + space) and gets stripped
+        wholesale. The `\\[` escape survives the parse and renders
+        as a literal `[`. (`[+N -M]` on the DIFF tab survives without
+        escaping because `+` isn't a valid style-name character.)"""
+        from .interactive.widget import TerminalWidget
+        try:
+            tw = self.query_one(TerminalWidget)
+        except Exception:
+            tw = None
+        if tw is not None and tw.has_focus_within:
+            return r"INTERACTIVE \[CTRL+Z TO EXIT]"
+        return "INTERACTIVE"
+
+    def _remember_detail_tab(self, tab_id: str | None) -> None:
+        if tab_id in {"interactive", "info", "diff"}:
+            self._preferred_detail_tab = tab_id
+
     def on_tabbed_content_tab_activated(self, event) -> None:
         # TabbedContent fires TabActivated on mount for the default
         # tab; suppress the focus-push until we're fully ready so the
@@ -1494,7 +2568,30 @@ class ActorWatchApp(App):
         # interact, and so our #detail-panel:focus-within highlight
         # fires on mouse clicks too.
         if self._tabs_ready:
-            self._focus_detail_content()
+            try:
+                tabbed = self.query_one("#tabs", TabbedContent)
+            except Exception:
+                tabbed = None
+            if tabbed is not None and tabbed.active != "interactive":
+                self._pending_interactive_focus = None
+            if tabbed is not None:
+                if self._skip_next_detail_preference_update:
+                    self._skip_next_detail_preference_update = False
+                else:
+                    self._remember_detail_tab(tabbed.active)
+
+        if self._tabs_ready and not self._tree_has_focus():
+            pending = self._pending_interactive_focus
+            if pending is not None:
+                try:
+                    if tabbed is not None and tabbed.active == "interactive":
+                        self._schedule_focus_interactive_terminal(pending)
+                    else:
+                        self._focus_detail_content()
+                except Exception:
+                    self._focus_detail_content()
+            else:
+                self._focus_detail_content()
         self._refresh_tab_arrows()
         # LIVE just became visible. Its RichLog was width-0 while
         # hidden and we skipped render passes — flush now so the
@@ -1533,13 +2630,61 @@ class ActorWatchApp(App):
         # different tab (triggering TabActivated) or on the
         # already-active tab (which wouldn't) — should end with focus
         # on the active tab's content, matching the keyboard path.
-        self._focus_detail_content()
+        def _focus_after_click() -> None:
+            try:
+                tabbed = self.query_one("#tabs", TabbedContent)
+            except Exception:
+                tabbed = None
+            if tabbed is not None and tabbed.active != "interactive":
+                self._pending_interactive_focus = None
+            if tabbed is not None:
+                self._remember_detail_tab(tabbed.active)
+            self._focus_detail_content()
+
+        self.call_after_refresh(_focus_after_click)
+
+    async def on_key(self, event: events.Key) -> None:
+        if (
+            event.key != "enter"
+            or isinstance(self.focused, (ActorTree, TerminalWidget))
+        ):
+            return
+        try:
+            tabbed = self.query_one("#tabs", TabbedContent)
+        except Exception:
+            return
+        if tabbed.active != "interactive":
+            return
+        event.stop()
+        event.prevent_default()
+        self.action_enter_interactive()
 
     def on_descendant_focus(self, event) -> None:
         self._refresh_tab_arrows()
 
     def on_descendant_blur(self, event) -> None:
         self._refresh_tab_arrows()
+
+    def _on_focused_changed(self, focused) -> None:
+        self._refresh_focus_indicators()
+
+    def _refresh_focus_indicators(self) -> None:
+        self._refresh_tab_arrows()
+        try:
+            tree = self.query_one(ActorTree)
+            tree.set_class(self.focused is tree, "-focus-active")
+            tree.refresh()
+        except Exception:
+            pass
+        try:
+            from textual.widgets import Tabs
+            detail = self.query_one("#detail-panel")
+            tabbed = self.query_one("#tabs", TabbedContent)
+            detail.set_class(detail.has_focus_within, "-focus-active")
+            tabbed.query_one(Tabs).refresh()
+            tabbed.refresh()
+        except Exception:
+            pass
 
     def _flush_pending_diff_if_visible(self) -> None:
         """Re-kick the stashed diff build once DIFF has a non-zero
@@ -1577,54 +2722,253 @@ class ActorWatchApp(App):
 
     # -- Runs ----------------------------------------------------------------
 
+    _RUNS_TABLE_LIMIT = 50
+
     def _refresh_runs(self, actor: Actor) -> None:
+        from datetime import datetime, timezone
+        from rich.text import Text
+        from ..types import _parse_iso
+
         with Database.open(_db_path()) as db:
-            runs, _total = db.list_runs(actor.name, limit=50)
-        table = self.query_one("#runs-table", DataTable)
-        table.clear(columns=True)
-        table.add_columns("#", "Status", "Exit", "Prompt", "Started", "Duration")
+            runs, total = db.list_runs(actor.name, limit=self._RUNS_TABLE_LIMIT)
+
+        # Bake the run count into the section header — styled to
+        # match the screenshot's `RUNS · N` heading.
+        from rich.text import Text as _Text
+        colors = self._overview_palette()
+        try:
+            label_widget = self.query_one("#overview-runs-label", Static)
+            heading = _Text()
+            heading.append("RUNS", style=f"bold {colors['primary']}")
+            if total == 0:
+                pass
+            elif total <= self._RUNS_TABLE_LIMIT:
+                heading.append(f"  ·  {total}", style="dim")
+            else:
+                heading.append(
+                    f"  ·  showing {self._RUNS_TABLE_LIMIT} of {total}",
+                    style="dim",
+                )
+            label_widget.update(heading)
+        except Exception:
+            pass
+
+        # Use a Rich Table mounted into a Static so we get true
+        # full-width expansion via column ratios. Textual's DataTable
+        # auto-sizes columns to content even when the widget is
+        # `width: 1fr`, leaving empty space on the right; Rich Table
+        # with `expand=True` + `ratio=1` on the Prompt column
+        # stretches that column to consume the remaining width.
+        from rich import box as rich_box
+        from rich.table import Table as RichTable
+        rich_table = RichTable(
+            show_header=True,
+            header_style="dim bold",
+            expand=True,
+            # SIMPLE_HEAVY adds a single rule under the header and
+            # nothing else — matches the mockup's table treatment.
+            box=rich_box.SIMPLE_HEAVY,
+            border_style="dim",
+            padding=(0, 2),
+            show_edge=False,
+        )
+        rich_table.add_column("", no_wrap=True, width=1)
+        rich_table.add_column("Prompt", ratio=1, no_wrap=True, overflow="ellipsis")
+        rich_table.add_column("Age", no_wrap=True, width=12)
+        rich_table.add_column("Duration", no_wrap=True, width=14)
+
+        now = datetime.now(timezone.utc)
         for run in reversed(runs):
-            duration = ""
-            if run.started_at and run.finished_at:
-                from ..types import _parse_iso
-                start = _parse_iso(run.started_at)
-                end = _parse_iso(run.finished_at)
-                if start and end:
-                    secs = int((end - start).total_seconds())
-                    duration = f"{secs}s" if secs < 60 else f"{secs // 60}m {secs % 60}s"
-            prompt_short = (run.prompt[:40] + "...") if len(run.prompt) > 43 else run.prompt
-            table.add_row(
-                str(run.id),
-                run.status.value,
-                str(run.exit_code) if run.exit_code is not None else "—",
-                prompt_short,
-                run.started_at or "—",
-                duration or "—",
+            start = _parse_iso(run.started_at) if run.started_at else None
+            end = _parse_iso(run.finished_at) if run.finished_at else None
+            if start and end:
+                secs = int((end - start).total_seconds())
+                duration_text = Text(self._humanize_seconds(secs))
+            elif start and run.status == Status.RUNNING:
+                # In-flight: live duration ticking from started_at.
+                secs = int((now - start).total_seconds())
+                palette = self._overview_palette()
+                duration_text = Text(
+                    f"{self._humanize_seconds(secs)} (running)",
+                    style=palette["primary"],
+                )
+            else:
+                duration_text = Text("—", style="dim")
+
+            age_text = (
+                Text(self._format_relative(run.started_at))
+                if run.started_at else Text("—", style="dim")
             )
+
+            # No truncation: the column has overflow="ellipsis" so
+            # Rich handles the cut at the actual rendered width.
+            prompt_text = Text(run.prompt, no_wrap=True, overflow="ellipsis")
+
+            glyph_text = self._run_status_glyph(run.status, run.exit_code)
+
+            rich_table.add_row(glyph_text, prompt_text, age_text, duration_text)
+
+        try:
+            self.query_one("#runs-table", Static).update(rich_table)
+        except Exception:
+            pass
+
+    def _run_status_glyph(self, status: Status, exit_code: int | None):
+        """One-char status indicator for the runs table. Colors track
+        the same palette the header pill and activity sparkline use,
+        so the three views read consistently."""
+        from rich.text import Text
+        palette = self._overview_palette()
+        if status == Status.RUNNING:
+            return Text("●", style=f"bold {palette['primary']}")
+        if status == Status.DONE:
+            return Text("✓", style=palette["success"])
+        if status == Status.ERROR:
+            return Text("✕", style=palette["error"])
+        return Text("·", style="dim")
 
     # -- Actions -------------------------------------------------------------
 
+    def on_tree_node_selected(self, event) -> None:
+        if event.control is not self.query_one(ActorTree):
+            return
+        node = event.node
+        event.stop()
+        if node.children and not node.is_expanded:
+            node.expand()
+            return
+        if node.data is not None:
+            self.action_enter_interactive()
+
     def on_tree_node_highlighted(self, event) -> None:
+        tree = self.query_one(ActorTree)
+        prefer_interactive = not tree.consume_mouse_highlight()
         self._refresh_detail()
         self._maybe_refresh_diff()
-        self._sync_detail_view()
+        self._sync_detail_view(prefer_interactive=prefer_interactive)
 
     # -- Interactive mode ----------------------------------------------------
 
-    def _sync_detail_view(self) -> None:
+    def _apply_interactive_tab_preference(
+        self,
+        tabs: TabbedContent,
+        previous_active: str,
+        *,
+        prefer_interactive: bool,
+    ) -> None:
+        if previous_active == "interactive":
+            target = "interactive"
+        elif previous_active == "diff":
+            target = "diff"
+        elif self._preferred_detail_tab == "interactive":
+            target = "interactive"
+        elif self._preferred_detail_tab == "diff":
+            target = "diff"
+        elif prefer_interactive:
+            target = "interactive"
+        else:
+            target = "info"
+        tabs.active = target
+        self._remember_detail_tab(target)
+
+    def _replace_interactive_pane_content(
+        self,
+        tabs: TabbedContent,
+        pane: TabPane,
+        *,
+        actor_name: str,
+        target_widget,
+        previous_active: str,
+        prefer_interactive: bool,
+        token: int,
+    ) -> None:
+        async def _replace() -> None:
+            try:
+                current_actor = self.query_one(ActorTree).selected_actor
+                current_info = (
+                    self._interactive.get(actor_name)
+                    if current_actor is not None and current_actor.name == actor_name
+                    else None
+                )
+                if (
+                    self._interactive_pane_token != token
+                    or current_info is None
+                    or current_info.widget is not target_widget
+                    or not pane.is_mounted
+                ):
+                    return
+
+                stale_children = [
+                    child for child in pane.children
+                    if child is not target_widget
+                ]
+                if stale_children:
+                    await pane.remove_children(stale_children)
+                if self._interactive_pane_token != token:
+                    return
+
+                try:
+                    parent = target_widget.parent
+                except Exception:
+                    parent = None
+                if getattr(target_widget, "is_mounted", False) and parent is not pane:
+                    await target_widget.remove()
+                if self._interactive_pane_token != token:
+                    return
+
+                if target_widget not in list(pane.children):
+                    await pane.mount(target_widget)
+                if self._interactive_pane_token != token:
+                    return
+
+                current_actor = self.query_one(ActorTree).selected_actor
+                current_info = (
+                    self._interactive.get(actor_name)
+                    if current_actor is not None and current_actor.name == actor_name
+                    else None
+                )
+                if current_info is None or current_info.widget is not target_widget:
+                    return
+
+                self._interactive_active = actor_name
+                self._apply_interactive_tab_preference(
+                    tabs,
+                    previous_active,
+                    prefer_interactive=prefer_interactive,
+                )
+                self._refresh_focus_indicators()
+            except Exception as exc:
+                self.notify(
+                    f"failed to switch interactive tab: {exc}",
+                    severity="error",
+                )
+
+        self.run_worker(
+            _replace,
+            name="replace-interactive-pane",
+            group="interactive-pane",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    def _sync_detail_view(self, *, prefer_interactive: bool = True) -> None:
         """Add/remove the Interactive tab based on whether the selected
-        actor has a live session. Does NOT activate the tab; use
-        action_enter_interactive for that."""
+        actor has a live session. When an actor has interactive output,
+        prefer that tab over OVERVIEW; preserve DIFF because selecting
+        actors while reviewing changes should keep the diff surface."""
         from textual.css.query import NoMatches
 
         try:
             tabs = self.query_one("#tabs", TabbedContent)
         except NoMatches:
             return
+        previous_active = tabs.active
         actor = self.query_one(ActorTree).selected_actor
         info = (
             self._interactive.get(actor.name) if actor is not None else None
         )
+        self._interactive_pane_token += 1
+        token = self._interactive_pane_token
 
         existing: TabPane | None = None
         try:
@@ -1633,7 +2977,11 @@ class ActorWatchApp(App):
             existing = None
 
         if info is None:
+            self._pending_interactive_focus = None
             if existing is not None:
+                if previous_active == "interactive":
+                    self._remember_detail_tab("interactive")
+                    self._skip_next_detail_preference_update = True
                 tabs.remove_pane("interactive")
             self._interactive_active = None
             return
@@ -1645,13 +2993,39 @@ class ActorWatchApp(App):
             # If the existing pane already holds this actor's widget, leave it.
             if info.widget in list(existing.children):
                 self._interactive_active = actor.name
+                self._apply_interactive_tab_preference(
+                    tabs,
+                    previous_active,
+                    prefer_interactive=prefer_interactive,
+                )
                 return
-            tabs.remove_pane("interactive")
+            self._replace_interactive_pane_content(
+                tabs,
+                existing,
+                actor_name=actor.name,
+                target_widget=info.widget,
+                previous_active=previous_active,
+                prefer_interactive=prefer_interactive,
+                token=token,
+            )
+            return
 
         # add_pane is async — it schedules the mount but we can proceed.
+        # Initial label is plain "INTERACTIVE"; `_refresh_tab_arrows`
+        # immediately replaces it with the focus-aware variant.
         new_pane = TabPane("INTERACTIVE", info.widget, id="interactive")
-        tabs.add_pane(new_pane, before="logs")
+        # Insert as the FIRST tab so the order is INTERACTIVE / OVERVIEW
+        # / DIFF — INTERACTIVE is the active surface while a session is
+        # live and belongs leftmost so the user's eye lands on it
+        # immediately. The label hints at the exit key since there's no
+        # other affordance for leaving the embedded terminal.
+        tabs.add_pane(new_pane, before="info")
         self._interactive_active = actor.name
+        self._apply_interactive_tab_preference(
+            tabs,
+            previous_active,
+            prefer_interactive=prefer_interactive,
+        )
 
     def action_enter_interactive(self) -> None:
         """Bound to `i` (app-wide) and Tree.NodeSelected (Enter on tree):
@@ -1702,24 +3076,55 @@ class ActorWatchApp(App):
         except Exception:
             return
         tabs.active = "interactive"
+        self._remember_detail_tab("interactive")
 
         target_widget = info.widget
+        self._pending_interactive_focus = target_widget
+        self._schedule_focus_interactive_terminal(target_widget)
 
-        def _activate() -> None:
-            target_widget.focus()
+    def _schedule_focus_interactive_terminal(self, target_widget, attempts: int = 8) -> None:
+        def _activate(remaining: int) -> None:
+            if self._pending_interactive_focus is not target_widget:
+                return
+            if not getattr(target_widget, "is_mounted", False):
+                if remaining > 0:
+                    self.set_timer(0.02, lambda: _activate(remaining - 1))
+                return
+            target_widget.can_focus = True
+            try:
+                self.set_focus(target_widget, scroll_visible=False)
+            except Exception:
+                return
             try:
                 target_widget.scroll_end(animate=False, force=True)
             except Exception:
                 pass
+            self._refresh_focus_indicators()
+            if self.focused is target_widget:
+                if self._pending_interactive_focus is target_widget:
+                    self._pending_interactive_focus = None
+                return
+            if remaining > 0:
+                self.set_timer(0.02, lambda: _activate(remaining - 1))
+            elif self._pending_interactive_focus is target_widget:
+                self._pending_interactive_focus = None
 
-        self.call_after_refresh(_activate)
+        self.set_timer(0.02, lambda: _activate(attempts))
 
     def on_terminal_widget_exit_requested(self, message: TerminalWidget.ExitRequested) -> None:
-        """Ctrl+Z from the embedded terminal: move focus to the actor tree.
-        The Logs tab keeps the live terminal mounted; Diff / Info tabs
-        are still reachable via the tab bar."""
-        self.set_focus(None)
-        self.call_after_refresh(lambda: self.query_one(ActorTree).focus())
+        """Ctrl+Z from the embedded terminal: keep the INTERACTIVE tab
+        active and blur the terminal by moving focus onto the tab bar
+        (TabbedContent's inner `Tabs` widget). `TabbedContent` itself
+        is not focusable (`can_focus=False`) — focusing it is a
+        no-op, which is why earlier attempts appeared to do nothing.
+        The `Tabs` widget IS focusable; focusing it lets left/right
+        cycle through tabs natively, while the descendant-blur on the
+        terminal triggers `_refresh_tab_arrows` to flip the INTERACTIVE
+        label out of "[CTRL+Z TO EXIT]" mode."""
+        self._pending_interactive_focus = None
+        if not self._focus_tabs_bar():
+            self.set_focus(None, scroll_visible=False)
+            self._refresh_focus_indicators()
 
     def on_terminal_widget_session_exited(self, message: TerminalWidget.SessionExited) -> None:
         target: str | None = None
@@ -1731,6 +3136,19 @@ class ActorWatchApp(App):
         if target is None:
             return
         self._interactive.close(target)
+        # Switch to OVERVIEW BEFORE removing the INTERACTIVE pane.
+        # `TabbedContent.remove_pane` on the currently-active tab
+        # auto-falls-through to the next pane in tab order — which
+        # is DIFF — so without this preemptive switch the user
+        # quitting an interactive session would land on DIFF instead
+        # of the OVERVIEW where they came from.
+        try:
+            tabs = self.query_one("#tabs", TabbedContent)
+            if tabs.active == "interactive":
+                self._remember_detail_tab("info")
+                tabs.active = "info"
+        except Exception:
+            pass
         # _sync_detail_view swaps the Logs-tab content back to RichLog
         # now that the session is gone from the registry.
         self._refresh_detail()
@@ -1746,6 +3164,40 @@ class ActorWatchApp(App):
         print(f"--- terminal diagnostics ({len(self._diagnostics)} events) ---",
               file=sys.stderr)
         print(dump, file=sys.stderr)
+        # Pyte history + visible-buffer dump for the currently-active
+        # interactive widget. Useful for diagnosing rendering anomalies
+        # (e.g. apparent row duplication on scroll-back) where the
+        # smoking gun is what's actually in pyte's history vs visible
+        # buffer at the moment the issue is on screen.
+        try:
+            tabbed = self.query_one("#tabs", TabbedContent)
+            if tabbed.active == "interactive":
+                from .interactive.widget import TerminalWidget
+                tw = self.query_one(TerminalWidget)
+                ts = tw._screen
+                hist = list(ts._screen.history.top)
+                print(
+                    f"--- pyte history.top ({len(hist)} rows; meaningful "
+                    f"size={ts.history_size()}) ---",
+                    file=sys.stderr,
+                )
+                for i, row in enumerate(hist):
+                    text = "".join(
+                        row.get(x).data if row.get(x) else " "
+                        for x in range(ts.cols)
+                    ).rstrip()
+                    print(f"hist[{i:>3}] {text!r}", file=sys.stderr)
+                print(
+                    f"--- pyte visible buffer ({ts.rows} rows) ---",
+                    file=sys.stderr,
+                )
+                for y in range(ts.rows):
+                    text = "".join(
+                        ts._screen.buffer[y][x].data for x in range(ts.cols)
+                    ).rstrip()
+                    print(f"buf[{y:>3}] {text!r}", file=sys.stderr)
+        except Exception as e:
+            print(f"--- pyte dump skipped: {e!r} ---", file=sys.stderr)
         print("--- end ---", file=sys.stderr)
         self.notify(f"dumped {len(self._diagnostics)} diagnostic events to stderr")
 
@@ -1756,15 +3208,52 @@ class ActorWatchApp(App):
         shutdown coroutine and leads to a hang that only Ctrl+C escapes."""
         self._interactive.shutdown()
 
+    def _focus_tabs_bar(self) -> bool:
+        """Synchronously focus TabbedContent's inner Tabs widget."""
+        from textual.widgets import Tabs
+        try:
+            tabbed = self.query_one("#tabs", TabbedContent)
+            tabs_bar = tabbed.query_one(Tabs)
+        except Exception:
+            return False
+        tabs_bar.can_focus = True
+        self.set_focus(tabs_bar, scroll_visible=False)
+        self._refresh_focus_indicators()
+        return self.focused is tabs_bar
+
+    def _focus_actor_tree(self) -> bool:
+        try:
+            tree = self.query_one(ActorTree)
+        except Exception:
+            return False
+        self.set_focus(tree, scroll_visible=False)
+        self._refresh_focus_indicators()
+        return self.focused is tree
+
     def _focus_detail_content(self, tab_id: str | None = None) -> None:
         if tab_id is None:
             tabs = self.query_one("#tabs", TabbedContent)
             tab_id = tabs.active
 
+        if tab_id == "interactive":
+            # Don't auto-grab the terminal — that's reserved for `i`
+            # / Enter on the tab bar. Land focus on the inner Tabs
+            # widget so further left/right cycle through tabs
+            # natively (ContentTabs has its own previous_tab /
+            # next_tab bindings). Without this, app-level navigation
+            # to "interactive" would leave focus on whatever the
+            # previous tab had (e.g. #logs-content), which is now
+            # behind a hidden TabPane and consumes nothing useful.
+            self._focus_tabs_bar()
+            return
+
         focus_map = {
-            "logs": "#logs-content",
             "diff": "#diff-scroll",
-            "info": "#info-content",
+            # OVERVIEW: focus the embedded RichLog so PageUp/Down
+            # scroll through the log feed without the user having to
+            # click into it. The log lives below the static header
+            # card inside `#overview-scroll`.
+            "info": "#logs-content",
         }
         selector = focus_map.get(tab_id)
         if selector:
@@ -1776,19 +3265,39 @@ class ActorWatchApp(App):
                 pass
 
     def action_show_tab(self, tab_id: str) -> None:
+        if tab_id != "interactive":
+            self._pending_interactive_focus = None
         tabs = self.query_one("#tabs", TabbedContent)
         tabs.active = tab_id
+        self._remember_detail_tab(tab_id)
         if tab_id == "diff":
             self._maybe_refresh_diff(force=True)
         self._focus_detail_content(tab_id)
 
-    TAB_ORDER = ["logs", "diff", "info"]
+    TAB_ORDER = ["info", "diff"]
+
+    def _live_tab_order(self) -> list[str]:
+        """Tab cycle order, dynamically prepending `interactive` when
+        an interactive pane is currently mounted. Without this, after
+        Ctrl+Z the user's left/right arrows fall through the app-level
+        navigate_{left,right} actions but the active tab id
+        (`interactive`) isn't in the static TAB_ORDER, so the actions
+        no-op. ContentTabs's own bindings would handle cycling when
+        the tab bar has focus, but the arrow keys come up to the App
+        whenever focus lands on a non-Tabs widget that doesn't claim
+        them — so the App needs to know the live order too."""
+        try:
+            tabbed = self.query_one("#tabs", TabbedContent)
+            tabbed.get_tab("interactive")
+        except Exception:
+            return list(self.TAB_ORDER)
+        return ["interactive", *self.TAB_ORDER]
 
     def action_focus_actors(self) -> None:
-        self.query_one(ActorTree).focus()
+        self._focus_actor_tree()
 
     def _tree_has_focus(self) -> bool:
-        return self.query_one(ActorTree).has_focus
+        return self.focused is self.query_one(ActorTree)
 
     def action_navigate_left(self) -> None:
         if self._tree_has_focus():
@@ -1799,12 +3308,13 @@ class ActorWatchApp(App):
             return
         tabs = self.query_one("#tabs", TabbedContent)
         current = tabs.active
-        if current in self.TAB_ORDER:
-            idx = self.TAB_ORDER.index(current)
+        order = self._live_tab_order()
+        if current in order:
+            idx = order.index(current)
             if idx == 0:
-                self.query_one(ActorTree).focus()
+                self._focus_actor_tree()
             else:
-                self.action_show_tab(self.TAB_ORDER[idx - 1])
+                self.action_show_tab(order[idx - 1])
 
     def action_navigate_right(self) -> None:
         if self._tree_has_focus():
@@ -1817,10 +3327,11 @@ class ActorWatchApp(App):
         else:
             tabs = self.query_one("#tabs", TabbedContent)
             current = tabs.active
-            if current in self.TAB_ORDER:
-                idx = self.TAB_ORDER.index(current)
-                if idx < len(self.TAB_ORDER) - 1:
-                    self.action_show_tab(self.TAB_ORDER[idx + 1])
+            order = self._live_tab_order()
+            if current in order:
+                idx = order.index(current)
+                if idx < len(order) - 1:
+                    self.action_show_tab(order[idx + 1])
 
     def action_navigate_up(self) -> None:
         if self._tree_has_focus():

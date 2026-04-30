@@ -66,6 +66,10 @@ def _bare_app() -> ActorWatchApp:
         "logs": "LIVE", "diff": "DIFF",
         "info": "OVERVIEW", "interactive": "INTERACTIVE",
     }
+    # Unified diff-counts cache: badge + build apply paths both write
+    # here; the DIFF tab label and OVERVIEW branch row both read here.
+    app._diff_counts_by_actor = {}
+    app._overview_header_actor = None
     return app
 
 
@@ -274,6 +278,7 @@ class ApplyDiffBuildTokenDiscardTests(unittest.TestCase):
         app = _bare_app()
         app._diff_build_token = 7
         app._diff_build_pending = True
+        app._diff_build_target_actor = "alice"
         with patch.object(app, "_refresh_tab_arrows"):
             app._apply_diff_build_done(
                 token=7,
@@ -283,9 +288,11 @@ class ApplyDiffBuildTokenDiscardTests(unittest.TestCase):
             )
         self.assertEqual(app._diff_last_applied_key, ("alice", "deadbeef", 100))
         self.assertFalse(app._diff_build_pending)
-        # New label shape: "DIFF +3 -4" (added 3, removed 4); colors live
-        # in segments. Assert on the plain text.
-        self.assertEqual(app._tab_base_labels["diff"].plain, "DIFF +3 -4")
+        # Plain "DIFF [+3 -4]" — colors moved to the OVERVIEW branch
+        # row; the tab label is now neutral with bracketed counts.
+        self.assertEqual(app._tab_base_labels["diff"], "DIFF [+3 -4]")
+        # Cache populated for the actor — the OVERVIEW reads from here.
+        self.assertEqual(app._diff_counts_by_actor["alice"], (3, 4))
 
     def test_apply_diff_text_drops_when_token_stale(self):
         app = _bare_app()
@@ -839,11 +846,13 @@ class ApplyDiffBadgeTests(unittest.TestCase):
     def test_apply_diff_badge_updates_label_when_token_matches(self):
         app = _bare_app()
         app._diff_badge_token = 7
+        app._diff_badge_target_actor = "alice"
         with patch.object(app, "_refresh_tab_arrows"):
             app._apply_diff_badge(token=7, added=5, removed=3)
-        # Label rendered with separate +/- spans (colors come from the
-        # theme; assert on the plain text shape).
-        self.assertEqual(app._tab_base_labels["diff"].plain, "DIFF +5 -3")
+        # Plain string (no Rich Text) — colors live in the OVERVIEW
+        # branch row; the tab label is neutral.
+        self.assertEqual(app._tab_base_labels["diff"], "DIFF [+5 -3]")
+        self.assertEqual(app._diff_counts_by_actor["alice"], (5, 3))
 
 
 class KickDiffBadgeTests(unittest.TestCase):
@@ -907,11 +916,13 @@ class BadgeBeforeBuildTests(unittest.TestCase):
         app._diff_badge_token = 1
         app._diff_build_token = 1
         app._diff_build_pending = True
+        app._diff_badge_target_actor = "alice"
+        app._diff_build_target_actor = "alice"
 
         # Badge fires first.
         with patch.object(app, "_refresh_tab_arrows"):
             app._apply_diff_badge(token=1, added=12, removed=3)
-        self.assertEqual(app._tab_base_labels["diff"].plain, "DIFF +12 -3")
+        self.assertEqual(app._tab_base_labels["diff"], "DIFF [+12 -3]")
         # Build path's token is untouched — it can still land.
         self.assertEqual(app._diff_build_token, 1)
         self.assertTrue(app._diff_build_pending)
@@ -927,7 +938,7 @@ class BadgeBeforeBuildTests(unittest.TestCase):
                 total_added=14,  # diverges from badge's 12 (untracked)
                 total_removed=3,
             )
-        self.assertEqual(app._tab_base_labels["diff"].plain, "DIFF +14 -3")
+        self.assertEqual(app._tab_base_labels["diff"], "DIFF [+14 -3]")
         self.assertFalse(app._diff_build_pending)
 
 
@@ -2217,6 +2228,8 @@ class BuildInvalidatesBadgeTokenTests(unittest.TestCase):
         app = _bare_app()
         app._diff_build_token = 5
         app._diff_badge_token = 5
+        app._diff_build_target_actor = "alice"
+        app._diff_badge_target_actor = "alice"
 
         # Build applies first with authoritative count.
         with patch.object(app, "_refresh_tab_arrows"):
@@ -2226,9 +2239,7 @@ class BuildInvalidatesBadgeTokenTests(unittest.TestCase):
                 total_added=12,
                 total_removed=3,
             )
-        # The label is a Rich Text using the green +N / red -N pill
-        # style (a Stage-3 follow-up); the displayed numbers come
-        # from `total_added` / `total_removed`.
+        # Label now reads "DIFF [+12 -3]" — plain string (no colors).
         label_after_build = str(app._tab_base_labels["diff"])
         self.assertIn("+12", label_after_build)
         self.assertIn("-3", label_after_build)
