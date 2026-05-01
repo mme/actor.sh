@@ -159,6 +159,16 @@ class Database:
             raise NotFoundError(name)
         return self._row_to_actor(row)
 
+    def actor_exists(self, name: str) -> bool:
+        """Return True if an actor row exists for `name`. Used by the
+        MCP server to distinguish "stopped" (process killed, row
+        still present) from "discarded" (row deleted) when emitting
+        channel notifications back to the parent Claude session."""
+        cur = self._conn.execute(
+            "SELECT 1 FROM actors WHERE name = ? LIMIT 1", (name,),
+        )
+        return cur.fetchone() is not None
+
     def list_actors(self) -> List[Actor]:
         cur = self._conn.execute(
             """SELECT name, agent, agent_session, dir, source_repo, base_branch,

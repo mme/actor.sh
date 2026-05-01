@@ -495,6 +495,70 @@ class TestCmdDiscardOnDiscard(unittest.TestCase):
         # Discarded despite the failing hook.
         self.assertEqual(db.list_actors(), [])
 
+    def test_default_hook_runs_git_diff_quiet(self):
+        """When `app_config` is provided but `hooks.on_discard` is
+        None (i.e. the user didn't configure one), `cmd_discard`
+        should fall back to `git diff --quiet` — the safety net
+        against accidentally tossing uncommitted edits."""
+        db = _in_memory_db()
+        create_actor(db, "foo")
+        pm = FakeProcessManager()
+        cfg = AppConfig(hooks=Hooks(on_discard=None))
+        runner = _RecordingRunner(0)
+        cmd_discard(
+            db, pm, name="foo",
+            app_config=cfg, hook_runner=runner,
+        )
+        self.assertEqual(len(runner.calls), 1)
+        command, _, _ = runner.calls[0]
+        self.assertEqual(command, "git diff --quiet")
+
+    def test_default_hook_failure_aborts(self):
+        """If the default `git diff --quiet` returns non-zero (dirty
+        tree), discard aborts and the actor row stays."""
+        db = _in_memory_db()
+        create_actor(db, "foo")
+        pm = FakeProcessManager()
+        cfg = AppConfig(hooks=Hooks(on_discard=None))
+        runner = _RecordingRunner(1)
+        with self.assertRaises(HookFailedError):
+            cmd_discard(
+                db, pm, name="foo",
+                app_config=cfg, hook_runner=runner,
+            )
+        self.assertEqual(len(db.list_actors()), 1)
+
+    def test_no_app_config_means_no_hook(self):
+        """When `app_config` itself is None (test/internal callers),
+        `cmd_discard` should NOT apply a default hook — the default
+        fires only against a real config layer. This keeps tests
+        that bypass config layering from getting bitten by a
+        `git diff` they didn't ask for."""
+        db = _in_memory_db()
+        create_actor(db, "foo")
+        pm = FakeProcessManager()
+        runner = _RecordingRunner(0)
+        cmd_discard(db, pm, name="foo", hook_runner=runner)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(db.list_actors(), [])
+
+    def test_hook_failure_message_names_the_actor(self):
+        """The HookFailedError surfaced to the caller should name
+        the actor whose hook tripped — important for chained
+        discards where the failing actor might not be the one the
+        user typed."""
+        db = _in_memory_db()
+        create_actor(db, "foo")
+        pm = FakeProcessManager()
+        cfg = AppConfig(hooks=Hooks(on_discard='false'))
+        runner = _RecordingRunner(1)
+        with self.assertRaises(HookFailedError) as ctx:
+            cmd_discard(
+                db, pm, name="foo",
+                app_config=cfg, hook_runner=runner,
+            )
+        self.assertIn("foo", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
