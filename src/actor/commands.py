@@ -33,6 +33,7 @@ from .types import (
     validate_name,
 )
 from .db import Database
+from .git import RealGit
 from .agents.claude import ClaudeAgent
 from .agents.codex import CodexAgent
 
@@ -814,43 +815,84 @@ def _force_stop(db: Database, proc_mgr: ProcessManager, name: str) -> None:
     db.update_run_status(latest.id, Status.STOPPED, None)
 
 
+_DEFAULT_ON_DISCARD = "git diff --quiet"
+"""Default on-discard hook command. Fires when no `on-discard` is
+configured in the user's / project's settings.kdl. The intent is
+"don't let the user accidentally throw away uncommitted work" —
+`git diff --quiet` exits 0 only when the worktree is clean, so
+`actor discard` aborts if there are pending changes (unless
+`--force` is set). To suppress entirely without configuring a real
+check, set `on-discard "true"` in settings.kdl."""
+
+
 def cmd_discard(
     db: Database,
     proc_mgr: ProcessManager,
     name: str,
+    *,
+    git: Optional[GitOps] = None,
     _visited: set[str] | None = None,
     app_config: Optional["AppConfig"] = None,
     hook_runner: Optional[HookRunner] = None,
     force: bool = False,
 ) -> str:
+    """Discard an actor: stop it if running, run the on-discard hook,
+    remove the worktree, delete the DB row.
+
+    Order matters. Children (recursively discovered via the `parent`
+    column) are processed depth-first — leaves first — so a parent
+    is only deleted once all its descendants are gone. If any
+    discard in the chain raises (failing on-discard, worktree
+    removal error, etc.) the chain stops and the surfaced exception
+    names the actor that broke the chain.
+
+    Default `on-discard` is `git diff --quiet` so a worktree with
+    pending edits won't be wiped accidentally; users can set
+    `on-discard "..."` (or `on-discard "true"` to suppress) in
+    settings.kdl. `--force` (or `force=True`) bypasses the hook
+    failure and proceeds anyway."""
+    if git is None:
+        git = RealGit()
+
     actor = db.get_actor(name)
 
-    # Track visited to prevent infinite recursion on circular parent chains
+    # Track visited to prevent infinite recursion on circular parent
+    # chains (shouldn't happen in practice but defensive).
     if _visited is None:
         _visited = set()
     _visited.add(name)
 
-    # Recursively discard children first
+    # Recursively discard children FIRST (leaves up). If any child's
+    # discard raises and `force` is False, that exception propagates
+    # — the chain stops and we never touch this actor's worktree or
+    # DB row. Matches the user expectation of "if one on-discard
+    # fails, stop".
     children = db.list_children(name)
     discarded = []
     for child in children:
         if child.name not in _visited:
             msg = cmd_discard(
-                db, proc_mgr, name=child.name, _visited=_visited,
+                db, proc_mgr, name=child.name, git=git, _visited=_visited,
                 app_config=app_config, hook_runner=hook_runner, force=force,
             )
             discarded.append(msg)
 
-    # Stop if running
+    # Stop if running (SIGTERM/SIGKILL the agent process). Has to
+    # happen BEFORE the hook so the hook runs against settled
+    # working-tree state.
     status = db.resolve_actor_status(name, proc_mgr)
     if status == Status.RUNNING:
         _force_stop(db, proc_mgr, name)
 
-    # on-discard hook fires after resource cleanup, before DB delete.
-    # If the actor's worktree no longer exists on disk we run the hook
-    # from $HOME so subprocess.Popen can still get a valid cwd; the hook
-    # script can detect the missing-worktree case via ACTOR_DIR.
-    on_discard = app_config.hooks.on_discard if app_config is not None else None
+    # Resolve on-discard hook command. Default to a safety check
+    # ONLY when an `app_config` was passed — tests that bypass
+    # config layering shouldn't get bitten by a `git diff` they
+    # didn't ask for.
+    if app_config is not None:
+        on_discard = app_config.hooks.on_discard or _DEFAULT_ON_DISCARD
+    else:
+        on_discard = None
+
     if on_discard is not None:
         actor_dir = Path(actor.dir)
         hook_cwd = actor_dir if actor_dir.is_dir() else Path.home()
@@ -866,12 +908,48 @@ def cmd_discard(
         except HookFailedError as e:
             if force:
                 print(
-                    f"warning: on-discard hook failed but --force was set; "
-                    f"discarding anyway: {e}",
+                    f"warning: on-discard hook failed for '{name}' but "
+                    f"--force was set; discarding anyway: {e}",
                     file=sys.stderr,
                 )
             else:
-                raise
+                # Wrap with actor context so the error message tells
+                # the agent / user exactly which actor's hook tripped
+                # — important for chained discards where the failing
+                # one might not be the actor the user typed.
+                raise HookFailedError(
+                    e.event,
+                    e.command,
+                    e.exit_code,
+                    stdout=e.stdout,
+                    stderr=(
+                        f"actor '{name}' discard aborted; "
+                        f"{e.stderr}" if e.stderr
+                        else f"actor '{name}' discard aborted"
+                    ),
+                ) from e
+
+    # Remove the worktree if the actor was created with one. Failure
+    # here also aborts the discard (no DB delete) unless force —
+    # otherwise the user would end up with a dangling worktree on
+    # disk and no DB row referring to it.
+    if actor.worktree and actor.source_repo:
+        wt_path = Path(actor.dir)
+        if wt_path.is_dir():
+            try:
+                git.remove_worktree(Path(actor.source_repo), wt_path)
+            except Exception as e:
+                if force:
+                    print(
+                        f"warning: failed to remove worktree {wt_path} for "
+                        f"'{name}'; --force is set so DB delete proceeds: {e}",
+                        file=sys.stderr,
+                    )
+                else:
+                    raise ActorError(
+                        f"failed to remove worktree {wt_path} for actor "
+                        f"'{name}': {e}"
+                    ) from e
 
     db.delete_actor(name)
     discarded.append(f"{name} discarded")

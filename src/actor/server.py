@@ -203,8 +203,19 @@ def _spawn_background_run(
             print(f"[actor-mcp] run for '{name}' failed: {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
 
-        resolved = thread_db.resolve_actor_status(name, pm)
-        status = resolved.value
+        # If the actor row is gone, the run was terminated by a
+        # `discard` (not just a `stop`). Distinguish in the channel
+        # notification meta so the parent Claude can react
+        # accordingly — "discarded" implies the actor + worktree are
+        # gone and can't be re-run, vs "stopped" which leaves the
+        # actor in place. We can't add `Status.DISCARDED` to the enum
+        # because the row doesn't exist to carry it; the literal
+        # string in the meta dict is the canonical signal.
+        if thread_db.actor_exists(name):
+            resolved = thread_db.resolve_actor_status(name, pm)
+            status = resolved.value
+        else:
+            status = "discarded"
 
         if session and loop:
             body = output or f"Finished with status: {status}."
