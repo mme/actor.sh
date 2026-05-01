@@ -9,7 +9,7 @@ from rich.text import Text
 from rich.theme import Theme as RichTheme
 
 from textual import events, on, work
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
@@ -28,6 +28,8 @@ from ..interfaces import LogEntryKind, binary_exists
 from ..process import RealProcessManager
 from ..types import Actor, AgentKind, Status
 from ..cli import _db_path, _create_agent
+from .confirm_dialog import ConfirmDialog
+from .help_overlay import HelpOverlay
 from .interactive.diagnostics import DiagnosticRecorder
 from .interactive.manager import InteractiveSessionManager
 from .interactive.widget import TerminalWidget
@@ -215,10 +217,14 @@ class ActorWatchApp(App):
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
-        Binding("left,ctrl+b", "navigate_left", show=False, priority=True),
-        Binding("right,ctrl+f", "navigate_right", show=False, priority=True),
-        Binding("up,ctrl+p", "navigate_up", show=False),
-        Binding("down,ctrl+n", "navigate_down", show=False),
+        # Arrow + emacs aliases for navigation. `show=False` keeps the
+        # Footer uncluttered (a row of arrow keys is noise next to the
+        # named actions), but `description` is set so the keys panel
+        # surfaces them under the global keymap.
+        Binding("left,ctrl+b", "navigate_left", "Move left", show=False, priority=True),
+        Binding("right,ctrl+f", "navigate_right", "Move right", show=False, priority=True),
+        Binding("up,ctrl+p", "navigate_up", "Move up", show=False),
+        Binding("down,ctrl+n", "navigate_down", "Move down", show=False),
         Binding("a", "focus_actors", "Actors"),
         Binding("p", "command_palette", "Palette"),
         Binding("i", "enter_interactive", "Interactive"),
@@ -334,11 +340,24 @@ class ActorWatchApp(App):
         self._skip_next_detail_preference_update = False
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if (
-            action in {"navigate_left", "navigate_right"}
-            and isinstance(self.focused, TerminalWidget)
-        ):
-            return False
+        nav_actions = {
+            "navigate_left",
+            "navigate_right",
+            "navigate_up",
+            "navigate_down",
+        }
+        if action in nav_actions:
+            # Priority bindings bypass `_modal_binding_chain`, so the
+            # App-level navigate_* actions fire even when a system
+            # modal is on top — the modal user would press an arrow
+            # to move focus inside the dialog and instead see the
+            # underlying tabs cycle. Suppress navigation while any
+            # modal is the active screen.
+            from textual.screen import SystemModalScreen
+            if isinstance(self.screen, SystemModalScreen):
+                return False
+            if isinstance(self.focused, TerminalWidget):
+                return False
         if self._splash_active and action != "quit":
             return False
         return True
@@ -3157,6 +3176,159 @@ class ActorWatchApp(App):
         # so the user can immediately navigate to another actor.
         self.set_focus(None)
         self.call_after_refresh(lambda: self.query_one(ActorTree).focus())
+
+    def get_system_commands(self, screen):
+        """Filter Textual's default system-command list and add
+        actor-targeted entries for the currently selected actor.
+
+        Skipped: `Maximize` / `Minimize` (we never single-pane an
+        actor widget — the layout already gives each piece its own
+        space) and `Screenshot` (the SVG-dump is a debug aid
+        irrelevant to actor-running).
+
+        Added: `Stop actor` (only when the selected actor is RUNNING)
+        and `Discard actor` (always, when something is selected).
+        Both target the tree's currently-selected actor — there's no
+        per-actor entry in the palette because the user already has
+        the actor list as their selection surface, and "Stop alice"
+        / "Stop bob" / etc. would clutter the search."""
+        skip = {"Maximize", "Minimize", "Screenshot"}
+        for command in super().get_system_commands(screen):
+            if command.title in skip:
+                continue
+            yield command
+
+        try:
+            selected = self.query_one(ActorTree).selected_actor
+        except Exception:
+            selected = None
+        if selected is None:
+            return
+        status = self._prev_statuses.get(selected.name, Status.IDLE)
+        if status == Status.RUNNING:
+            yield SystemCommand(
+                "Stop actor",
+                f"Stop the running session for {selected.name}",
+                lambda name=selected.name: self._palette_stop(name),
+            )
+        yield SystemCommand(
+            "Discard actor",
+            f"Delete {selected.name}",
+            lambda name=selected.name: self._palette_discard(name),
+        )
+
+    def action_show_help_panel(self) -> None:
+        """Override Textual's default side-docked HelpPanel with a
+        centred modal overlay that mirrors the command palette's
+        dim-backdrop feel. The system-command "Keys" entry still
+        invokes this method, so the user reaches the overlay via the
+        same `p` → "Keys" path."""
+        # Already showing? No-op so a double-trigger doesn't stack
+        # overlays.
+        if any(isinstance(s, HelpOverlay) for s in self.screen_stack):
+            return
+        self.push_screen(HelpOverlay())
+
+    def action_hide_help_panel(self) -> None:
+        """Pair to `action_show_help_panel`. The default Textual
+        action queries the active screen for a `HelpPanel` widget;
+        ours pops the modal screen we pushed."""
+        for screen in reversed(self.screen_stack):
+            if isinstance(screen, HelpOverlay):
+                screen.dismiss()
+                return
+
+    def _palette_stop(self, name: str) -> None:
+        """Palette command target: stop the named actor, after a
+        confirmation dialog. The dialog returns True/False via its
+        `dismiss` value; we run the actual stop only on confirm."""
+        def after_confirm(confirmed: bool | None) -> None:
+            if confirmed:
+                self._do_stop(name)
+
+        self.push_screen(
+            ConfirmDialog(
+                title="Stop actor?",
+                message=(
+                    f"Stop the running session for {name}?\n"
+                    "The agent process will be SIGTERMed."
+                ),
+                confirm_label="Stop",
+            ),
+            after_confirm,
+        )
+
+    def _do_stop(self, name: str) -> None:
+        """Actual stop logic — runs `cmd_stop` and refreshes the
+        tree. The MCP server's per-run thread-watcher picks up the
+        resulting state transition automatically (it's blocked on
+        `agent.wait(pid)`)."""
+        from ..commands import cmd_stop
+        try:
+            actor = self._db_handle().get_actor(name)
+            agent = _create_agent(actor.agent)
+            cmd_stop(self._db_handle(), agent, RealProcessManager(), name=name)
+            self.notify(f"Stopped {name}")
+        except Exception as e:
+            self.notify(f"failed to stop {name}: {e}", severity="error")
+            return
+        self._poll_actors_async()
+
+    def _palette_discard(self, name: str) -> None:
+        """Palette command target: discard the named actor, after a
+        confirmation dialog (this is destructive — the actor row,
+        run history, and worktree association all go away)."""
+        def after_confirm(confirmed: bool | None) -> None:
+            if confirmed:
+                self._do_discard(name)
+
+        self.push_screen(
+            ConfirmDialog(
+                title="Discard actor?",
+                message=(
+                    f"Discard {name}?\n"
+                    "This stops any running session, deletes the actor's "
+                    "row + run history, and runs the on-discard hook. "
+                    "The worktree directory is left on disk."
+                ),
+                # Trashcan glyph (Material Design icon
+                # `nf-md-trash_can` / U+F0A7A) prefixed onto the
+                # label as a visual hint of destructive intent.
+                # Default variant keeps the rest of the dialog calm
+                # — the icon alone carries the meaning.
+                confirm_label="\U000F0A7A Discard",
+                confirm_variant="default",
+            ),
+            after_confirm,
+        )
+
+    def _do_discard(self, name: str) -> None:
+        """Actual discard logic — runs `cmd_discard` with
+        `force=True` so a failing on-discard hook doesn't block the
+        palette-driven cleanup. The MCP server sees the actor row
+        disappear and emits a `status="discarded"` channel
+        notification automatically."""
+        from ..commands import cmd_discard
+        from ..config import load_config as _lc
+        try:
+            cmd_discard(
+                self._db_handle(),
+                RealProcessManager(),
+                name=name,
+                app_config=_lc(),
+                force=True,
+            )
+            self.notify(f"Discarded {name}")
+        except Exception as e:
+            self.notify(f"failed to discard {name}: {e}", severity="error")
+            return
+        self._poll_actors_async()
+
+    def _db_handle(self) -> Database:
+        """Single Database instance per palette command — opens fresh
+        rather than caching, since palette commands are one-shot and
+        we don't want a long-lived connection here."""
+        return Database.open(_db_path())
 
     def action_dump_diagnostics(self) -> None:
         import sys
