@@ -474,6 +474,61 @@ class McpToolTests(unittest.TestCase):
         self.assertIn("created", msg)
         self.assertIn("run failed to start", msg)
 
+    def test_new_actor_passes_role_to_cmd_new(self):
+        from actor import server, AppConfig, Role
+        cfg = AppConfig(roles={
+            "qa": Role(name="qa", agent="claude", prompt="run tests"),
+        })
+        with patch("actor.server.cmd_new") as cmd_new, \
+             patch("actor.server._spawn_background_run") as spawn, \
+             patch("actor.server.load_config", return_value=cfg, create=True), \
+             patch("actor.config.load_config", return_value=cfg):
+            fake_actor = MagicMock()
+            fake_actor.dir = "/tmp/foo"
+            cmd_new.return_value = fake_actor
+            server.new_actor(name="foo", role="qa")
+        kwargs = cmd_new.call_args.kwargs
+        self.assertEqual(kwargs["role_name"], "qa")
+        # Role's prompt fires the background run even without an explicit prompt.
+        spawn.assert_called_once()
+
+    def test_new_actor_explicit_prompt_beats_role_prompt(self):
+        from actor import server, AppConfig, Role
+        cfg = AppConfig(roles={
+            "qa": Role(name="qa", agent="claude", prompt="role prompt"),
+        })
+        with patch("actor.server.cmd_new") as cmd_new, \
+             patch("actor.server._spawn_background_run") as spawn, \
+             patch("actor.config.load_config", return_value=cfg):
+            fake_actor = MagicMock()
+            fake_actor.dir = "/tmp/foo"
+            cmd_new.return_value = fake_actor
+            server.new_actor(name="foo", role="qa", prompt="explicit")
+        # spawn receives the explicit prompt verbatim, not the role's.
+        spawn.assert_called_once()
+        spawn_args = spawn.call_args
+        # _spawn_background_run signature: (name, prompt, ..., ctx=...)
+        # second positional or kwargs["prompt"]
+        prompt_arg = spawn_args.args[1] if len(spawn_args.args) > 1 else spawn_args.kwargs["prompt"]
+        self.assertEqual(prompt_arg, "explicit")
+
+    def test_new_actor_role_agent_used_when_agent_param_omitted(self):
+        from actor import server, AppConfig, Role
+        cfg = AppConfig(roles={
+            "code": Role(name="code", agent="codex"),
+        })
+        with patch("actor.server.cmd_new") as cmd_new, \
+             patch("actor.server._spawn_background_run") as spawn, \
+             patch("actor.config.load_config", return_value=cfg):
+            fake_actor = MagicMock()
+            fake_actor.dir = "/tmp/foo"
+            cmd_new.return_value = fake_actor
+            server.new_actor(name="foo", role="code")
+        kwargs = cmd_new.call_args.kwargs
+        # `agent` arg from MCP is None; cmd_new will resolve via role.
+        self.assertIsNone(kwargs["agent_name"])
+        self.assertEqual(kwargs["role_name"], "code")
+
     def test_run_actor_forwards_config(self):
         from actor import server
         from actor.types import AgentKind

@@ -113,9 +113,8 @@ def list_roles() -> str:
     Roles are named presets users define in `~/.actor/settings.kdl` (user-wide)
     or `<repo>/.actor/settings.kdl` (project-local). Each role can set the
     agent, prompt, and any config keys, plus an optional `description` that
-    explains when to use it. Apply a role at actor creation with
-    `actor new <name> --role <role>` (CLI) — there is no MCP parameter for
-    roles yet, so call `actor new ...` via shell when applying one.
+    explains when to use it. Apply a role at actor creation by passing
+    `role="<name>"` to `new_actor`.
     """
     from .config import load_config
     return cmd_roles(load_config())
@@ -253,7 +252,8 @@ def _spawn_background_run(
 def new_actor(
     name: str,
     prompt: str | None = None,
-    agent: Literal["claude", "codex"] = "claude",
+    agent: Literal["claude", "codex"] | None = None,
+    role: str | None = None,
     dir: str | None = None,
     base: str | None = None,
     no_worktree: bool = False,
@@ -265,31 +265,38 @@ def new_actor(
 
     Args:
         name: Actor name (becomes the git branch). Use lowercase with hyphens.
-        prompt: Optional prompt to run immediately after creation.
-        agent: Coding agent — "claude" or "codex".
+        prompt: Optional prompt to run immediately after creation. Falls back
+            to the role's prompt (if any) when omitted.
+        agent: Coding agent — "claude" or "codex". Defaults to the role's
+            agent (if a role is applied) or "claude" otherwise.
+        role: Apply a named role from settings.kdl. Use `list_roles` to see
+            what's defined. The role's agent + config snapshot onto the
+            actor; an unknown name fails with the available list.
         dir: Base directory for the worktree (defaults to current working directory).
         base: Branch to create the worktree from (defaults to current branch).
         no_worktree: If True, skip worktree creation.
         config: Config key=value pairs saved as actor defaults (e.g. ["model=opus", "effort=max"]).
             Agent-args only; actor-keys like "use-subscription" are rejected here — use the
-            dedicated parameter below.
+            dedicated parameter below. CLI-level overrides beat the role's values.
         use_subscription: When True, force subscription auth (strip the agent's API key env var).
             When False, pass the API key through. When omitted (None), defer to lower-precedence
             layers (role / settings.kdl / class default).
     """
     db = _db()
     git = RealGit()
+    from .config import load_config
+    app_config = load_config()
     # MCP mirrors the CLI's positional split: `config` pairs go into
     # agent_args (rejected if they collide with an actor-key); the dedicated
     # `use_subscription` param populates actor_keys directly. Validation
-    # and bucketing are the same code path as the CLI.
-    agent_kind = _resolve_agent_kind_for_cli(agent, None, None)
+    # and bucketing are the same code path as the CLI. Agent resolution also
+    # mirrors the CLI: explicit `agent` wins, otherwise the role's agent,
+    # otherwise "claude".
+    agent_kind = _resolve_agent_kind_for_cli(agent, role, app_config)
     agent_cls = _agent_class(agent_kind)
     cli_overrides = _build_cli_overrides(
         agent_cls, config or [], use_subscription=use_subscription,
     )
-    from .config import load_config
-    app_config = load_config()
     actor = cmd_new(
         db, git,
         name=name,
@@ -298,11 +305,17 @@ def new_actor(
         base=base,
         agent_name=agent,
         cli_overrides=cli_overrides,
+        role_name=role,
         app_config=app_config,
     )
 
     if prompt is not None:
         prompt = prompt.strip()
+    # Role's prompt is a fallback only — an explicit `prompt` always wins.
+    if not prompt and role is not None:
+        applied = app_config.roles.get(role)
+        if applied is not None and applied.prompt:
+            prompt = applied.prompt
     if prompt:
         try:
             _spawn_background_run(name, prompt, cli_overrides=ActorConfig(), ctx=ctx)

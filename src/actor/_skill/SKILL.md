@@ -218,10 +218,10 @@ Explicit CLI flags (`--agent`, `--model`, `--config`, positional prompt,
 stdin) always beat the role's values. If the role name is wrong, the
 error lists the available names.
 
-**MCP note:** `mcp__actor__list_roles` is available for discovery, but
-`mcp__actor__new_actor` does not yet accept a `role` parameter. When the
-user asks for a role-applied actor, call `actor new … --role …` via the
-Bash tool instead.
+**MCP equivalent:** `mcp__actor__new_actor(name=..., role="qa", ...)`
+applies a role the same way; `mcp__actor__list_roles` discovers them.
+Per-call `prompt` / `config` / `agent` / `use_subscription` parameters
+beat the role's values.
 
 ### Create without running
 
