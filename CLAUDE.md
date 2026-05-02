@@ -146,55 +146,51 @@ coerced to strings).
 
 ### Per-agent defaults
 
-`agent "claude" { … }` / `agent "codex" { … }` blocks set defaults that
-apply to every actor of that kind:
+`defaults "claude" { … }` / `defaults "codex" { … }` blocks set
+defaults that apply to every actor of that kind:
 
 ```kdl
-agent "claude" {
+defaults "claude" {
     use-subscription true
-    defaults {
-        permission-mode "auto"
-        model "opus"
-    }
+    permission-mode "auto"
+    model "opus"
 }
 
-agent "codex" {
-    defaults {
-        m "o3"
-        sandbox "workspace-write"
-    }
+defaults "codex" {
+    m "o3"
+    sandbox "workspace-write"
 }
 ```
 
-Two shapes live inside an `agent` block:
+All keys live in one flat namespace. Each key is routed at parse time
+by checking the agent class's `ACTOR_DEFAULTS` whitelist:
 
-- **Flat keys** (e.g. `use-subscription`) are actor-sh interpreted —
-  they're never forwarded to the agent binary. The whitelist of allowed
-  flat keys per agent is `ACTOR_DEFAULTS` on the Agent subclass (currently
-  just `use-subscription` for both agents). Unknown flat keys raise
-  `ConfigError`.
-- **`defaults { }` children** become CLI flags on the agent binary.
-  Claude uses semantic long flags: `permission-mode "auto"` →
+- **Whitelisted keys** (e.g. `use-subscription`) are actor-sh
+  interpreted — they're never forwarded to the agent binary. The
+  whitelist per agent is `ACTOR_DEFAULTS` on the Agent subclass
+  (currently just `use-subscription` for both agents).
+- **Everything else** becomes a CLI flag on the agent binary. Claude
+  uses semantic long flags: `permission-mode "auto"` →
   `--permission-mode auto`. Codex uses native flag names verbatim:
   1-character keys become short flags (`m "o3"` → `-m o3`, `a "never"`
   → `-a never`), longer keys become long flags (`sandbox
-  "workspace-write"` → `--sandbox workspace-write`).
+  "workspace-write"` → `--sandbox workspace-write`). Unknown agent-arg
+  keys are forwarded as-is, the agent binary decides whether they're
+  valid.
 
 A `null` value cancels a lower-precedence default:
 
 ```kdl
-agent "claude" {
-    defaults {
-        permission-mode null   # drop the built-in "auto" default
-    }
+defaults "claude" {
+    permission-mode null   # drop the built-in "auto" default
 }
 ```
 
 Merge precedence at actor creation (`actor new`), lowest → highest:
 class `AGENT_DEFAULTS` + `ACTOR_DEFAULTS` (hardcoded on the Agent
-subclass) → user kdl `agent` block → project kdl `agent` block →
-template config (`--template`) → CLI `--config key=value`. The resolved
-merge is snapshotted into the DB at creation; later edits to
+subclass) → user kdl `defaults` block → project kdl `defaults` block →
+template config (`--template`) → CLI `--config key=value`. The
+resolved merge is snapshotted into the DB at creation; later edits to
 `settings.kdl` don't retroactively change existing actors — use `actor
 config <name> key=value` to mutate an actor's stored config. At run
 time (`actor run`), the stored config is the base and per-run
@@ -213,7 +209,9 @@ Built-in class defaults today:
 Unknown top-level nodes (e.g. `alias`) are silently ignored for
 forward-compat with follow-up tickets. A `defaults { ... }` block
 inside a template is rejected with a helpful error pointing users at
-the per-agent `agent "..." { defaults { ... } }` shape.
+the per-agent `defaults "<name>" { ... }` shape. The legacy `agent
+"<name>" { defaults { ... } }` shape is rejected with a migration
+error showing the new flat shape.
 
 Load programmatically via `actor.config.load_config(cwd=..., home=...)` —
 both args default to `Path.cwd()` / `$HOME` so tests can inject temp dirs.

@@ -237,27 +237,37 @@ class TestLoadConfigParseStrict(unittest.TestCase):
             "null",
         )
 
-    def test_bare_defaults_block_in_agent_raises(self):
-        # A `defaults` block with no children is ambiguous (did the user
-        # mean to unset something? forget to fill it in?). Reject rather
-        # than silently accept a no-op.
-        self._expect_error(
-            'agent "claude" {\n    defaults {\n    }\n}\n',
-            "defaults",
-        )
+    def test_legacy_agent_block_rejected_with_migration_hint(self):
+        # The old `agent "<n>" { ... defaults { } }` shape was replaced
+        # with a flat `defaults "<n>" { ... }` block. Hard break with a
+        # migration message so existing kdl files surface the issue
+        # immediately rather than silently parsing as an unknown node.
+        # The migration text must point at the new shape verbatim so the
+        # user can copy-paste it.
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(
+                'agent "claude" {\n'
+                '    use-subscription false\n'
+                '}\n'
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            msg = str(ctx.exception)
+            self.assertIn("agent \"claude\"", msg)
+            self.assertIn("defaults \"claude\"", msg)
 
-    def test_actor_key_inside_defaults_block_raises(self):
-        # `use-subscription` is an actor-interpreted flag and must live at
-        # the top of the agent block, not inside `defaults { }` (which is
-        # for agent CLI flags). Let the user fix the shape rather than
-        # silently routing it through the wrong merge lane.
+    def test_nested_block_inside_defaults_raises(self):
+        # Defaults is a flat namespace. Any sub-block (incl. the legacy
+        # `defaults { }` wrapper from the previous shape) is a parse error.
         self._expect_error(
-            'agent "claude" {\n'
-            '    defaults {\n'
-            '        use-subscription "true"\n'
+            'defaults "claude" {\n'
+            '    permission-mode {\n'
+            '        nested "value"\n'
             '    }\n'
             '}\n',
-            "use-subscription",
+            "permission-mode",
         )
 
 
@@ -331,15 +341,17 @@ class TestLoadConfigAgentBlocks(unittest.TestCase):
         path.write_text(body)
 
     def test_agent_defaults_parsed(self):
+        # Flat namespace — actor-keys (use-subscription) and agent-args
+        # (permission-mode, model) live side by side; the parser routes
+        # by checking each key against the agent's ACTOR_DEFAULTS
+        # whitelist.
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             self._write(
                 Path(cwd) / ".actor" / "settings.kdl",
-                'agent "claude" {\n'
+                'defaults "claude" {\n'
                 '    use-subscription false\n'
-                '    defaults {\n'
-                '        permission-mode "bypassPermissions"\n'
-                '        model "opus"\n'
-                '    }\n'
+                '    permission-mode "bypassPermissions"\n'
+                '    model "opus"\n'
                 '}\n',
             )
             cfg = load_config(cwd=Path(cwd), home=Path(home))
@@ -354,10 +366,8 @@ class TestLoadConfigAgentBlocks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             self._write(
                 Path(cwd) / ".actor" / "settings.kdl",
-                'agent "claude" {\n'
-                '    defaults {\n'
-                '        permission-mode null\n'
-                '    }\n'
+                'defaults "claude" {\n'
+                '    permission-mode null\n'
                 '}\n',
             )
             cfg = load_config(cwd=Path(cwd), home=Path(home))
@@ -373,46 +383,45 @@ class TestLoadConfigAgentBlocks(unittest.TestCase):
             p = Path(cwd) / ".actor" / "settings.kdl"
             p.parent.mkdir()
             p.write_text(
-                'agent "bogus" {\n'
-                '    defaults {\n'
-                '        x "1"\n'
-                '    }\n'
+                'defaults "bogus" {\n'
+                '    x "1"\n'
                 '}\n'
             )
             with self.assertRaises(ConfigError) as ctx:
                 load_config(cwd=Path(cwd), home=Path(home))
             self.assertIn("bogus", str(ctx.exception))
 
-    def test_unknown_flat_key_rejected(self):
+    def test_arbitrary_key_routes_to_agent_args(self):
+        # Keys not in ACTOR_DEFAULTS land in agent_args verbatim — the
+        # parser doesn't validate against any agent-flag schema, so a
+        # typo like `permision-mode` would be forwarded to the agent
+        # binary which then errors at spawn time. Documented limitation
+        # of the stringly-typed pipeline.
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
-            p = Path(cwd) / ".actor" / "settings.kdl"
-            p.parent.mkdir()
-            p.write_text(
-                'agent "claude" {\n'
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'defaults "claude" {\n'
                 '    not-a-real-flat-key "x"\n'
-                '}\n'
+                '}\n',
             )
-            with self.assertRaises(ConfigError) as ctx:
-                load_config(cwd=Path(cwd), home=Path(home))
-            self.assertIn("not-a-real-flat-key", str(ctx.exception))
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            d = cfg.agent_defaults["claude"]
+            self.assertEqual(d.agent_args, {"not-a-real-flat-key": "x"})
+            self.assertEqual(d.actor_keys, {})
 
     def test_project_agent_defaults_override_user_per_key(self):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             self._write(
                 Path(home) / ".actor" / "settings.kdl",
-                'agent "claude" {\n'
-                '    defaults {\n'
-                '        model "sonnet"\n'
-                '        permission-mode "auto"\n'
-                '    }\n'
+                'defaults "claude" {\n'
+                '    model "sonnet"\n'
+                '    permission-mode "auto"\n'
                 '}\n',
             )
             self._write(
                 Path(cwd) / ".actor" / "settings.kdl",
-                'agent "claude" {\n'
-                '    defaults {\n'
-                '        permission-mode null\n'
-                '    }\n'
+                'defaults "claude" {\n'
+                '    permission-mode null\n'
                 '}\n',
             )
             cfg = load_config(cwd=Path(cwd), home=Path(home))
@@ -427,13 +436,13 @@ class TestLoadConfigAgentBlocks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             self._write(
                 Path(home) / ".actor" / "settings.kdl",
-                'agent "claude" {\n'
+                'defaults "claude" {\n'
                 '    use-subscription true\n'
                 '}\n',
             )
             self._write(
                 Path(cwd) / ".actor" / "settings.kdl",
-                'agent "claude" {\n'
+                'defaults "claude" {\n'
                 '    use-subscription false\n'
                 '}\n',
             )
@@ -442,6 +451,9 @@ class TestLoadConfigAgentBlocks(unittest.TestCase):
             self.assertEqual(d.actor_keys.get("use-subscription"), "false")
 
     def test_defaults_block_at_template_level_rejected(self):
+        # `defaults` is the top-level per-agent block name; nesting it
+        # under `template` is rejected with a hint pointing at the
+        # correct shape (flat keys directly under the template).
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             p = Path(cwd) / ".actor" / "settings.kdl"
             p.parent.mkdir()
@@ -460,26 +472,24 @@ class TestLoadConfigAgentBlocks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             self._write(
                 Path(cwd) / ".actor" / "settings.kdl",
-                'agent "codex" {\n'
-                '    defaults {\n'
-                '        m "o3"\n'
-                '        sandbox "read-only"\n'
-                '    }\n'
+                'defaults "codex" {\n'
+                '    m "o3"\n'
+                '    sandbox "read-only"\n'
                 '}\n',
             )
             cfg = load_config(cwd=Path(cwd), home=Path(home))
             d = cfg.agent_defaults["codex"]
             self.assertEqual(d.agent_args, {"m": "o3", "sandbox": "read-only"})
 
-    def test_duplicate_agent_block_rejected(self):
+    def test_duplicate_defaults_block_rejected(self):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             p = Path(cwd) / ".actor" / "settings.kdl"
             p.parent.mkdir()
             p.write_text(
-                'agent "claude" {\n'
+                'defaults "claude" {\n'
                 '    use-subscription true\n'
                 '}\n'
-                'agent "claude" {\n'
+                'defaults "claude" {\n'
                 '    use-subscription false\n'
                 '}\n'
             )
@@ -487,15 +497,13 @@ class TestLoadConfigAgentBlocks(unittest.TestCase):
                 load_config(cwd=Path(cwd), home=Path(home))
             self.assertIn("claude", str(ctx.exception))
 
-    def test_agent_block_without_name_rejected(self):
+    def test_defaults_block_without_name_rejected(self):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             p = Path(cwd) / ".actor" / "settings.kdl"
             p.parent.mkdir()
             p.write_text(
-                'agent {\n'
-                '    defaults {\n'
-                '        model "opus"\n'
-                '    }\n'
+                'defaults {\n'
+                '    model "opus"\n'
                 '}\n'
             )
             with self.assertRaises(ConfigError):
@@ -505,13 +513,13 @@ class TestLoadConfigAgentBlocks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             self._write(
                 Path(home) / ".actor" / "settings.kdl",
-                'agent "claude" {\n'
+                'defaults "claude" {\n'
                 '    use-subscription true\n'
                 '}\n',
             )
             self._write(
                 Path(cwd) / ".actor" / "settings.kdl",
-                'agent "claude" {\n'
+                'defaults "claude" {\n'
                 '    use-subscription null\n'
                 '}\n',
             )

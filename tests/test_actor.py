@@ -936,10 +936,8 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
             kdl = Path(cwd) / ".actor" / "settings.kdl"
             kdl.parent.mkdir()
             kdl.write_text(
-                'agent "claude" {\n'
-                '    defaults {\n'
-                '        permission-mode null\n'
-                '    }\n'
+                'defaults "claude" {\n'
+                '    permission-mode null\n'
                 '}\n'
             )
             cfg = load_config(cwd=Path(cwd), home=Path(home))

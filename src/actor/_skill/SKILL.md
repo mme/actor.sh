@@ -156,34 +156,33 @@ Project hooks override user hooks per event.
 to every new actor of that agent kind:
 
 ```kdl
-agent "claude" {
+defaults "claude" {
     use-subscription true
-    defaults {
-        permission-mode "auto"
-        model "opus"
-    }
+    permission-mode "auto"
+    model "opus"
 }
 
-agent "codex" {
-    defaults {
-        m "o3"
-        sandbox "workspace-write"
-    }
+defaults "codex" {
+    m "o3"
+    sandbox "workspace-write"
 }
 ```
 
-- **Flat keys** (outside `defaults { }`) are actor-sh controls. Today
-  only `use-subscription` is valid (strips `ANTHROPIC_API_KEY` /
-  `OPENAI_API_KEY` from the child env so the subscription login is
-  used instead of the API key).
-- **Keys inside `defaults { }`** map directly to the agent binary's
-  CLI flags. Claude uses semantic long flags (`model`, `permission-mode`).
-  Codex uses whatever flag names `codex` itself accepts — `-m` / `-a`
+All keys live in one flat namespace. Each key is routed at parse time
+by checking the agent class's `ACTOR_DEFAULTS` whitelist:
+
+- **Whitelisted keys** (today only `use-subscription` for both agents)
+  are actor-sh controls — `use-subscription` strips `ANTHROPIC_API_KEY`
+  / `OPENAI_API_KEY` from the child env so the subscription login is
+  used instead of the API key.
+- **Everything else** maps directly to the agent binary's CLI flags.
+  Claude uses semantic long flags (`model`, `permission-mode`). Codex
+  uses whatever flag names `codex` itself accepts — `-m` / `-a`
   (short), `--sandbox` / `--config` (long). No translation layer on
   either side.
 - **`null` cancels a lower-precedence value.** For example, a project
-  file can set `permission-mode null` under `agent "claude"` to erase
-  a user-level default without forcing a replacement.
+  file can set `permission-mode null` under `defaults "claude"` to
+  erase a user-level default without forcing a replacement.
 
 Precedence at `actor new` (low → high): class-level hardcoded defaults →
 user kdl → project kdl → template → CLI `--config`. The resolved merge
