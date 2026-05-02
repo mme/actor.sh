@@ -39,9 +39,6 @@ tests/
   test_*.py              # unittest suites
 spec/
   V2.md                  # V2 vision (MCP server, channels, dashboard, plugin)
-  PLAN.md                # Plan root index
-  PLAN-STAGE1.md         # Stage 1 implementation plan (minimal MCP server)
-  PLAN-CONFIG-SYSTEM.md  # Config / roles implementation plan
   DASHBOARD.md           # Watch dashboard spec
 ```
 
