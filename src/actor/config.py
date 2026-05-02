@@ -45,6 +45,7 @@ class Role:
     name: str
     agent: Optional[str] = None
     prompt: Optional[str] = None
+    description: Optional[str] = None
     config: Dict[str, str] = field(default_factory=dict)
 
 
@@ -208,7 +209,7 @@ def _parse_role(node, source: Path) -> Role:
                 f"(roles set values; `null` only makes sense inside "
                 f"`defaults \"...\" {{ ... }}` blocks as a cancel marker)"
             )
-        if key in ("agent", "prompt") and not isinstance(raw, str):
+        if key in ("agent", "prompt", "description") and not isinstance(raw, str):
             raise ConfigError(
                 f"role '{name}' in {source}: '{key}' must be a string"
             )
@@ -217,6 +218,8 @@ def _parse_role(node, source: Path) -> Role:
             role.agent = value_str
         elif key == "prompt":
             role.prompt = value_str
+        elif key == "description":
+            role.description = value_str
         else:
             role.config[key] = value_str
     return role

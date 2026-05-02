@@ -43,10 +43,12 @@ echo "fix it" | actor new fix-nav                                           # pr
 Roles come from `~/.actor/settings.kdl` (user) or
 `<repo>/.actor/settings.kdl` (project-local; project wins on overlap).
 These files don't exist by default — create them by hand when the user
-wants a role. A role can set the agent, prompt, and any config keys:
+wants a role. A role can set the agent, prompt, an optional
+`description` (shown by `actor roles`), and any config keys:
 
 ```kdl
 role "qa" {
+    description "Run tests after changes; report failures concisely."
     agent "claude"
     model "opus"
     prompt "You're a QA engineer. Write tests for the changed code."
@@ -55,6 +57,12 @@ role "qa" {
 
 Any explicit flag on the CLI (`--agent`, `--model`, `--config`, positional
 prompt / stdin) beats the role's value.
+
+To see what's defined right now:
+
+```bash
+actor roles                                                                 # name / agent / description table
+```
 
 ## Create without running
 

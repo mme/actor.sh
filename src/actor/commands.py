@@ -135,9 +135,16 @@ def cmd_new(
 
     role = None
     if role_name is not None:
-        if app_config is None or role_name not in app_config.roles:
-            raise ConfigError(f"unknown role: '{role_name}'")
-        role = app_config.roles[role_name]
+        roles = app_config.roles if app_config is not None else {}
+        if role_name not in roles:
+            available = sorted(roles)
+            hint = (
+                f"available: {', '.join(available)}"
+                if available
+                else "no roles defined in settings.kdl"
+            )
+            raise ConfigError(f"unknown role: '{role_name}' ({hint})")
+        role = roles[role_name]
 
     # Agent precedence: explicit CLI flag > role's agent > "claude"
     if agent_name is None:
@@ -606,6 +613,35 @@ def cmd_list(db: Database, pm: ProcessManager, status_filter: Optional[str]) -> 
     for name, st, prompt in rows:
         output += f"{name:<{name_width}}  {st.as_str():<{status_width}}  {prompt}\n"
 
+    return output
+
+
+# -- cmd_show --
+
+def cmd_roles(app_config: "AppConfig") -> str:
+    roles = app_config.roles
+    if not roles:
+        return "No roles defined. Add a `role \"<name>\" { ... }` block to ~/.actor/settings.kdl or <repo>/.actor/settings.kdl.\n"
+
+    h_name = "NAME"
+    h_agent = "AGENT"
+    h_desc = "DESCRIPTION"
+
+    rows: List[Tuple[str, str, str]] = []
+    for name in sorted(roles):
+        r = roles[name]
+        agent = r.agent or "claude"
+        desc = r.description or ""
+        rows.append((name, agent, desc))
+
+    name_width = max((len(r[0]) for r in rows), default=0)
+    name_width = max(name_width, len(h_name))
+    agent_width = max((len(r[1]) for r in rows), default=0)
+    agent_width = max(agent_width, len(h_agent))
+
+    output = f"{h_name:<{name_width}}  {h_agent:<{agent_width}}  {h_desc}\n"
+    for name, agent, desc in rows:
+        output += f"{name:<{name_width}}  {agent:<{agent_width}}  {desc}\n"
     return output
 
 

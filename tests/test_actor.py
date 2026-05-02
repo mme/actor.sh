@@ -20,7 +20,7 @@ from actor import (
     # Database
     Database,
     # Commands
-    cmd_new, cmd_run, cmd_list, cmd_show, cmd_stop, cmd_config, cmd_logs, cmd_discard,
+    cmd_new, cmd_run, cmd_list, cmd_roles, cmd_show, cmd_stop, cmd_config, cmd_logs, cmd_discard,
     cmd_interactive, INTERACTIVE_PROMPT,
     # Helpers
     truncate, format_duration,
@@ -690,7 +690,9 @@ class TestCmdNewRole(unittest.TestCase):
         from actor.errors import ConfigError
         db = self._db()
         git = FakeGit()
-        with self.assertRaises(ConfigError):
+        # The error message must list the available role names so the user
+        # can recover without opening settings.kdl.
+        with self.assertRaises(ConfigError) as ctx:
             cmd_new(
                 db, git,
                 name="fix-auth",
@@ -702,6 +704,28 @@ class TestCmdNewRole(unittest.TestCase):
                 role_name="does-not-exist",
                 app_config=self._cfg_with_qa(),
             )
+        msg = str(ctx.exception)
+        self.assertIn("does-not-exist", msg)
+        self.assertIn("qa", msg)
+
+    def test_unknown_role_with_no_roles_defined(self):
+        from actor import AppConfig
+        from actor.errors import ConfigError
+        db = self._db()
+        git = FakeGit()
+        with self.assertRaises(ConfigError) as ctx:
+            cmd_new(
+                db, git,
+                name="x",
+                dir="/tmp",
+                no_worktree=True,
+                base=None,
+                agent_name=None,
+                cli_overrides=ActorConfig(),
+                role_name="qa",
+                app_config=AppConfig(),
+            )
+        self.assertIn("no roles defined", str(ctx.exception))
 
     def test_no_role_backward_compatible(self):
         db = self._db()
@@ -1383,6 +1407,51 @@ class TestCmdList(unittest.TestCase):
         self.assertNotIn("dead", output)
         lines = output.splitlines()
         self.assertEqual(len(lines), 2)  # header + 1 actor
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  Test: cmd_roles
+# ──────────────────────────────────────────────────────────────────────
+
+class TestCmdRoles(unittest.TestCase):
+
+    def test_empty_config_emits_help_message(self):
+        from actor import AppConfig
+        out = cmd_roles(AppConfig())
+        self.assertIn("No roles defined", out)
+        self.assertIn("settings.kdl", out)
+
+    def test_roles_listed_with_agent_and_description(self):
+        from actor import AppConfig, Role
+        cfg = AppConfig(roles={
+            "qa": Role(
+                name="qa",
+                agent="claude",
+                description="Run tests; report failures.",
+            ),
+            "reviewer": Role(
+                name="reviewer",
+                agent="codex",
+                description="Concise code review.",
+            ),
+        })
+        out = cmd_roles(cfg)
+        self.assertIn("NAME", out)
+        self.assertIn("AGENT", out)
+        self.assertIn("DESCRIPTION", out)
+        self.assertIn("qa", out)
+        self.assertIn("reviewer", out)
+        self.assertIn("claude", out)
+        self.assertIn("codex", out)
+        self.assertIn("Run tests; report failures.", out)
+        # Sorted alphabetically: qa appears after reviewer.
+        self.assertLess(out.index("qa"), out.index("reviewer"))
+
+    def test_role_without_agent_defaults_to_claude_in_listing(self):
+        from actor import AppConfig, Role
+        cfg = AppConfig(roles={"r": Role(name="r")})
+        out = cmd_roles(cfg)
+        self.assertIn("claude", out)
 
 
 # ──────────────────────────────────────────────────────────────────────

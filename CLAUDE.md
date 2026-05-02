@@ -129,6 +129,7 @@ Roles are named presets for `actor new`:
 
 ```kdl
 role "qa" {
+    description "Run tests after changes; report failures concisely."
     agent "claude"
     model "opus"
     prompt "You're a QA engineer. Write tests for the changed code."
@@ -137,9 +138,14 @@ role "qa" {
 
 Usage: `actor new foo --role qa` applies the role's agent + config +
 prompt. Explicit CLI flags (`--agent`, `--model`, `--config`, positional
-prompt / stdin) override the role. `agent` and `prompt` are promoted to
-top-level fields; every other child is stored as a config key (values
-coerced to strings).
+prompt / stdin) override the role. `agent`, `prompt`, and `description`
+are promoted to top-level fields; every other child is stored as a
+config key (values coerced to strings). `description` is informational
+— shown by `actor roles` (CLI) and `mcp__actor__list_roles` (MCP) so an
+agent / user can pick the right role without opening settings.kdl.
+
+To see what's defined, run `actor roles`. If a role-name typo lands in
+`actor new --role <bad>`, the error lists the available names.
 
 ### Per-agent defaults
 

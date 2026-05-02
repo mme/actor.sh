@@ -120,13 +120,24 @@ class TestLoadConfigParseShapes(unittest.TestCase):
                 '    model "opus"\n'
                 '    effort "max"\n'
                 '    prompt "You\'re a QA engineer."\n'
+                '    description "Run tests; report failures concisely."\n'
                 '}\n'
             )
             cfg = load_config(cwd=Path(cwd), home=Path(home))
             role = cfg.roles["qa"]
             self.assertEqual(role.agent, "claude")
             self.assertEqual(role.prompt, "You're a QA engineer.")
+            self.assertEqual(role.description, "Run tests; report failures concisely.")
             self.assertEqual(role.config, {"model": "opus", "effort": "max"})
+
+    def test_role_description_optional(self):
+        # Roles without a description parse fine; the field is None.
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(cwd) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text('role "qa" {\n    agent "claude"\n}\n')
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIsNone(cfg.roles["qa"].description)
 
     def test_bool_value_coerced_to_string(self):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:

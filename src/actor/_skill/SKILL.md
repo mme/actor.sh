@@ -94,6 +94,7 @@ override it per-repo.
 
 ```kdl
 role "qa" {
+    description "Run tests after changes; report failures concisely."
     agent "claude"
     model "opus"
     effort "max"
@@ -102,6 +103,7 @@ role "qa" {
 }
 
 role "reviewer" {
+    description "Concise code review; flag bugs and style issues."
     agent "claude"
     model "sonnet"
     prompt "You're a code reviewer. Be concise."
@@ -113,11 +115,19 @@ role "reviewer" {
 - `agent` (string) — `"claude"` or `"codex"`. Sets which CLI the actor runs.
 - `prompt` (string) — default prompt used when the user doesn't pass one
   on the CLI.
+- `description` (string, optional) — short "when to use this role" line.
+  Surfaced by `actor roles` (CLI) and `mcp__actor__list_roles` (MCP) so
+  you can pick the right role without re-reading settings.kdl.
 - Any key from the agent's config reference ([claude-config.md](claude-config.md),
   [codex-config.md](codex-config.md)) — e.g. `model`, `effort`,
   `use-subscription`, `max-budget-usd`. Values may be strings, booleans, or
   numbers; they're all coerced to strings to match the actor config
   pipeline.
+
+**Discover what's defined.** Call `mcp__actor__list_roles` (MCP) or run
+`actor roles` (CLI) before applying a role — both print the same table
+of name, agent, and description, drawn live from the merged
+user+project settings.kdl.
 
 Unknown top-level nodes (`alias`) parse as no-ops today — they're
 reserved for follow-up tickets. Malformed KDL raises an error with the
@@ -205,12 +215,13 @@ actor new fix-auth --role qa "custom prompt"          # CLI prompt beats role
 ```
 
 Explicit CLI flags (`--agent`, `--model`, `--config`, positional prompt,
-stdin) always beat the role's values.
+stdin) always beat the role's values. If the role name is wrong, the
+error lists the available names.
 
-**MCP note:** the `mcp__actor__new_actor` tool does not yet accept a
-`role` parameter. When the user asks for a role-applied actor, call
-`actor new … --role …` via the Bash tool instead. This is a known
-gap; a follow-up will add it to the MCP tool.
+**MCP note:** `mcp__actor__list_roles` is available for discovery, but
+`mcp__actor__new_actor` does not yet accept a `role` parameter. When the
+user asks for a role-applied actor, call `actor new … --role …` via the
+Bash tool instead.
 
 ### Create without running
 

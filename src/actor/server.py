@@ -27,6 +27,7 @@ from .commands import (
     cmd_list,
     cmd_logs,
     cmd_new,
+    cmd_roles,
     cmd_run,
     cmd_show,
     cmd_stop,
@@ -103,6 +104,21 @@ def list_actors(status: str | None = None) -> str:
         status: Optional filter — e.g. "running", "done", "error".
     """
     return cmd_list(_db(), RealProcessManager(), status_filter=status)
+
+
+@mcp.tool()
+def list_roles() -> str:
+    """List available roles from settings.kdl.
+
+    Roles are named presets users define in `~/.actor/settings.kdl` (user-wide)
+    or `<repo>/.actor/settings.kdl` (project-local). Each role can set the
+    agent, prompt, and any config keys, plus an optional `description` that
+    explains when to use it. Apply a role at actor creation with
+    `actor new <name> --role <role>` (CLI) — there is no MCP parameter for
+    roles yet, so call `actor new ...` via shell when applying one.
+    """
+    from .config import load_config
+    return cmd_roles(load_config())
 
 
 @mcp.tool()

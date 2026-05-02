@@ -21,6 +21,7 @@ from .commands import (
     cmd_list,
     cmd_logs,
     cmd_new,
+    cmd_roles,
     cmd_run,
     cmd_show,
     cmd_stop,
@@ -124,7 +125,7 @@ Examples:
     p_new.add_argument("--no-worktree", action="store_true", help="Skip worktree creation, run in the directory directly")
     p_new.add_argument("--base", default=None, help="Branch to create the worktree from (defaults to current branch)")
     p_new.add_argument("--agent", default=None, help="Coding agent to use (defaults to role's agent or 'claude')")
-    p_new.add_argument("--role", default=None, help="Apply a role from settings.kdl")
+    p_new.add_argument("--role", default=None, help="Apply a role from settings.kdl (see `actor roles` for available names)")
     p_new.add_argument("--model", default=None, help="Model for the agent to use")
     # Tri-state: default None = "no CLI override" so lower precedence layers
     # (role, kdl defaults block, class default) supply the value. Explicit
@@ -164,6 +165,17 @@ Examples:
   actor list --status running                       Show only running actors""",
     )
     p_list.add_argument("--status", default=None, help="Filter by status")
+
+    # -- roles --
+    sub.add_parser(
+        "roles",
+        help="List available roles from settings.kdl",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Roles are named presets defined in ~/.actor/settings.kdl (user) or
+<repo>/.actor/settings.kdl (project). Apply one with `actor new <name>
+--role <role>`.""",
+    )
 
     # -- show --
     p_show = sub.add_parser(
@@ -494,6 +506,11 @@ def main(argv: Optional[List[str]] = None) -> None:
 
         elif args.command == "list":
             output = cmd_list(db, proc_mgr, status_filter=args.status)
+            print(output, end="")
+
+        elif args.command == "roles":
+            from .config import load_config
+            output = cmd_roles(load_config())
             print(output, end="")
 
         elif args.command == "show":
