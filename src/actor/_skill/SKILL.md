@@ -33,9 +33,9 @@ This skill is designed around the `mcp__actor__*` tools. They return immediately
 >
 > 3. Launch a new session with:
 >    ```
->    actor claude
+>    actor main
 >    ```
->    (this enables channel notifications so the session learns when actors finish.)
+>    (this loads the `main` role's system prompt and enables channel notifications so the session learns when actors finish.)
 
 Only fall back to the CLI (see [cli.md](cli.md)) if the user explicitly prefers to skip MCP setup. When using the CLI fallback, completion is not pushed — you won't know when an actor finishes without asking.
 

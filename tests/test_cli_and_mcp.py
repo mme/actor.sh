@@ -344,40 +344,81 @@ class RunCommandTests(unittest.TestCase):
                 self.assertEqual(ctx.exception.code, 1)
 
 
-class ClaudeWrapperTests(unittest.TestCase):
-    def test_execs_claude_with_channel_flag(self):
-        with patch("os.execvp") as execvp:
-            main(["claude"])
-        args, _ = execvp.call_args
-        self.assertEqual(args[0], "claude")
-        self.assertEqual(
-            args[1],
-            ["claude", "--dangerously-load-development-channels", "server:actor"],
-        )
+class MainCommandTests(unittest.TestCase):
+    """`actor main` execs claude with the main role's prompt + actor channel."""
+
+    def _patch_main_role(self, agent="claude", prompt="ROLE PROMPT"):
+        from actor import AppConfig, Role
+        cfg = AppConfig(roles={"main": Role(name="main", agent=agent, prompt=prompt)})
+        return patch("actor.config.load_config", return_value=cfg)
+
+    def test_execs_claude_with_channel_and_main_prompt(self):
+        with self._patch_main_role(), patch("os.execvp") as execvp:
+            main(["main"])
+        argv = execvp.call_args.args[1]
+        self.assertEqual(argv[0], "claude")
+        self.assertIn("--dangerously-load-development-channels", argv)
+        self.assertIn("server:actor", argv)
+        # System prompt is appended via the --append-system-prompt flag so it
+        # layers on top of Claude Code's defaults instead of replacing them.
+        self.assertIn("--append-system-prompt", argv)
+        idx = argv.index("--append-system-prompt")
+        self.assertEqual(argv[idx + 1], "ROLE PROMPT")
 
     def test_forwards_trailing_args_verbatim(self):
-        with patch("os.execvp") as execvp:
-            main(["claude", "--model", "opus", "fix the nav"])
-        args, _ = execvp.call_args
-        self.assertEqual(
-            args[1],
-            [
-                "claude",
-                "--dangerously-load-development-channels",
-                "server:actor",
-                "--model",
-                "opus",
-                "fix the nav",
-            ],
-        )
+        with self._patch_main_role(), patch("os.execvp") as execvp:
+            main(["main", "--model", "opus", "kick off the refactor"])
+        argv = execvp.call_args.args[1]
+        # Trailing args land after the channel + system-prompt pair.
+        self.assertEqual(argv[-3:], ["--model", "opus", "kick off the refactor"])
 
     def test_missing_claude_binary_exits_cleanly(self):
-        with patch("os.execvp", side_effect=FileNotFoundError), \
+        with self._patch_main_role(), \
+             patch("os.execvp", side_effect=FileNotFoundError), \
              patch("sys.stderr", io.StringIO()) as err:
             with self.assertRaises(SystemExit) as ctx:
-                main(["claude"])
+                main(["main"])
             self.assertEqual(ctx.exception.code, 1)
         self.assertIn("claude", err.getvalue().lower())
+
+    def test_role_with_non_claude_agent_rejected(self):
+        # `actor main` is claude-only today; if the user overrode main to
+        # use codex, fail loudly rather than silently doing the wrong thing.
+        with self._patch_main_role(agent="codex"), \
+             patch("os.execvp") as execvp, \
+             patch("sys.stderr", io.StringIO()) as err:
+            with self.assertRaises(SystemExit) as ctx:
+                main(["main"])
+            self.assertEqual(ctx.exception.code, 1)
+        execvp.assert_not_called()
+        self.assertIn("codex", err.getvalue())
+
+    def test_role_without_prompt_omits_append_flag(self):
+        # A `main` role with no prompt set still launches the orchestrator
+        # session — just without the system-prompt append.
+        with self._patch_main_role(prompt=None), patch("os.execvp") as execvp:
+            main(["main"])
+        argv = execvp.call_args.args[1]
+        self.assertNotIn("--append-system-prompt", argv)
+
+    def test_prompt_passed_verbatim_no_shell_escaping(self):
+        # execvp passes argv entries directly to the child process — no shell,
+        # no quoting, no interpolation. Tricky characters that would need
+        # escaping in a shell command (newlines, quotes, $, backticks,
+        # backslashes) must reach the child verbatim as one argv entry.
+        tricky = (
+            "Line one\n"
+            "Line two with \"double\" and 'single' quotes\n"
+            "Shell metas: $HOME `whoami` \\$(echo nope) | & ; > <\n"
+            "Backslash: \\n is literal here, not a newline"
+        )
+        with self._patch_main_role(prompt=tricky), patch("os.execvp") as execvp:
+            main(["main"])
+        argv = execvp.call_args.args[1]
+        idx = argv.index("--append-system-prompt")
+        # The whole prompt is one argv entry, byte-identical to what we set.
+        self.assertEqual(argv[idx + 1], tricky)
+        self.assertEqual(argv.count("--append-system-prompt"), 1)
 
 
 class SubClaudeChannelTests(unittest.TestCase):

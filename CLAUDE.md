@@ -61,15 +61,26 @@ actor setup --for claude-code                    # user-wide
 actor setup --for claude-code --scope project    # project-local
 ```
 
-Launch a session that has the actor channel enabled:
+Launch the orchestrator session (claude with the `main` role applied
+and the actor channel enabled):
 
 ```bash
-actor claude                                      # wraps `claude --dangerously-load-development-channels server:actor`
+actor main                                        # appends main role's prompt + adds channel flag
+actor main "kick off the refactor"                # one-shot
+actor main --model opus                           # forwards trailing args to claude
 ```
 
-Sub-claudes spawned by actors inherit the same flag automatically (see
-`ClaudeAgent._CHANNEL_ARGS`), so nested actors can receive completion
-notifications too.
+`actor main` resolves the `main` role from settings.kdl (built-in if
+not overridden), takes its `prompt` as `--append-system-prompt`, and
+execs `claude --dangerously-load-development-channels server:actor
+[args...]`. Override the built-in by adding `role "main" { ... }` to
+`~/.actor/settings.kdl` (user) or `<repo>/.actor/settings.kdl`
+(project). Today only `agent "claude"` is supported on this command;
+overriding the role to use codex fails with a clear error.
+
+Sub-claudes spawned by actors inherit the channel flag automatically
+(see `ClaudeAgent._CHANNEL_ARGS`), so nested actors can receive
+completion notifications too.
 
 For dev work, after editing `src/actor/_skill/*.md`:
 

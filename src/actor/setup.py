@@ -371,7 +371,7 @@ def cmd_setup(
     return (
         f"actor skill installed at {target} and MCP server registered "
         f"(scope={scope}, name={name}, for={for_host}).\n"
-        "Launch a session with `actor claude` so channel notifications are enabled."
+        "Launch a session with `actor main` so the main role + channel notifications are enabled."
     )
 
 
