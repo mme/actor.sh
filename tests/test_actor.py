@@ -616,18 +616,18 @@ class TestCmdNew(unittest.TestCase):
 
 
 # ──────────────────────────────────────────────────────────────────────
-#  Test: cmd_new with --template (ticket #29)
+#  Test: cmd_new with --role (ticket #29)
 # ──────────────────────────────────────────────────────────────────────
 
-class TestCmdNewTemplate(unittest.TestCase):
+class TestCmdNewRole(unittest.TestCase):
 
     def _db(self) -> Database:
         return Database.open(":memory:")
 
     def _cfg_with_qa(self):
-        from actor import AppConfig, Template
-        return AppConfig(templates={
-            "qa": Template(
+        from actor import AppConfig, Role
+        return AppConfig(roles={
+            "qa": Role(
                 name="qa",
                 agent="codex",
                 prompt="you're qa",
@@ -635,7 +635,7 @@ class TestCmdNewTemplate(unittest.TestCase):
             ),
         })
 
-    def test_template_applies_agent_and_config(self):
+    def test_role_applies_agent_and_config(self):
         db = self._db()
         git = FakeGit()
         actor = cmd_new(
@@ -646,14 +646,14 @@ class TestCmdNewTemplate(unittest.TestCase):
             base=None,
             agent_name=None,
             cli_overrides=ActorConfig(),
-            template_name="qa",
+            role_name="qa",
             app_config=self._cfg_with_qa(),
         )
         self.assertEqual(actor.agent, AgentKind.CODEX)
         self.assertEqual(actor.config.agent_args["model"], "opus")
         self.assertEqual(actor.config.agent_args["effort"], "max")
 
-    def test_cli_agent_overrides_template_agent(self):
+    def test_cli_agent_overrides_role_agent(self):
         db = self._db()
         git = FakeGit()
         actor = cmd_new(
@@ -664,12 +664,12 @@ class TestCmdNewTemplate(unittest.TestCase):
             base=None,
             agent_name="claude",
             cli_overrides=ActorConfig(),
-            template_name="qa",
+            role_name="qa",
             app_config=self._cfg_with_qa(),
         )
         self.assertEqual(actor.agent, AgentKind.CLAUDE)
 
-    def test_cli_config_pair_overrides_template_config(self):
+    def test_cli_config_pair_overrides_role_config(self):
         db = self._db()
         git = FakeGit()
         actor = cmd_new(
@@ -680,13 +680,13 @@ class TestCmdNewTemplate(unittest.TestCase):
             base=None,
             agent_name=None,
             cli_overrides=_cli('model=haiku'),
-            template_name="qa",
+            role_name="qa",
             app_config=self._cfg_with_qa(),
         )
         self.assertEqual(actor.config.agent_args["model"], "haiku")
         self.assertEqual(actor.config.agent_args["effort"], "max")
 
-    def test_unknown_template_raises_config_error(self):
+    def test_unknown_role_raises_config_error(self):
         from actor.errors import ConfigError
         db = self._db()
         git = FakeGit()
@@ -699,11 +699,11 @@ class TestCmdNewTemplate(unittest.TestCase):
                 base=None,
                 agent_name=None,
                 cli_overrides=ActorConfig(),
-                template_name="does-not-exist",
+                role_name="does-not-exist",
                 app_config=self._cfg_with_qa(),
             )
 
-    def test_no_template_backward_compatible(self):
+    def test_no_role_backward_compatible(self):
         db = self._db()
         git = FakeGit()
         actor = cmd_new(
@@ -718,7 +718,7 @@ class TestCmdNewTemplate(unittest.TestCase):
         self.assertEqual(actor.agent, AgentKind.CLAUDE)
         self.assertEqual(actor.config.agent_args["model"], "sonnet")
 
-    def test_agent_name_none_without_template_defaults_to_claude(self):
+    def test_agent_name_none_without_role_defaults_to_claude(self):
         db = self._db()
         git = FakeGit()
         actor = cmd_new(
@@ -735,7 +735,7 @@ class TestCmdNewTemplate(unittest.TestCase):
 
 class TestCmdNewAgentDefaults(unittest.TestCase):
     """Precedence ladder: class defaults -> kdl agent_defaults ->
-    template -> CLI."""
+    role -> CLI."""
 
     def _db(self) -> Database:
         return Database.open(":memory:")
@@ -752,7 +752,7 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
             base=None,
             agent_name="claude",
             cli_overrides=ActorConfig(),
-            template_name=None,
+            role_name=None,
             app_config=AppConfig(),
         )
         self.assertEqual(actor.config.agent_args.get("permission-mode"), "auto")
@@ -844,13 +844,13 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
         # Other class defaults still apply.
         self.assertEqual(actor.config.actor_keys.get("use-subscription"), "true")
 
-    def test_template_overrides_kdl_agent_defaults(self):
-        from actor import AgentDefaults, AppConfig, Template
+    def test_role_overrides_kdl_agent_defaults(self):
+        from actor import AgentDefaults, AppConfig, Role
         db = self._db()
         git = FakeGit()
         app = AppConfig(
-            templates={
-                "qa": Template(name="qa", config={"permission-mode": "plan"}),
+            roles={
+                "qa": Role(name="qa", config={"permission-mode": "plan"}),
             },
             agent_defaults={
                 "claude": AgentDefaults(agent_args={"permission-mode": "auto"}),
@@ -864,18 +864,18 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
             base=None,
             agent_name="claude",
             cli_overrides=ActorConfig(),
-            template_name="qa",
+            role_name="qa",
             app_config=app,
         )
         self.assertEqual(actor.config.agent_args.get("permission-mode"), "plan")
 
-    def test_cli_overrides_template_over_kdl_over_class_defaults(self):
-        from actor import AgentDefaults, AppConfig, Template
+    def test_cli_overrides_role_over_kdl_over_class_defaults(self):
+        from actor import AgentDefaults, AppConfig, Role
         db = self._db()
         git = FakeGit()
         app = AppConfig(
-            templates={
-                "qa": Template(
+            roles={
+                "qa": Role(
                     name="qa",
                     config={"permission-mode": "plan", "extra": "tpl"},
                 ),
@@ -895,7 +895,7 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
             base=None,
             agent_name="claude",
             cli_overrides=_cli('model=haiku'),
-            template_name="qa",
+            role_name="qa",
             app_config=app,
         )
         self.assertEqual(actor.config.agent_args.get("model"), "haiku")            # CLI wins

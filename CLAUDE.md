@@ -8,7 +8,7 @@ Manages multiple Claude/Codex agents running in isolated git worktrees.
 src/actor/               # Python package
   cli.py                 # argparse CLI, command dispatch
   commands.py            # Command implementations (cmd_new, cmd_run, cmd_list, etc.)
-  config.py              # KDL loader for ~/.actor/settings.kdl + <repo>/.actor/settings.kdl — templates
+  config.py              # KDL loader for ~/.actor/settings.kdl + <repo>/.actor/settings.kdl — roles
   setup.py               # 'actor setup' / 'actor update' — deploy bundled skill + register MCP
   server.py              # MCP server entry point
   db.py                  # SQLite database layer (~/.actor/actor.db)
@@ -41,7 +41,7 @@ spec/
   V2.md                  # V2 vision (MCP server, channels, dashboard, plugin)
   PLAN.md                # Plan root index
   PLAN-STAGE1.md         # Stage 1 implementation plan (minimal MCP server)
-  PLAN-CONFIG-SYSTEM.md  # Config / templates implementation plan
+  PLAN-CONFIG-SYSTEM.md  # Config / roles implementation plan
   DASHBOARD.md           # Watch dashboard spec
 ```
 
@@ -117,7 +117,7 @@ Local dev installs (`uv sync`) get a PEP 440 dev version like
 `actor --version`, the MCP server's announced version, and the deployed
 SKILL.md all agree and the drift check still works.
 
-## Config files & templates
+## Config files & roles
 
 `actor new` reads `~/.actor/settings.kdl` (user-wide) and
 `<repo>/.actor/settings.kdl` (project-local, discovered by walking up from
@@ -128,19 +128,19 @@ There is no `actor init` — create the file by hand (the `.actor/`
 directory is also used for worktrees and the SQLite DB, so it typically
 already exists).
 
-Templates are named presets for `actor new`:
+Roles are named presets for `actor new`:
 
 ```kdl
-template "qa" {
+role "qa" {
     agent "claude"
     model "opus"
     prompt "You're a QA engineer. Write tests for the changed code."
 }
 ```
 
-Usage: `actor new foo --template qa` applies the template's agent + config +
+Usage: `actor new foo --role qa` applies the role's agent + config +
 prompt. Explicit CLI flags (`--agent`, `--model`, `--config`, positional
-prompt / stdin) override the template. `agent` and `prompt` are promoted to
+prompt / stdin) override the role. `agent` and `prompt` are promoted to
 top-level fields; every other child is stored as a config key (values
 coerced to strings).
 
@@ -189,7 +189,7 @@ defaults "claude" {
 Merge precedence at actor creation (`actor new`), lowest → highest:
 class `AGENT_DEFAULTS` + `ACTOR_DEFAULTS` (hardcoded on the Agent
 subclass) → user kdl `defaults` block → project kdl `defaults` block →
-template config (`--template`) → CLI `--config key=value`. The
+role config (`--role`) → CLI `--config key=value`. The
 resolved merge is snapshotted into the DB at creation; later edits to
 `settings.kdl` don't retroactively change existing actors — use `actor
 config <name> key=value` to mutate an actor's stored config. At run
@@ -208,10 +208,12 @@ Built-in class defaults today:
 
 Unknown top-level nodes (e.g. `alias`) are silently ignored for
 forward-compat with follow-up tickets. A `defaults { ... }` block
-inside a template is rejected with a helpful error pointing users at
-the per-agent `defaults "<name>" { ... }` shape. The legacy `agent
-"<name>" { defaults { ... } }` shape is rejected with a migration
-error showing the new flat shape.
+inside a role is rejected with a helpful error pointing users at the
+per-agent `defaults "<name>" { ... }` shape. Two legacy shapes are
+hard-rejected with migration errors: the old `agent "<name>" {
+defaults { ... } }` block (now flat `defaults "<name>" { ... }`) and
+the old `template "<name>" { ... }` node (now `role "<name>" {
+... }`).
 
 Load programmatically via `actor.config.load_config(cwd=..., home=...)` —
 both args default to `Path.cwd()` / `$HOME` so tests can inject temp dirs.
@@ -248,7 +250,7 @@ hooks {
   still reports the missing path so the script can detect it.
 
 Project hooks override user hooks per event (same merge rule as
-templates).
+roles).
 
 ## Watch theme
 

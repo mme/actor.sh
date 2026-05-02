@@ -35,20 +35,20 @@ def _create_agent(kind: AgentKind) -> Agent:
 
 def _resolve_agent_kind_for_cli(
     cli_agent: Optional[str],
-    template_name: Optional[str],
+    role_name: Optional[str],
     app_config,
 ) -> AgentKind:
     """Replicate cmd_new's agent resolution for CLI-side validation.
 
     CLI validation of `--config` needs the target agent class to know which
     keys are actor-keys. Agent precedence mirrors cmd_new: explicit flag →
-    template's `agent` → "claude"."""
+    role's `agent` → "claude"."""
     if cli_agent is not None:
         return AgentKind.from_str(cli_agent)
-    if template_name is not None and app_config is not None:
-        tpl = app_config.templates.get(template_name)
-        if tpl is not None and tpl.agent:
-            return AgentKind.from_str(tpl.agent)
+    if role_name is not None and app_config is not None:
+        role = app_config.roles.get(role_name)
+        if role is not None and role.agent:
+            return AgentKind.from_str(role.agent)
     return AgentKind.CLAUDE
 
 
@@ -115,7 +115,7 @@ Examples:
   actor new my-feature --dir /path/to/repo          Worktree from another repo
   actor new my-feature --base develop               Branch off develop
   actor new my-feature --config effort=max          Set agent config at creation
-  actor new my-feature --template qa                Apply the 'qa' template from settings.kdl
+  actor new my-feature --role qa                    Apply the 'qa' role from settings.kdl
   echo "fix it" | actor new my-feature              Create and run with piped prompt""",
     )
     p_new.add_argument("name", help="Actor name")
@@ -123,11 +123,11 @@ Examples:
     p_new.add_argument("--dir", default=None, help="Base directory (defaults to CWD)")
     p_new.add_argument("--no-worktree", action="store_true", help="Skip worktree creation, run in the directory directly")
     p_new.add_argument("--base", default=None, help="Branch to create the worktree from (defaults to current branch)")
-    p_new.add_argument("--agent", default=None, help="Coding agent to use (defaults to template's agent or 'claude')")
-    p_new.add_argument("--template", default=None, help="Apply a template from settings.kdl")
+    p_new.add_argument("--agent", default=None, help="Coding agent to use (defaults to role's agent or 'claude')")
+    p_new.add_argument("--role", default=None, help="Apply a role from settings.kdl")
     p_new.add_argument("--model", default=None, help="Model for the agent to use")
     # Tri-state: default None = "no CLI override" so lower precedence layers
-    # (template, kdl agent-block, class default) supply the value. Explicit
+    # (role, kdl defaults block, class default) supply the value. Explicit
     # --use-subscription / --no-use-subscription force True/False as the
     # highest-precedence (CLI) layer.
     p_new.add_argument("--use-subscription", action="store_const", const=True, default=None, dest="use_subscription", help="Use the subscription by stripping API keys from the environment (overrides lower layers)")
@@ -403,7 +403,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 config_pairs.append(f"model={args.model}")
 
             agent_kind = _resolve_agent_kind_for_cli(
-                args.agent, args.template, app_config,
+                args.agent, args.role, app_config,
             )
             agent_cls = _agent_class(agent_kind)
             cli_overrides = _build_cli_overrides(
@@ -420,7 +420,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 base=args.base,
                 agent_name=args.agent,
                 cli_overrides=cli_overrides,
-                template_name=args.template,
+                role_name=args.role,
                 app_config=app_config,
                 hook_runner=None,
             )
@@ -431,13 +431,13 @@ def main(argv: Optional[List[str]] = None) -> None:
             if prompt is None and not sys.stdin.isatty():
                 prompt = sys.stdin.read().strip()
                 stdin_consumed = True
-            # Template prompt fallback runs before the empty-stdin check so
-            # that `echo "" | actor new foo --template qa` uses the template's
+            # Role prompt fallback runs before the empty-stdin check so
+            # that `echo "" | actor new foo --role qa` uses the role's
             # prompt instead of erroring.
-            if not prompt and args.template is not None:
-                tpl = app_config.templates.get(args.template)
-                if tpl is not None and tpl.prompt:
-                    prompt = tpl.prompt
+            if not prompt and args.role is not None:
+                role = app_config.roles.get(args.role)
+                if role is not None and role.prompt:
+                    prompt = role.prompt
             if stdin_consumed and not prompt:
                 print("error: stdin was empty — expected a prompt", file=sys.stderr)
                 sys.exit(1)

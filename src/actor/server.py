@@ -259,7 +259,7 @@ def new_actor(
             dedicated parameter below.
         use_subscription: When True, force subscription auth (strip the agent's API key env var).
             When False, pass the API key through. When omitted (None), defer to lower-precedence
-            layers (template / settings.kdl / class default).
+            layers (role / settings.kdl / class default).
     """
     db = _db()
     git = RealGit()

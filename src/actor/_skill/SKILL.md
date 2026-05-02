@@ -72,12 +72,12 @@ new_actor(name="fix-nav", prompt="...", no_worktree=True)                   # no
 new_actor(name="fix-nav", prompt="...", config=["model=opus"])              # saved defaults
 ```
 
-### Templates
+### Roles
 
-Templates are named bundles of actor defaults. They live in KDL files that
+Roles are named bundles of actor defaults. They live in KDL files that
 the user edits directly — there is no `actor init` command, so use the
 Read / Write / Edit tools when the user asks to view, add, or change a
-template.
+role.
 
 **File locations** (both optional; create whichever fits the user's ask):
 
@@ -86,14 +86,14 @@ template.
   from the current directory (git-style), so any cwd inside the repo sees
   it.
 
-**Precedence:** when the same template name appears in both files, the
-project file wins. Users can set a baseline template in `~/.actor/` and
+**Precedence:** when the same role name appears in both files, the
+project file wins. Users can set a baseline role in `~/.actor/` and
 override it per-repo.
 
-**Template block syntax:**
+**Role block syntax:**
 
 ```kdl
-template "qa" {
+role "qa" {
     agent "claude"
     model "opus"
     effort "max"
@@ -101,14 +101,14 @@ template "qa" {
     prompt "You're a QA engineer. Run the tests, report what fails."
 }
 
-template "reviewer" {
+role "reviewer" {
     agent "claude"
     model "sonnet"
     prompt "You're a code reviewer. Be concise."
 }
 ```
 
-**Valid keys inside a template:**
+**Valid keys inside a role:**
 
 - `agent` (string) — `"claude"` or `"codex"`. Sets which CLI the actor runs.
 - `prompt` (string) — default prompt used when the user doesn't pass one
@@ -152,7 +152,7 @@ hooks {
 
 Project hooks override user hooks per event.
 
-**Per-agent defaults** live alongside templates and apply automatically
+**Per-agent defaults** live alongside roles and apply automatically
 to every new actor of that agent kind:
 
 ```kdl
@@ -185,7 +185,7 @@ by checking the agent class's `ACTOR_DEFAULTS` whitelist:
   erase a user-level default without forcing a replacement.
 
 Precedence at `actor new` (low → high): class-level hardcoded defaults →
-user kdl → project kdl → template → CLI `--config`. The resolved merge
+user kdl → project kdl → role → CLI `--config`. The resolved merge
 is snapshotted onto the actor at creation time; later kdl edits don't
 retroactively mutate existing actors (use `actor config <name>` for
 that).
@@ -195,21 +195,21 @@ Built-in class defaults (no kdl file needed):
 - Codex: `use-subscription "true"`, `sandbox "danger-full-access"`,
   `a "never"`.
 
-**Applying a template** (CLI only — see note below):
+**Applying a role** (CLI only — see note below):
 
 ```bash
-actor new fix-auth --template qa                          # apply template
-actor new fix-auth --template qa --config model=haiku     # CLI overrides template
-actor new fix-auth --template qa --agent codex            # CLI agent beats template
-actor new fix-auth --template qa "custom prompt"          # CLI prompt beats template
+actor new fix-auth --role qa                          # apply role
+actor new fix-auth --role qa --config model=haiku     # CLI overrides role
+actor new fix-auth --role qa --agent codex            # CLI agent beats role
+actor new fix-auth --role qa "custom prompt"          # CLI prompt beats role
 ```
 
 Explicit CLI flags (`--agent`, `--model`, `--config`, positional prompt,
-stdin) always beat the template's values.
+stdin) always beat the role's values.
 
 **MCP note:** the `mcp__actor__new_actor` tool does not yet accept a
-`template` parameter. When the user asks for a templated actor, call
-`actor new … --template …` via the Bash tool instead. This is a known
+`role` parameter. When the user asks for a role-applied actor, call
+`actor new … --role …` via the Bash tool instead. This is a known
 gap; a follow-up will add it to the MCP tool.
 
 ### Create without running

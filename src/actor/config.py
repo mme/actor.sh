@@ -2,7 +2,7 @@
 
 Loads ~/.actor/settings.kdl (user) and <project>/.actor/settings.kdl
 (project), merges them, and exposes the merged AppConfig with its
-templates map and per-agent defaults. Project config overrides user
+roles map and per-agent defaults. Project config overrides user
 config per-key.
 
 Out of scope (see ticket #33): aliases. Unknown top-level nodes are
@@ -41,7 +41,7 @@ def _actor_keys_whitelist(agent_name: str) -> FrozenSet[str]:
 
 
 @dataclass
-class Template:
+class Role:
     name: str
     agent: Optional[str] = None
     prompt: Optional[str] = None
@@ -71,7 +71,7 @@ class Hooks:
 
 @dataclass
 class AppConfig:
-    templates: Dict[str, Template] = field(default_factory=dict)
+    roles: Dict[str, Role] = field(default_factory=dict)
     agent_defaults: Dict[str, AgentDefaults] = field(default_factory=dict)
     hooks: Hooks = field(default_factory=Hooks)
 
@@ -150,76 +150,76 @@ def _coerce_value_or_none(value: object) -> Optional[str]:
     return _coerce_value(value)
 
 
-def _parse_template(node, source: Path) -> Template:
+def _parse_role(node, source: Path) -> Role:
     if not node.args or not isinstance(node.args[0], str):
         raise ConfigError(
-            f"template block in {source} must have a name "
-            f"(e.g. `template \"qa\" {{ ... }}`)"
+            f"role block in {source} must have a name "
+            f"(e.g. `role \"qa\" {{ ... }}`)"
         )
     if not node.args[0]:
         raise ConfigError(
-            f"template block in {source} must have a non-empty name"
+            f"role block in {source} must have a non-empty name"
         )
     if len(node.args) > 1:
         raise ConfigError(
-            f"template '{node.args[0]}' in {source} has extra positional args"
+            f"role '{node.args[0]}' in {source} has extra positional args"
         )
     if getattr(node, "props", None):
         raise ConfigError(
-            f"template '{node.args[0]}' in {source} does not accept properties"
+            f"role '{node.args[0]}' in {source} does not accept properties"
         )
     name = node.args[0]
-    tpl = Template(name=name)
+    role = Role(name=name)
     seen_keys: set[str] = set()
     for child in node.nodes:
         key = child.name
         if key == "defaults":
             raise ConfigError(
-                f"template '{name}' in {source}: `defaults` is reserved "
+                f"role '{name}' in {source}: `defaults` is reserved "
                 f"for per-agent defaults at the top level "
                 f"(`defaults \"claude\" {{ ... }}` / "
                 f"`defaults \"codex\" {{ ... }}`), not as a child of "
-                f"`template`. Templates have a flat namespace already "
-                f"— put your keys directly under `template \"{name}\" "
+                f"`role`. Roles have a flat namespace already "
+                f"— put your keys directly under `role \"{name}\" "
                 f"{{ ... }}`."
             )
         if key in seen_keys:
             raise ConfigError(
-                f"template '{name}' in {source}: duplicate key '{key}'"
+                f"role '{name}' in {source}: duplicate key '{key}'"
             )
         seen_keys.add(key)
         if not child.args:
             raise ConfigError(
-                f"template '{name}' in {source}: '{key}' needs a value"
+                f"role '{name}' in {source}: '{key}' needs a value"
             )
         if len(child.args) > 1:
             raise ConfigError(
-                f"template '{name}' in {source}: '{key}' has extra args "
+                f"role '{name}' in {source}: '{key}' has extra args "
                 f"(only a single value is supported)"
             )
         if getattr(child, "props", None):
             raise ConfigError(
-                f"template '{name}' in {source}: '{key}' does not accept properties"
+                f"role '{name}' in {source}: '{key}' does not accept properties"
             )
         raw = child.args[0]
         if raw is None:
             raise ConfigError(
-                f"template '{name}' in {source}: '{key}' cannot be null "
-                f"(templates set values; `null` only makes sense inside "
-                f"`agent \"...\" {{ ... }}` blocks as a cancel marker)"
+                f"role '{name}' in {source}: '{key}' cannot be null "
+                f"(roles set values; `null` only makes sense inside "
+                f"`defaults \"...\" {{ ... }}` blocks as a cancel marker)"
             )
         if key in ("agent", "prompt") and not isinstance(raw, str):
             raise ConfigError(
-                f"template '{name}' in {source}: '{key}' must be a string"
+                f"role '{name}' in {source}: '{key}' must be a string"
             )
         value_str = _coerce_value(raw)
         if key == "agent":
-            tpl.agent = value_str
+            role.agent = value_str
         elif key == "prompt":
-            tpl.prompt = value_str
+            role.prompt = value_str
         else:
-            tpl.config[key] = value_str
-    return tpl
+            role.config[key] = value_str
+    return role
 
 
 def _parse_defaults_block(node, source: Path) -> Tuple[str, AgentDefaults]:
@@ -230,7 +230,7 @@ def _parse_defaults_block(node, source: Path) -> Tuple[str, AgentDefaults]:
       - keys in the agent class's `ACTOR_DEFAULTS` whitelist → `actor_keys`
       - everything else                                      → `agent_args`
 
-    Same partition logic that templates already use; the explicit
+    Same partition logic that roles already use; the explicit
     `defaults { }` sub-block of the legacy `agent "..."` shape is gone.
     `null` values survive as Python `None` so the merge step can use
     them to cancel lower-precedence values."""
@@ -357,13 +357,24 @@ def _parse_kdl_file(path: Path) -> AppConfig:
     cfg = AppConfig()
     hooks_seen = False
     for node in doc.nodes:
-        if node.name == "template":
-            tpl = _parse_template(node, path)
-            if tpl.name in cfg.templates:
+        if node.name == "role":
+            role = _parse_role(node, path)
+            if role.name in cfg.roles:
                 raise ConfigError(
-                    f"duplicate template '{tpl.name}' in {path}"
+                    f"duplicate role '{role.name}' in {path}"
                 )
-            cfg.templates[tpl.name] = tpl
+            cfg.roles[role.name] = role
+        elif node.name == "template":
+            # Renamed to `role`. Hard break with a copy-pasteable hint
+            # so existing kdl files surface the issue immediately
+            # rather than being silently dropped by the lenient
+            # unknown-node policy below.
+            raw_name = node.args[0] if node.args else "<name>"
+            raise ConfigError(
+                f"`template \"{raw_name}\" {{ ... }}` block in {path}: "
+                f"renamed to `role \"{raw_name}\" {{ ... }}`. "
+                f"All keys inside the block stay the same."
+            )
         elif node.name == "defaults":
             name, defaults = _parse_defaults_block(node, path)
             if name in cfg.agent_defaults:
@@ -434,8 +445,8 @@ def _merge_dict(
 
 
 def _merge(base: AppConfig, over: AppConfig) -> AppConfig:
-    merged_templates = dict(base.templates)
-    merged_templates.update(over.templates)
+    merged_roles = dict(base.roles)
+    merged_roles.update(over.roles)
     merged_defaults: Dict[str, AgentDefaults] = {}
     for agent in set(base.agent_defaults) | set(over.agent_defaults):
         b = base.agent_defaults.get(agent, AgentDefaults())
@@ -460,7 +471,7 @@ def _merge(base: AppConfig, over: AppConfig) -> AppConfig:
         on_discard=over.hooks.on_discard if over.hooks.on_discard is not None else base.hooks.on_discard,
     )
     return AppConfig(
-        templates=merged_templates,
+        roles=merged_roles,
         agent_defaults=merged_defaults,
         hooks=merged_hooks,
     )

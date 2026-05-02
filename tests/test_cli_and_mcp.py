@@ -115,7 +115,7 @@ class NewCommandTests(unittest.TestCase):
 
     def test_new_without_use_subscription_flag_does_not_emit_override(self):
         """Tri-state check: omitting both --use-subscription and --no-use-subscription
-        must NOT push a use-subscription value, so a template's value wins."""
+        must NOT push a use-subscription value, so a role's value wins."""
         cmd_new, _cmd_run, _code = self._run(["new", "foo"])
         overrides = cmd_new.call_args.kwargs["cli_overrides"]
         self.assertNotIn(
@@ -125,12 +125,12 @@ class NewCommandTests(unittest.TestCase):
 
     def test_new_explicit_use_subscription_flag_emits_true_override(self):
         """Explicit --use-subscription must push use-subscription=true so it
-        can override a template's use-subscription "false"."""
+        can override a role's use-subscription "false"."""
         cmd_new, _cmd_run, _code = self._run(["new", "foo", "--use-subscription"])
         overrides = cmd_new.call_args.kwargs["cli_overrides"]
         self.assertEqual(overrides.actor_keys.get("use-subscription"), "true")
 
-    def test_new_passes_template_arg_to_cmd_new_and_uses_template_prompt(self):
+    def test_new_passes_role_arg_to_cmd_new_and_uses_role_prompt(self):
         fake_db = MagicMock()
         fake_actor = MagicMock()
         fake_actor.name = "foo"
@@ -138,9 +138,9 @@ class NewCommandTests(unittest.TestCase):
         cmd_new = MagicMock(return_value=fake_actor)
         cmd_run = MagicMock(return_value="done")
 
-        from actor import AppConfig, Template
-        fake_app_cfg = AppConfig(templates={
-            "qa": Template(name="qa", agent="claude", prompt="run tests"),
+        from actor import AppConfig, Role
+        fake_app_cfg = AppConfig(roles={
+            "qa": Role(name="qa", agent="claude", prompt="run tests"),
         })
 
         stdin = io.StringIO("")
@@ -154,19 +154,19 @@ class NewCommandTests(unittest.TestCase):
              patch("sys.stdin", stdin):
             db_cls.open.return_value = fake_db
             try:
-                main(["new", "foo", "--template", "qa"])
+                main(["new", "foo", "--role", "qa"])
                 code = 0
             except SystemExit as e:
                 code = e.code if isinstance(e.code, int) else 1
         cmd_new.assert_called_once()
         kwargs = cmd_new.call_args.kwargs
-        self.assertEqual(kwargs["template_name"], "qa")
+        self.assertEqual(kwargs["role_name"], "qa")
         self.assertIsNotNone(kwargs["app_config"])
         self.assertEqual(code, 0)
         cmd_run.assert_called_once()
         self.assertEqual(cmd_run.call_args.kwargs["prompt"], "run tests")
 
-    def test_new_cli_prompt_beats_template_prompt(self):
+    def test_new_cli_prompt_beats_role_prompt(self):
         fake_db = MagicMock()
         fake_actor = MagicMock()
         fake_actor.name = "foo"
@@ -174,9 +174,9 @@ class NewCommandTests(unittest.TestCase):
         cmd_new = MagicMock(return_value=fake_actor)
         cmd_run = MagicMock(return_value="done")
 
-        from actor import AppConfig, Template
-        fake_app_cfg = AppConfig(templates={
-            "qa": Template(name="qa", agent="claude", prompt="template says run tests"),
+        from actor import AppConfig, Role
+        fake_app_cfg = AppConfig(roles={
+            "qa": Role(name="qa", agent="claude", prompt="role says run tests"),
         })
 
         stdin = io.StringIO("")
@@ -189,18 +189,18 @@ class NewCommandTests(unittest.TestCase):
              patch("actor.cli._create_agent", return_value=MagicMock()), \
              patch("sys.stdin", stdin):
             db_cls.open.return_value = fake_db
-            main(["new", "foo", "custom prompt", "--template", "qa"])
+            main(["new", "foo", "custom prompt", "--role", "qa"])
         self.assertEqual(cmd_run.call_args.kwargs["prompt"], "custom prompt")
 
-    def test_new_without_template_does_not_pass_template_kwargs(self):
+    def test_new_without_role_does_not_pass_role_kwargs(self):
         """Regression check: normal `actor new foo` must still work end-to-end."""
         cmd_new, cmd_run, code = self._run(["new", "foo"])
         kwargs = cmd_new.call_args.kwargs
-        self.assertIsNone(kwargs["template_name"])
+        self.assertIsNone(kwargs["role_name"])
         self.assertEqual(code, 0)
 
-    def test_new_empty_stdin_with_template_prompt_falls_back(self):
-        """`echo "" | actor new foo --template qa` must use the template's
+    def test_new_empty_stdin_with_role_prompt_falls_back(self):
+        """`echo "" | actor new foo --role qa` must use the role's
         prompt instead of erroring on empty stdin."""
         fake_db = MagicMock()
         fake_actor = MagicMock()
@@ -209,9 +209,9 @@ class NewCommandTests(unittest.TestCase):
         cmd_new = MagicMock(return_value=fake_actor)
         cmd_run = MagicMock(return_value="done")
 
-        from actor import AppConfig, Template
-        fake_app_cfg = AppConfig(templates={
-            "qa": Template(name="qa", agent="claude", prompt="run tests"),
+        from actor import AppConfig, Role
+        fake_app_cfg = AppConfig(roles={
+            "qa": Role(name="qa", agent="claude", prompt="run tests"),
         })
 
         stdin = io.StringIO("")
@@ -225,7 +225,7 @@ class NewCommandTests(unittest.TestCase):
              patch("sys.stdin", stdin):
             db_cls.open.return_value = fake_db
             try:
-                main(["new", "foo", "--template", "qa"])
+                main(["new", "foo", "--role", "qa"])
                 code = 0
             except SystemExit as e:
                 code = e.code if isinstance(e.code, int) else 1
@@ -514,7 +514,7 @@ class McpToolTests(unittest.TestCase):
 
     def test_new_actor_use_subscription_default_none_emits_nothing(self):
         """Tri-state: omitting the param leaves actor_keys empty so lower
-        layers (template / kdl / class default) supply the value."""
+        layers (role / kdl / class default) supply the value."""
         overrides = self._capture_new_actor_overrides()
         self.assertEqual(overrides.actor_keys, {})
 

@@ -36,7 +36,7 @@ from .types import (
 )
 
 # Config
-from .config import AgentDefaults, AppConfig, Hooks, Template, load_config
+from .config import AgentDefaults, AppConfig, Hooks, Role, load_config
 
 # Hooks runtime
 from .hooks import HookResult, HookRunner, hook_env, run_hook
@@ -113,7 +113,7 @@ __all__ = [
     "AgentDefaults",
     "AppConfig",
     "Hooks",
-    "Template",
+    "Role",
     "load_config",
     # Hooks runtime
     "HookResult",
