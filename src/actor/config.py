@@ -90,12 +90,16 @@ _HOOK_KEYS = {
 # project's) replaces the entry wholesale — there's no per-field merge for
 # roles. To delete a built-in, redefine it in settings.kdl with the fields
 # you want; there is no `null` cancel for whole roles.
-_DEFAULT_MAIN_PROMPT = (
-    "You are a focused coding agent running inside actor.sh — spawned in "
-    "an isolated git worktree to handle one task. Stay within the scope "
-    "the user gave you, ask before expanding it, and report results "
-    "clearly when done."
-)
+#
+# Prompt bodies live as separate `.md` files under `actor.role_prompts/`
+# rather than as Python string literals — they're long, frequently edited,
+# and reading them as Markdown beats wrestling with quote escaping. Loaded
+# via `importlib.resources` so they ship as package data with the wheel.
+
+
+def _load_builtin_prompt(name: str) -> str:
+    from importlib.resources import files
+    return (files("actor.role_prompts") / f"{name}.md").read_text().rstrip()
 
 
 def _default_roles() -> Dict[str, "Role"]:
@@ -103,8 +107,8 @@ def _default_roles() -> Dict[str, "Role"]:
         "main": Role(
             name="main",
             agent="claude",
-            description="Default actor.sh coding agent.",
-            prompt=_DEFAULT_MAIN_PROMPT,
+            description="Default actor.sh master orchestrator.",
+            prompt=_load_builtin_prompt("main"),
         ),
     }
 
