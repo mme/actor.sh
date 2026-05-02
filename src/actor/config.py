@@ -85,6 +85,30 @@ _HOOK_KEYS = {
 }
 
 
+# Built-in roles that exist without a settings.kdl. Layered as the lowest
+# precedence in `load_config` so a user's `role "main" { ... }` block (or a
+# project's) replaces the entry wholesale — there's no per-field merge for
+# roles. To delete a built-in, redefine it in settings.kdl with the fields
+# you want; there is no `null` cancel for whole roles.
+_DEFAULT_MAIN_PROMPT = (
+    "You are a focused coding agent running inside actor.sh — spawned in "
+    "an isolated git worktree to handle one task. Stay within the scope "
+    "the user gave you, ask before expanding it, and report results "
+    "clearly when done."
+)
+
+
+def _default_roles() -> Dict[str, "Role"]:
+    return {
+        "main": Role(
+            name="main",
+            agent="claude",
+            description="Default actor.sh coding agent.",
+            prompt=_DEFAULT_MAIN_PROMPT,
+        ),
+    }
+
+
 def _find_project_config(
     start: Path, user_path: Optional[Path] = None
 ) -> Optional[Path]:
@@ -498,7 +522,7 @@ def load_config(
         env_home = os.environ.get("HOME")
         home = Path(env_home) if env_home else None
 
-    merged = AppConfig()
+    merged = AppConfig(roles=_default_roles())
 
     user_path: Optional[Path] = None
     if home is not None:

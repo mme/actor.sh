@@ -127,7 +127,9 @@ role "reviewer" {
 **Discover what's defined.** Call `mcp__actor__list_roles` (MCP) or run
 `actor roles` (CLI) before applying a role — both print the same table
 of name, agent, and description, drawn live from the merged
-user+project settings.kdl.
+user+project settings.kdl. A built-in `main` role (claude + a short
+system prompt) is always present and can be overridden by a `role
+"main" { ... }` block in settings.kdl.
 
 Unknown top-level nodes (`alias`) parse as no-ops today — they're
 reserved for follow-up tickets. Malformed KDL raises an error with the

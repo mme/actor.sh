@@ -12,11 +12,56 @@ from actor.errors import ConfigError
 
 class TestLoadConfigEmpty(unittest.TestCase):
 
-    def test_no_files_returns_empty_config(self):
+    def test_no_files_returns_only_built_in_roles(self):
+        # The built-in `main` role is always present even with no kdl files.
+        # Other slots (agent_defaults, hooks) stay empty.
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
             cfg = load_config(cwd=Path(cwd), home=Path(home))
             self.assertIsInstance(cfg, AppConfig)
-            self.assertEqual(cfg.roles, {})
+            self.assertEqual(set(cfg.roles), {"main"})
+            self.assertEqual(cfg.agent_defaults, {})
+
+    def test_built_in_main_role_has_agent_and_prompt(self):
+        # `main` should be usable out of the box: an agent to spawn and a
+        # system prompt to seed the actor with.
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            main = cfg.roles["main"]
+            self.assertEqual(main.name, "main")
+            self.assertEqual(main.agent, "claude")
+            self.assertTrue(main.prompt)
+            self.assertIsNotNone(main.description)
+
+    def test_user_kdl_can_override_built_in_main(self):
+        # A `role "main" { ... }` in settings.kdl replaces the built-in
+        # wholesale (whole-role replacement, not field-by-field merge).
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            p = Path(home) / ".actor" / "settings.kdl"
+            p.parent.mkdir()
+            p.write_text(
+                'role "main" {\n'
+                '    agent "codex"\n'
+                '    prompt "custom system prompt"\n'
+                '}\n'
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            main = cfg.roles["main"]
+            self.assertEqual(main.agent, "codex")
+            self.assertEqual(main.prompt, "custom system prompt")
+            # Description from the built-in is gone — user replaced the whole role.
+            self.assertIsNone(main.description)
+
+    def test_project_kdl_can_override_user_main(self):
+        # Standard precedence: project beats user beats built-in.
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            user_p = Path(home) / ".actor" / "settings.kdl"
+            user_p.parent.mkdir()
+            user_p.write_text('role "main" {\n    prompt "user main"\n}\n')
+            proj_p = Path(cwd) / ".actor" / "settings.kdl"
+            proj_p.parent.mkdir()
+            proj_p.write_text('role "main" {\n    prompt "project main"\n}\n')
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(cfg.roles["main"].prompt, "project main")
 
     def test_missing_user_file_but_project_file_loads_project(self):
         with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
@@ -169,7 +214,8 @@ class TestLoadConfigParseShapes(unittest.TestCase):
             )
             cfg = load_config(cwd=Path(cwd), home=Path(home))
             self.assertIn("qa", cfg.roles)
-            self.assertEqual(len(cfg.roles), 1)
+            # Built-in `main` is always present alongside user-defined roles.
+            self.assertEqual(set(cfg.roles), {"main", "qa"})
 
 
 class TestLoadConfigParseStrict(unittest.TestCase):

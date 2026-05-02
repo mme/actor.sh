@@ -147,6 +147,11 @@ agent / user can pick the right role without opening settings.kdl.
 To see what's defined, run `actor roles`. If a role-name typo lands in
 `actor new --role <bad>`, the error lists the available names.
 
+A built-in `main` role exists by default — a generic coding-agent
+preset (claude + a short system prompt). Override it with a `role
+"main" { ... }` block in settings.kdl to swap in your own system
+prompt (whole-role replacement; there is no per-field merge).
+
 ### Per-agent defaults
 
 `defaults "claude" { … }` / `defaults "codex" { … }` blocks set
