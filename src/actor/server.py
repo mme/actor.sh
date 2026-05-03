@@ -274,7 +274,14 @@ def new_actor(
         role: Apply a named role from settings.kdl. Use `list_roles` to see
             what's defined. The role's agent + config snapshot onto the
             actor; an unknown name fails with the available list.
-        dir: Base directory for the worktree (defaults to current working directory).
+        dir: Base directory (repo root) for the worktree. **Must be an
+            absolute path** when set — relative paths resolve against the
+            MCP server's cwd, which is rarely what the caller intends and
+            is fragile across sessions. Defaults to the orchestrator
+            session's cwd (i.e. wherever the user ran `actor main`), which
+            is the right default when sub-actors should work in the same
+            repo. Pass an explicit absolute path when targeting a
+            different repo.
         base: Branch to create the worktree from (defaults to current branch).
         no_worktree: If True, skip worktree creation.
         config: Config key=value pairs saved as actor defaults (e.g. ["model=opus", "effort=max"]).

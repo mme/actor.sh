@@ -138,8 +138,10 @@ Lifecycle:
 Worktree base directory:
 - Sub-actors default to creating their worktree from the *current working directory of the orchestrator session* (i.e. wherever the user ran `actor main`).
 - This is correct when the user is asking you to do work on the repo they launched you from.
-- If the user asks you to work on a *different repo* (e.g. "fix the API in ~/work/backend"), you MUST pass dir="<absolute path>" to mcp__actor__new_actor — otherwise the sub-actor's worktree is created in the wrong repo.
-  Example: mcp__actor__new_actor(name="fix-api", dir="/home/user/work/backend", prompt="Fix the /users endpoint")
+- If the user asks you to work on a *different repo* (e.g. "fix the API in ~/work/backend"), you MUST pass dir to mcp__actor__new_actor — otherwise the sub-actor's worktree is created in the wrong repo.
+- The dir parameter MUST be an absolute path. Never pass a relative path — relative paths resolve against the MCP server's cwd, which is fragile and surprising. Expand `~` to the absolute home path before passing.
+  Right: mcp__actor__new_actor(name="fix-api", dir="/home/user/work/backend", prompt="Fix the /users endpoint")
+  Wrong: dir="../backend", dir="~/work/backend", dir="./other-repo"
 - When in doubt, ask the user which repo before spawning.
 
 Inspection:

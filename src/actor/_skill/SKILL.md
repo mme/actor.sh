@@ -347,25 +347,32 @@ Then apply the role and pass the task as the per-call `prompt`. The role's
 ### Spawning against a different repo (not the orchestrator's cwd)
 By default, sub-actors create their worktree from the directory the
 orchestrator was launched in (i.e. wherever the user ran `actor main`).
-If the user wants work done on a different repo, pass `dir`:
+If the user wants work done on a different repo, pass `dir` as an
+**absolute path** (relative paths resolve against the MCP server's cwd
+— fragile and surprising; expand `~` to the absolute home first):
 
 `new_actor(name="fix-backend-api", dir="/home/user/work/backend", prompt="Fix the /users API endpoint — returns 500 on missing email")`
 
 When unsure which repo to use, ask the user before spawning.
 
-## Crafting Prompts for Actors
+## Runtime facts
 
-Be explicit about what you expect. Actors are autonomous — they'll ask questions if the task is ambiguous unless you tell them not to.
+These are mechanical defaults that affect tool calls, not behavioral
+guidance:
 
-- **Just build:** end with "Do not ask questions. Just implement it."
-- **Questions welcome:** "If anything is unclear, stop and describe what you need clarification on."
+- Claude actors run with `permission-mode "auto"` by default
+  (autonomous inside the worktree); set `permission-mode
+  "bypassPermissions"` via `config=[...]` to fully bypass permission
+  checks.
+- Codex actors run with `sandbox "danger-full-access"` + `a "never"`
+  by default (truly unrestricted).
+- Each actor gets its own git worktree by default; pass
+  `no_worktree=True` only when the user explicitly asks or the dir
+  isn't a git repo.
+- Actor sessions persist — multiple `run_actor` calls against the
+  same actor keep agent context across runs.
+- On error, `logs_actor(name=..., verbose=True)` shows tool calls +
+  thinking + timestamps for diagnosis.
 
-Choose based on context.
-
-## Important Notes
-
-- Actors run autonomous-leaning by default — Claude uses `permission-mode "auto"` (agent decides when to ask; effectively autonomous inside a worktree), Codex uses `sandbox "danger-full-access"` + `a "never"` (truly unrestricted). To fully bypass Claude's permission checks, set `permission-mode "bypassPermissions"`. See the agent config reference for other options.
-- Each actor gets its own git worktree by default so parallel actors don't conflict.
-- Actor sessions persist — multiple runs against the same actor keep context.
-- If an actor errors, check verbose logs (`logs_actor(name=..., verbose=True)`) and retry with `run_actor`.
-- When the user says "kick off", "spin up", "start", "launch", or "create an actor" — that means `new_actor(name=..., prompt=...)`.
+For everything else (when to spawn, when to verify, how to compose
+task prompts, when to escalate to the user), see your system prompt.
