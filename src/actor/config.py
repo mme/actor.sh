@@ -51,12 +51,15 @@ class Role:
 
 @dataclass
 class AgentDefaults:
-    """Per-agent baseline from settings.kdl.
+    """Per-agent baseline from a `defaults "<agent>" { ... }` block.
 
-    `actor_keys` are flat keys interpreted by actor-sh (e.g. env filtering).
-    `agent_args` come from the `defaults { }` sub-block and map directly to
-    the agent binary's CLI flags. Values of `None` mean "unset" — they cancel
-    a lower-precedence value during merge.
+    The block's flat children are partitioned at parse time by the agent
+    class's `ACTOR_DEFAULTS` whitelist:
+      - `actor_keys` — interpreted by actor-sh (e.g. env filtering).
+      - `agent_args` — forwarded to the agent CLI as flags.
+
+    Values of `None` mean "unset" — they cancel a lower-precedence value
+    during merge.
     """
     actor_keys: Dict[str, Optional[str]] = field(default_factory=dict)
     agent_args: Dict[str, Optional[str]] = field(default_factory=dict)
@@ -256,15 +259,14 @@ def _parse_role(node, source: Path) -> Role:
 def _parse_defaults_block(node, source: Path) -> Tuple[str, AgentDefaults]:
     """Parse a `defaults "<agent>" { ... }` node.
 
-    Single flat namespace — every child is a key/value pair. Each key is
-    routed at parse time:
-      - keys in the agent class's `ACTOR_DEFAULTS` whitelist → `actor_keys`
-      - everything else                                      → `agent_args`
+    Single flat namespace — every child is a key/value pair, partitioned
+    at parse time by the agent class's `ACTOR_DEFAULTS` whitelist:
+      - whitelisted keys → `actor_keys` (interpreted by actor-sh)
+      - everything else  → `agent_args` (forwarded to the agent CLI)
 
-    Same partition logic that roles already use; the explicit
-    `defaults { }` sub-block of the legacy `agent "..."` shape is gone.
-    `null` values survive as Python `None` so the merge step can use
-    them to cancel lower-precedence values."""
+    Same partition logic that roles use. `null` values survive as Python
+    `None` so the merge step can use them to cancel lower-precedence
+    values."""
     if not node.args:
         raise ConfigError(
             f"defaults block in {source} must have an agent name "
@@ -319,8 +321,7 @@ def _parse_defaults_block(node, source: Path) -> Tuple[str, AgentDefaults]:
             raise ConfigError(
                 f"defaults '{raw_name}' in {source}: "
                 f"'{key}' must be a leaf value, not a block "
-                f"(the legacy `defaults {{ ... }}` sub-block was removed; "
-                f"all keys live in one flat namespace)"
+                f"(all keys live in one flat namespace)"
             )
         value = _coerce_value_or_none(child.args[0])
         if key in whitelist:
@@ -395,17 +396,6 @@ def _parse_kdl_file(path: Path) -> AppConfig:
                     f"duplicate role '{role.name}' in {path}"
                 )
             cfg.roles[role.name] = role
-        elif node.name == "template":
-            # Renamed to `role`. Hard break with a copy-pasteable hint
-            # so existing kdl files surface the issue immediately
-            # rather than being silently dropped by the lenient
-            # unknown-node policy below.
-            raw_name = node.args[0] if node.args else "<name>"
-            raise ConfigError(
-                f"`template \"{raw_name}\" {{ ... }}` block in {path}: "
-                f"renamed to `role \"{raw_name}\" {{ ... }}`. "
-                f"All keys inside the block stay the same."
-            )
         elif node.name == "defaults":
             name, defaults = _parse_defaults_block(node, path)
             if name in cfg.agent_defaults:
@@ -413,38 +403,6 @@ def _parse_kdl_file(path: Path) -> AppConfig:
                     f"duplicate defaults block '{name}' in {path}"
                 )
             cfg.agent_defaults[name] = defaults
-        elif node.name == "agent":
-            # Legacy `agent "<name>" { ... defaults { ... } }` shape was
-            # replaced with a flat-namespace `defaults "<name>" { ... }`.
-            # Hard break with a copy-pasteable migration hint so existing
-            # kdl files surface the issue immediately rather than silently
-            # parsing under the new dispatcher (which would log "unknown
-            # node name" and continue).
-            raw_name = node.args[0] if node.args else "<agent>"
-            raise ConfigError(
-                f"`agent \"{raw_name}\" {{ ... }}` block in {path}: kdl "
-                f"shape changed; replace with "
-                f"`defaults \"{raw_name}\" {{ ... }}`.\n"
-                f"\n"
-                f"Old:\n"
-                f"    agent \"{raw_name}\" {{\n"
-                f"        use-subscription false\n"
-                f"        defaults {{\n"
-                f"            model \"opus\"\n"
-                f"        }}\n"
-                f"    }}\n"
-                f"\n"
-                f"New:\n"
-                f"    defaults \"{raw_name}\" {{\n"
-                f"        use-subscription false\n"
-                f"        model \"opus\"\n"
-                f"    }}\n"
-                f"\n"
-                f"All keys live in one flat namespace; actor.sh routes "
-                f"them by checking each key against the agent's "
-                f"ACTOR_DEFAULTS whitelist. Use `null` to cancel a "
-                f"lower-precedence default."
-            )
         elif node.name == "hooks":
             if hooks_seen:
                 raise ConfigError(

@@ -2,6 +2,15 @@
 
 Manages multiple Claude/Codex agents running in isolated git worktrees.
 
+## Status: pre-release
+
+actor.sh has not had a public release yet. There are no users to keep
+on an old shape. **Do not add backwards-compatibility mechanisms** —
+no soft aliases, no deprecation warnings, no migration errors, no
+shims for renamed flags or moved config nodes. Rename, restructure,
+delete; update tests and docs to match. The codebase should always
+read as if the current shape is the only one that ever existed.
+
 ## Project structure
 
 ```
@@ -228,11 +237,7 @@ Built-in class defaults today:
 Unknown top-level nodes (e.g. `alias`) are silently ignored for
 forward-compat with follow-up tickets. A `defaults { ... }` block
 inside a role is rejected with a helpful error pointing users at the
-per-agent `defaults "<name>" { ... }` shape. Two legacy shapes are
-hard-rejected with migration errors: the old `agent "<name>" {
-defaults { ... } }` block (now flat `defaults "<name>" { ... }`) and
-the old `template "<name>" { ... }` node (now `role "<name>" {
-... }`).
+per-agent `defaults "<name>" { ... }` shape.
 
 Load programmatically via `actor.config.load_config(cwd=..., home=...)` —
 both args default to `Path.cwd()` / `$HOME` so tests can inject temp dirs.

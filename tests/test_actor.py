@@ -727,7 +727,7 @@ class TestCmdNewRole(unittest.TestCase):
             )
         self.assertIn("no roles defined", str(ctx.exception))
 
-    def test_no_role_backward_compatible(self):
+    def test_cmd_new_without_role(self):
         db = self._db()
         git = FakeGit()
         actor = cmd_new(

@@ -294,49 +294,9 @@ class TestLoadConfigParseStrict(unittest.TestCase):
             "null",
         )
 
-    def test_legacy_agent_block_rejected_with_migration_hint(self):
-        # The old `agent "<n>" { ... defaults { } }` shape was replaced
-        # with a flat `defaults "<n>" { ... }` block. Hard break with a
-        # migration message so existing kdl files surface the issue
-        # immediately rather than silently parsing as an unknown node.
-        # The migration text must point at the new shape verbatim so the
-        # user can copy-paste it.
-        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
-            p = Path(cwd) / ".actor" / "settings.kdl"
-            p.parent.mkdir()
-            p.write_text(
-                'agent "claude" {\n'
-                '    use-subscription false\n'
-                '}\n'
-            )
-            with self.assertRaises(ConfigError) as ctx:
-                load_config(cwd=Path(cwd), home=Path(home))
-            msg = str(ctx.exception)
-            self.assertIn("agent \"claude\"", msg)
-            self.assertIn("defaults \"claude\"", msg)
-
-    def test_legacy_template_block_rejected_with_rename_hint(self):
-        # `template` was renamed to `role`. Hard break with a migration
-        # message so existing kdl files surface the issue immediately
-        # rather than being silently dropped by the lenient unknown-node
-        # policy.
-        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
-            p = Path(cwd) / ".actor" / "settings.kdl"
-            p.parent.mkdir()
-            p.write_text(
-                'template "qa" {\n'
-                '    agent "claude"\n'
-                '}\n'
-            )
-            with self.assertRaises(ConfigError) as ctx:
-                load_config(cwd=Path(cwd), home=Path(home))
-            msg = str(ctx.exception)
-            self.assertIn("template \"qa\"", msg)
-            self.assertIn("role \"qa\"", msg)
-
     def test_nested_block_inside_defaults_raises(self):
-        # Defaults is a flat namespace. Any sub-block (incl. the legacy
-        # `defaults { }` wrapper from the previous shape) is a parse error.
+        # Defaults is a flat namespace. Any sub-block under it is a
+        # parse error — keys must be leaf values.
         self._expect_error(
             'defaults "claude" {\n'
             '    permission-mode {\n'
