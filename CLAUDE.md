@@ -119,6 +119,64 @@ uv run python -m unittest tests.test_actor    # single module
 
 Tests use in-memory SQLite and fake implementations (FakeAgent, FakeGit, FakeProcessManager) — no real processes or git repos needed.
 
+### End-to-end TUI tests with Textual's Pilot
+
+**Default to writing real e2e tests for any user-visible behavior.** A
+unit test that asserts on internal state can pass while the actual UX is
+broken — too many bugs hide between "the function returned the right
+value" and "the user pressed a key and the right thing happened."
+
+Textual ships a headless harness (`App.run_test()`) that drives our app
+exactly like a user. There's no real terminal — Textual swaps in a
+`HeadlessDriver` that captures rendered frames into memory. The returned
+`Pilot` object exposes `press(...)`, `click(...)`, `pause(...)` etc.
+Outside pilot calls, `app.focused`, `app.query_one(...)`, widget
+properties — all live and assertable.
+
+**Canonical example:** `tests/test_watch_navigation.py` covers the
+`actor watch` arrow-key navigation. `tests/test_interactive_widget.py`
+covers the embedded TerminalWidget against a real `/bin/cat` PTY.
+
+**The pattern:**
+
+```python
+class WatchSomething(unittest.IsolatedAsyncioTestCase):
+    async def test_something(self):
+        app = ActorWatchApp(animate=False)  # animate=False skips splash delay
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("a")              # focus actor tree
+            await pilot.pause(0.05)             # let the app process
+            self.assertIs(app.focused, app.query_one(ActorTree))
+```
+
+**Things I learned the hard way:**
+
+- **Async glue is just `IsolatedAsyncioTestCase`** — each test method is
+  `async def` and `await`s the pilot. No event-loop boilerplate.
+- **Don't sleep on a fixed timer — poll a condition.** If the app does
+  work in `on_ready` (DB fetch, layout settle), wait by re-checking
+  state after a small `pilot.pause(0.05)` instead of a hopeful
+  `pilot.pause(2)`. Same pattern as the existing `interactive_widget`
+  tests.
+- **Splash screens block input.** Boot with `animate=False` (we wired
+  this up specifically for tests) or wait for `app._splash_active` to
+  flip before pressing anything.
+- **State isolation is on you.** `App.run_test` doesn't mock the
+  filesystem or env. For DB-backed tests, patch `HOME` to a tempdir +
+  insert fixture rows so each test reads from a fresh state. See
+  `_setup_home()` in `tests/test_watch_navigation.py`.
+- **Mutation-test your e2e tests.** A passing test isn't proof — flip
+  the production code temporarily and re-run; if the test still passes,
+  it's theatre and you need a stronger assertion. Found this out the
+  hard way: my arrow-nav runtime tests passed even when I removed
+  `priority=True` from the binding (Textual's RichLog `wrap=True`
+  behaves more leniently than I assumed). The compile-time guard
+  (asserting on `BINDINGS`) caught the regression where the runtime
+  tests didn't. Both kinds have their place.
+
+Reference: [Textual docs — Testing](https://textual.textualize.io/guide/testing/) covers
+`Pilot`, the headless driver, and the snapshot-test pattern.
+
 ## Key runtime paths
 
 - **Database:** `~/.actor/actor.db` (SQLite, auto-created)
