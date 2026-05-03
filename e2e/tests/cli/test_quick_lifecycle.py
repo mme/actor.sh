@@ -17,17 +17,32 @@ class QuickLifecycleTests(unittest.TestCase):
                 self.assertEqual(r.returncode, 0, msg=r.stderr)
             self.assertEqual(env.list_actor_names(), [])
 
-    def test_create_discard_create_with_worktree(self):
-        # Verifies the discard-doesn't-clean-branch bug from a different angle.
+    def test_discard_preserves_branch_and_recreate_fails(self):
+        # Documented contract: discard intentionally does NOT delete
+        # the underlying git branch. The default on-discard hook
+        # (`git diff --quiet`) only catches unstaged modifications,
+        # so destroying the branch on discard would silently lose
+        # committed work. Recovery for the recreate case is `git
+        # branch -D <name>` in the source repo, or rename the new
+        # actor.
+        import subprocess
         with isolated_home() as env:
             r1 = env.run_cli(["new", "alice"])
             self.assertEqual(r1.returncode, 0, msg=r1.stderr)
+            actor = env.fetch_actor("alice")
+            source_repo = actor.source_repo
             r2 = env.run_cli(["discard", "alice"])
             self.assertEqual(r2.returncode, 0, msg=r2.stderr)
+            # Branch survives the discard.
+            branches = subprocess.run(
+                ["git", "branch", "--list", "alice"],
+                cwd=source_repo, capture_output=True, text=True,
+            )
+            self.assertIn("alice", branches.stdout)
+            # Recreate fails honestly with "branch already exists".
             r3 = env.run_cli(["new", "alice"])
-            # If discard cleans the branch, this works. Otherwise:
-            # branch already exists.
-            self.assertEqual(r3.returncode, 0, msg=r3.stderr)
+            self.assertNotEqual(r3.returncode, 0)
+            self.assertIn("already exists", r3.stderr.lower())
 
 
 if __name__ == "__main__":

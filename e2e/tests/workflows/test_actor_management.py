@@ -48,10 +48,31 @@ class ActorManagementWorkflowTests(unittest.TestCase):
             self.assertEqual(fast.config.agent_args.get("model"), "haiku")
             self.assertEqual(slow.config.agent_args.get("model"), "opus")
 
-    def test_discard_then_recreate_same_name(self):
+    def test_discard_then_recreate_same_name_with_no_worktree_works(self):
+        # Without a worktree, no branch is created; recreate is fine.
+        with isolated_home() as env:
+            env.run_cli(["new", "alice", "--no-worktree"])
+            env.run_cli(["discard", "alice", "--force"])
+            r = env.run_cli(["new", "alice", "--no-worktree"])
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+
+    def test_discard_then_recreate_same_name_after_branch_cleanup(self):
+        # With a worktree, discard intentionally leaves the git branch
+        # so committed work isn't lost (default on-discard hook only
+        # checks unstaged modifications). Recovery for the recreate
+        # case is to remove the branch manually.
+        import subprocess
         with isolated_home() as env:
             env.run_cli(["new", "alice"])
+            actor = env.fetch_actor("alice")
+            source_repo = actor.source_repo
             env.run_cli(["discard", "alice", "--force"])
+            # Manual cleanup the user would do after seeing
+            # "branch already exists":
+            subprocess.run(
+                ["git", "branch", "-D", "alice"],
+                cwd=source_repo, check=True, capture_output=True,
+            )
             r = env.run_cli(["new", "alice"])
             self.assertEqual(r.returncode, 0, msg=r.stderr)
 

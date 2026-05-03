@@ -1013,6 +1013,14 @@ def cmd_discard(
     # here also aborts the discard (no DB delete) unless force —
     # otherwise the user would end up with a dangling worktree on
     # disk and no DB row referring to it.
+    #
+    # Intentionally NOT deleting the underlying git branch: the
+    # default on-discard hook is `git diff --quiet`, which only
+    # checks unstaged modifications — committed work would be
+    # silently destroyed. The trade-off is that `actor new <same>`
+    # after discard fails with "branch already exists"; recovery is
+    # `git branch -D <name>` in the source repo (or rename the new
+    # actor). See discussion in the discard contract docs.
     if actor.worktree and actor.source_repo:
         wt_path = Path(actor.dir)
         if wt_path.is_dir():
@@ -1030,19 +1038,6 @@ def cmd_discard(
                         f"failed to remove worktree {wt_path} for actor "
                         f"'{name}': {e}"
                     ) from e
-        # Also delete the actor's git branch so `actor new <same-name>`
-        # later doesn't fail with "branch already exists". The branch
-        # name matches the actor name (see cmd_new). Best-effort —
-        # branch may already be gone if remove_worktree pruned it, or
-        # may be checked out elsewhere; warn rather than abort.
-        try:
-            git.delete_branch(Path(actor.source_repo), name)
-        except Exception as e:
-            print(
-                f"warning: failed to delete branch '{name}' in "
-                f"{actor.source_repo} during discard: {e}",
-                file=sys.stderr,
-            )
 
     db.delete_actor(name)
     discarded.append(f"{name} discarded")

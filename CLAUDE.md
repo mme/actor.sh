@@ -389,6 +389,18 @@ hooks {
 Project hooks override user hooks per event (same merge rule as
 roles).
 
+### What discard does NOT clean up
+
+`actor discard` removes the worktree and the DB row, but
+**intentionally leaves the underlying git branch in place**. The
+default `on-discard` hook (`git diff --quiet`) only catches unstaged
+modifications — committed work would be silently destroyed if the
+branch were force-deleted on discard. The trade-off is that
+`actor new <same-name>` after discard fails with "branch already
+exists"; the user recovers with `git branch -D <name>` in the source
+repo (after confirming the branch's commits are merged or
+unwanted), or by picking a different name for the new actor.
+
 ## Watch theme
 
 The `actor watch` TUI ships with `claude-dark` / `claude-light`. If it
