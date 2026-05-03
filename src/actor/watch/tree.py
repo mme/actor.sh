@@ -153,26 +153,33 @@ class ActorTree(Tree[Actor]):
         new_snapshot = {a.name: statuses.get(a.name, Status.IDLE) for a in actors}
         actor_by_name = {a.name: a for a in actors}
 
-        if new_snapshot == self._snapshot:
-            # Names + statuses unchanged from a TUI standpoint, but
-            # the actor row underneath could have been replaced — a
-            # discard+recreate that lands within one poll window
-            # gives us the same name with a new session_id, new dir,
-            # etc. Refresh node.data so downstream consumers
-            # (`_refresh_logs`, `_refresh_detail`) see the new row.
+        # `group_by_parent` is the single source of truth for ordering
+        # (status precedence, then most-recently-updated within the
+        # group). Compare the desired root order to the current one so
+        # status transitions and `updated_at` bumps trigger a rebuild
+        # — without this, `actor run` finishing or `actor config`
+        # bumping a row leaves the tree's order frozen.
+        by_parent = group_by_parent(actors, statuses)
+        desired_root_order = [a.name for a in by_parent.get(None, [])]
+        current_root_order = [
+            c.data.name for c in self.root.children if c.data is not None
+        ]
+        structure_changed = set(new_snapshot.keys()) != set(self._snapshot.keys())
+        order_changed = desired_root_order != current_root_order
+
+        if not structure_changed and not order_changed:
+            # In-place fast path: same set of actors, same root
+            # ordering. Refresh node.data so a discard+recreate within
+            # one poll window swaps in the new row, then refresh
+            # labels if any status flipped.
             self._refresh_node_data(self.root, actor_by_name)
+            if new_snapshot != self._snapshot:
+                self._refresh_all_labels(self.root)
+                self._snapshot = new_snapshot
             return
 
-        if set(new_snapshot.keys()) == set(self._snapshot.keys()):
-            # Same actors, status changed — update labels in place.
-            # Same data-staleness concern as the snapshot-equal path
-            # above; refresh node.data alongside the labels.
-            self._refresh_node_data(self.root, actor_by_name)
-            self._refresh_all_labels(self.root)
-            self._snapshot = new_snapshot
-            return
-
-        # Structure changed — full rebuild
+        # Either the actor set changed or existing rows need to
+        # reshuffle. Full rebuild — preserves cursor + expanded set.
         selected_name = None
         if self.cursor_node and self.cursor_node.data:
             selected_name = self.cursor_node.data.name
@@ -182,7 +189,6 @@ class ActorTree(Tree[Actor]):
 
         self.clear()
         self._snapshot = new_snapshot
-        by_parent = group_by_parent(actors, statuses)
         visited: set[str] = set()
 
         def _add_children(parent_node, parent_key: str | None) -> None:

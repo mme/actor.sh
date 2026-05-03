@@ -790,7 +790,6 @@ class ActorWatchApp(App):
         self._overview_header_actor = actor
 
         colors = self._overview_palette()
-        title_color, title_label = self._status_pill(status, colors)
         info = self._repo_info_by_actor.get(actor.name)
         if info is None:
             self._kick_repo_info_build(actor)
@@ -1181,22 +1180,6 @@ class ActorWatchApp(App):
             except Exception:
                 return RUNNING_FRAMES[0]
         return STATUS_ICON.get(status, "")
-
-    @staticmethod
-    def _status_pill(
-        status: Status, colors: dict[str, str],
-    ) -> tuple[str, str]:
-        """Return (color, label) for the status pill on the right of
-        the header. The color is a resolved hex from the palette
-        dict so Rich can apply it without going through Textual's
-        CSS variable layer."""
-        mapping = {
-            Status.RUNNING: (colors["primary"], "RUNNING"),
-            Status.DONE: (colors["success"], "DONE"),
-            Status.ERROR: (colors["error"], "ERROR"),
-            Status.IDLE: ("dim", "IDLE"),
-        }
-        return mapping.get(status, ("dim", status.value.upper()))
 
     @staticmethod
     def _format_agent_line(actor: Actor) -> str:

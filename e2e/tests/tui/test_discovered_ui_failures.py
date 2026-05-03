@@ -1,225 +1,163 @@
-"""e2e TUI: realistic actor-watch log-pane failures found with Pilot.
+"""e2e TUI: actor tree fails to re-sort when statuses change.
 
-Every test below drives the current `actor watch` OVERVIEW log pane.
-These are not future/spec-only features; each failure is a current
-user workflow where the visible RichLog stays stale or misses newly
-available log content.
+`helpers.group_by_parent` defines a status-based ordering (RUNNING <
+ERROR < IDLE < DONE < STOPPED), but `ActorTree.update_actors` only
+runs the sort when the set of actor names changes. Status transitions
+that happen on a stable name set leave the tree's order stale —
+finished actors stay above newly-running ones, etc. Each test below
+sets up a known-stable name set, triggers a status change, and asserts
+the order updated.
 """
 from __future__ import annotations
 
-import json
+import subprocess
+import time
 import unittest
-from datetime import datetime, timezone
-from pathlib import Path
 
 from e2e.harness.fakes_control import claude_responds
 from e2e.harness.isolated_home import isolated_home
-from e2e.harness.pilot import select_actor, wait_for_actor_in_tree, watch_app
+from e2e.harness.pilot import wait_for_actor_in_tree, watch_app
 
 
 class DiscoveredActorWatchUiFailures(unittest.IsolatedAsyncioTestCase):
 
-    async def _log_text(self, app) -> str:
-        from textual.widgets import RichLog
+    def _actor_tree_names(self, app) -> list[str]:
+        from actor.watch.app import ActorTree
 
-        log = app.query_one("#logs-content", RichLog)
-        return "\n".join(str(line) for line in getattr(log, "lines", []))
+        tree = app.query_one(ActorTree)
+        return [node.data.name for node in tree.root.children if node.data]
 
-    async def _wait_for_log_marker(self, app, pilot, marker: str) -> str:
-        rendered = ""
-        for _ in range(60):
-            await pilot.pause(0.1)
-            rendered = await self._log_text(app)
-            if marker in rendered:
-                break
-        return rendered
-
-    async def test_logs_switching_between_actors_shows_selected_actor_log(self):
+    async def test_actor_tree_reorders_when_running_actor_finishes(self):
         with isolated_home() as env:
-            env.run_cli(["new", "alpha", "prompt a"], **claude_responds("ALPHA_LOG"))
-            env.run_cli(["new", "beta", "prompt b"], **claude_responds("BETA_LOG"))
-            async with watch_app(env, size=(100, 30)) as (app, pilot):
-                await select_actor(pilot, app, "alpha")
-                await self._wait_for_log_marker(app, pilot, "ALPHA_LOG")
-
-                await select_actor(pilot, app, "beta")
-                rendered = await self._wait_for_log_marker(app, pilot, "BETA_LOG")
-
-                self.assertIn("BETA_LOG", rendered)
-                self.assertNotIn("ALPHA_LOG", rendered)
-
-    async def test_logs_stream_appended_frames_for_selected_actor(self):
-        with isolated_home() as env:
-            env.run_cli(["new", "alpha", "first"], **claude_responds("FIRST_LOG"))
-            actor = env.fetch_actor("alpha")
-
-            from actor.agents.claude import ClaudeAgent
-
-            encoded = ClaudeAgent._encode_dir(Path(actor.dir))
-            log_path = (
-                env.home
-                / ".claude"
-                / "projects"
-                / encoded
-                / f"{actor.agent_session}.jsonl"
+            env.run_cli(["new", "bravo"])
+            proc = subprocess.Popen(
+                ["actor", "new", "golf", "short task"],
+                env=env.env(**claude_responds("ok", sleep=1.0)),
+                cwd=str(env.cwd),
             )
+            try:
+                time.sleep(0.2)
+                async with watch_app(env, size=(100, 30)) as (app, pilot):
+                    await wait_for_actor_in_tree(pilot, app, "golf", timeout=8)
+                    await wait_for_actor_in_tree(pilot, app, "bravo", timeout=8)
+                    self.assertEqual(self._actor_tree_names(app)[:2],
+                                     ["golf", "bravo"])
 
-            async with watch_app(env, size=(100, 30)) as (app, pilot):
-                await select_actor(pilot, app, "alpha")
-                await self._wait_for_log_marker(app, pilot, "FIRST_LOG")
-                with log_path.open("a") as f:
-                    f.write(json.dumps({
-                        "type": "assistant",
-                        "message": {"content": [
-                            {"type": "text", "text": "APPENDED_LOG"},
-                        ]},
-                        "timestamp": datetime.now(timezone.utc).strftime(
-                            "%Y-%m-%dT%H:%M:%SZ"
-                        ),
-                    }) + "\n")
+                    proc.wait(timeout=5)
+                    for _ in range(50):
+                        await pilot.pause(0.1)
+                        status = app._prev_statuses.get("golf")
+                        if status is not None and status.value == "done":
+                            break
 
-                rendered = await self._wait_for_log_marker(app, pilot, "APPENDED_LOG")
-                self.assertIn("APPENDED_LOG", rendered)
+                    self.assertEqual(
+                        self._actor_tree_names(app)[:2],
+                        ["bravo", "golf"],
+                        "actor tree keeps a completed actor above an idle actor",
+                    )
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=5)
 
-    async def test_logs_stream_appended_user_frames_for_selected_actor(self):
+    async def test_actor_tree_reorders_when_existing_actor_starts_running(self):
         with isolated_home() as env:
-            env.run_cli(["new", "alpha", "first"], **claude_responds("FIRST_LOG"))
-            actor = env.fetch_actor("alpha")
-
-            from actor.agents.claude import ClaudeAgent
-
-            encoded = ClaudeAgent._encode_dir(Path(actor.dir))
-            log_path = (
-                env.home
-                / ".claude"
-                / "projects"
-                / encoded
-                / f"{actor.agent_session}.jsonl"
-            )
-
+            env.run_cli(["new", "hotel", "done"], **claude_responds("ok"))
+            env.run_cli(["new", "india"])
             async with watch_app(env, size=(100, 30)) as (app, pilot):
-                await select_actor(pilot, app, "alpha")
-                await self._wait_for_log_marker(app, pilot, "FIRST_LOG")
-                with log_path.open("a") as f:
-                    f.write(json.dumps({
-                        "type": "user",
-                        "message": {"content": "APPENDED_USER_LOG"},
-                        "timestamp": datetime.now(timezone.utc).strftime(
-                            "%Y-%m-%dT%H:%M:%SZ"
-                        ),
-                    }) + "\n")
+                await wait_for_actor_in_tree(pilot, app, "hotel", timeout=8)
+                await wait_for_actor_in_tree(pilot, app, "india", timeout=8)
+                self.assertEqual(self._actor_tree_names(app)[:2],
+                                 ["india", "hotel"])
 
-                rendered = await self._wait_for_log_marker(
-                    app, pilot, "APPENDED_USER_LOG"
+                proc = subprocess.Popen(
+                    ["actor", "run", "hotel", "again"],
+                    env=env.env(**claude_responds("ok", sleep=5)),
+                    cwd=str(env.cwd),
                 )
-                self.assertIn("APPENDED_USER_LOG", rendered)
+                try:
+                    time.sleep(0.4)
+                    for _ in range(50):
+                        await pilot.pause(0.1)
+                        status = app._prev_statuses.get("hotel")
+                        if status is not None and status.value == "running":
+                            break
 
-    async def test_logs_extend_when_selected_actor_runs_again(self):
-        # `actor run` resumes the actor's existing session (same
-        # session_id, JSONL appended in place), so the log should
-        # extend — OLD turn stays, NEW turn lands underneath. If we
-        # got OLD without NEW, the renderer dropped the appended
-        # frames; that's the bug to catch here.
+                    self.assertEqual(
+                        self._actor_tree_names(app)[:2],
+                        ["hotel", "india"],
+                        "actor tree leaves a newly running actor below idle actors",
+                    )
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.wait(timeout=5)
+
+    async def test_actor_tree_reorders_when_running_actor_is_stopped(self):
         with isolated_home() as env:
-            env.run_cli(["new", "alpha", "old"], **claude_responds("OLD_TURN"))
-            async with watch_app(env, size=(100, 30)) as (app, pilot):
-                await select_actor(pilot, app, "alpha")
-                await self._wait_for_log_marker(app, pilot, "OLD_TURN")
+            env.run_cli(["new", "kilo"])
+            proc = subprocess.Popen(
+                ["actor", "new", "juliet", "long task"],
+                env=env.env(**claude_responds("ok", sleep=5)),
+                cwd=str(env.cwd),
+            )
+            try:
+                time.sleep(0.5)
+                async with watch_app(env, size=(100, 30)) as (app, pilot):
+                    await wait_for_actor_in_tree(pilot, app, "juliet", timeout=8)
+                    await wait_for_actor_in_tree(pilot, app, "kilo", timeout=8)
+                    self.assertEqual(self._actor_tree_names(app)[:2],
+                                     ["juliet", "kilo"])
 
-                env.run_cli(["run", "alpha", "new"], **claude_responds("NEW_TURN"))
-                rendered = await self._wait_for_log_marker(app, pilot, "NEW_TURN")
+                    env.run_cli(["stop", "juliet"], timeout=10)
+                    proc.wait(timeout=5)
+                    for _ in range(50):
+                        await pilot.pause(0.1)
+                        status = app._prev_statuses.get("juliet")
+                        if status is not None and status.value == "stopped":
+                            break
 
-                self.assertIn("NEW_TURN", rendered)
-                self.assertIn("OLD_TURN", rendered)
+                    self.assertEqual(
+                        self._actor_tree_names(app)[:2],
+                        ["kilo", "juliet"],
+                        "actor tree keeps a stopped actor above an idle actor",
+                    )
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=5)
 
-    async def test_logs_refresh_for_discarded_and_recreated_actor_name(self):
-        # Discard preserves the git branch (default on-discard hook
-        # only catches unstaged changes — destroying the branch on
-        # discard would silently lose committed work). The user-side
-        # recovery for reusing the name is `git branch -D <name>` in
-        # the source repo; reproduce that here, then assert that the
-        # log pane swaps to the new session's content (different
-        # session_id → bucket popped → NEW_ALPHA replaces OLD_ALPHA).
-        import subprocess
+    async def test_actor_tree_reorders_when_actor_metadata_updates(self):
         with isolated_home() as env:
-            env.run_cli(["new", "alpha", "old"], **claude_responds("OLD_ALPHA"))
-            actor = env.fetch_actor("alpha")
-            source_repo = actor.source_repo
+            env.run_cli(["new", "lima"])
+            time.sleep(0.05)
+            env.run_cli(["new", "mike"])
             async with watch_app(env, size=(100, 30)) as (app, pilot):
-                await select_actor(pilot, app, "alpha")
-                await self._wait_for_log_marker(app, pilot, "OLD_ALPHA")
+                await wait_for_actor_in_tree(pilot, app, "lima", timeout=8)
+                await wait_for_actor_in_tree(pilot, app, "mike", timeout=8)
+                self.assertEqual(self._actor_tree_names(app)[:2],
+                                 ["mike", "lima"])
 
-                env.run_cli(["discard", "alpha", "--force"])
+                time.sleep(0.05)
+                env.run_cli(["config", "lima", "effort=max"])
                 for _ in range(50):
                     await pilot.pause(0.1)
-                    if "alpha" not in env.list_actor_names():
-                        break
-                subprocess.run(
-                    ["git", "branch", "-D", "alpha"],
-                    cwd=source_repo, check=True, capture_output=True,
+                    for node in app.query_one("#actor-tree").root.children:
+                        if (
+                            node.data
+                            and node.data.name == "lima"
+                            and node.data.config.agent_args.get("effort") == "max"
+                        ):
+                            break
+                    else:
+                        continue
+                    break
+
+                self.assertEqual(
+                    self._actor_tree_names(app)[:2],
+                    ["lima", "mike"],
+                    "actor tree does not move the most recently updated actor",
                 )
-                env.run_cli(["new", "alpha", "new"], **claude_responds("NEW_ALPHA"))
-                await wait_for_actor_in_tree(pilot, app, "alpha", timeout=8)
-                await select_actor(pilot, app, "alpha")
-                rendered = await self._wait_for_log_marker(app, pilot, "NEW_ALPHA")
-
-                self.assertIn("NEW_ALPHA", rendered)
-                self.assertNotIn("OLD_ALPHA", rendered)
-
-    async def test_logs_show_background_append_when_actor_is_selected_later(self):
-        with isolated_home() as env:
-            env.run_cli(["new", "alpha", "first"], **claude_responds("FIRST_ALPHA"))
-            env.run_cli(["new", "beta", "first"], **claude_responds("FIRST_BETA"))
-            actor = env.fetch_actor("alpha")
-
-            from actor.agents.claude import ClaudeAgent
-
-            encoded = ClaudeAgent._encode_dir(Path(actor.dir))
-            log_path = (
-                env.home
-                / ".claude"
-                / "projects"
-                / encoded
-                / f"{actor.agent_session}.jsonl"
-            )
-
-            async with watch_app(env, size=(100, 30)) as (app, pilot):
-                await select_actor(pilot, app, "beta")
-                await self._wait_for_log_marker(app, pilot, "FIRST_BETA")
-                with log_path.open("a") as f:
-                    f.write(json.dumps({
-                        "type": "assistant",
-                        "message": {"content": [
-                            {"type": "text", "text": "ALPHA_BACKGROUND_LOG"},
-                        ]},
-                        "timestamp": datetime.now(timezone.utc).strftime(
-                            "%Y-%m-%dT%H:%M:%SZ"
-                        ),
-                    }) + "\n")
-                await pilot.pause(2.5)
-
-                await select_actor(pilot, app, "alpha")
-                rendered = await self._wait_for_log_marker(
-                    app, pilot, "ALPHA_BACKGROUND_LOG"
-                )
-                self.assertIn("ALPHA_BACKGROUND_LOG", rendered)
-                self.assertNotIn("FIRST_BETA", rendered)
-
-    async def test_logs_show_background_run_when_actor_is_selected_later(self):
-        with isolated_home() as env:
-            env.run_cli(["new", "alpha", "old"], **claude_responds("OLD_ALPHA"))
-            env.run_cli(["new", "beta", "first"], **claude_responds("FIRST_BETA"))
-            async with watch_app(env, size=(100, 30)) as (app, pilot):
-                await select_actor(pilot, app, "beta")
-                await self._wait_for_log_marker(app, pilot, "FIRST_BETA")
-
-                env.run_cli(["run", "alpha", "new"], **claude_responds("NEW_ALPHA"))
-                await pilot.pause(2.5)
-
-                await select_actor(pilot, app, "alpha")
-                rendered = await self._wait_for_log_marker(app, pilot, "NEW_ALPHA")
-                self.assertIn("NEW_ALPHA", rendered)
-                self.assertNotIn("FIRST_BETA", rendered)
 
 
 if __name__ == "__main__":
