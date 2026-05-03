@@ -29,9 +29,6 @@ jobs:
       - name: Install actor CLI on PATH (needed by e2e harness)
         run: uv tool install -e .
 
-      - name: Run e2e suite (informational, non-blocking)
-        # The e2e suite is being filled out incrementally — green is the
-        # goal but not the gate. Surfaces the run output so we can see
-        # what's failing without blocking unrelated PRs.
+      - name: Run e2e suite
+        # Hard gate: regressions surface as PR check failures.
         run: uv run python -m unittest discover e2e
-        continue-on-error: true
