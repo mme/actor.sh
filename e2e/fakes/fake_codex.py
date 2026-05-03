@@ -135,6 +135,16 @@ def _write_rollout(parsed: dict) -> None:
     if response is None:
         response = f"[fake codex] received: {parsed['prompt'] or '(no prompt)'}"
 
+    # First emitted line MUST contain `thread_id` — actor.sh's
+    # CodexAgent reads stdout's first line to capture the session id
+    # (so subsequent runs can `codex exec resume <id>`).
+    print(json.dumps({
+        "type": "thread.started",
+        "thread_id": sid,
+        "model": parsed["model"] or "default",
+    }))
+    sys.stdout.flush()
+
     frames: list[dict] = []
     frames.append({
         "type": "session_meta",
@@ -191,8 +201,14 @@ def _write_rollout(parsed: dict) -> None:
         for frame in frames:
             f.write(json.dumps(frame) + "\n")
 
-    if parsed["subcommand"] == "exec":
-        print(response)
+    # actor.sh's CodexAgent relay reads `item.completed` events with
+    # an `agent_message` item. Emit one so the actor's output appears
+    # in `actor logs`.
+    print(json.dumps({
+        "type": "item.completed",
+        "item": {"type": "agent_message", "text": response},
+    }))
+    sys.stdout.flush()
 
 
 def _maybe_crash() -> None:
