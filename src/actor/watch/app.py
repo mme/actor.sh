@@ -604,6 +604,21 @@ class ActorWatchApp(App):
         self.call_from_thread(self._update_ui, actors, statuses)
 
     def _update_ui(self, actors: list[Actor], statuses: dict[str, Status]) -> None:
+        # Worker callback. The app may already be tearing down by the
+        # time this lands (the test harness exits faster than the
+        # periodic poll cancels). When the DOM is gone, bail rather
+        # than letting NoMatches propagate out of a Worker — that
+        # surfaces as a hard failure in `run_test` even though it's
+        # just a benign teardown race.
+        from textual.css.query import NoMatches
+        try:
+            self._update_ui_unsafe(actors, statuses)
+        except NoMatches:
+            return
+
+    def _update_ui_unsafe(
+        self, actors: list[Actor], statuses: dict[str, Status]
+    ) -> None:
         # Overlay INTERACTIVE status for actors with a live terminal
         # session. This is display-only — the DB Run row is still
         # RUNNING/STOPPED/etc.
@@ -665,7 +680,10 @@ class ActorWatchApp(App):
             pass
 
     def _refresh_detail(self) -> None:
-        actor_list = self.query_one(ActorTree)
+        try:
+            actor_list = self.query_one(ActorTree)
+        except Exception:
+            return
         actor = actor_list.selected_actor
         if actor is None:
             self._clear_detail()
@@ -2868,7 +2886,14 @@ class ActorWatchApp(App):
             self.action_enter_interactive()
 
     def on_tree_node_highlighted(self, event) -> None:
-        tree = self.query_one(ActorTree)
+        # The tree may already be torn down by the time a queued
+        # highlight event is dispatched (e.g. on app shutdown after a
+        # quick keystroke burst). Bail rather than crash.
+        from textual.css.query import NoMatches
+        try:
+            tree = self.query_one(ActorTree)
+        except NoMatches:
+            return
         prefer_interactive = not tree.consume_mouse_highlight()
         self._refresh_detail()
         self._maybe_refresh_diff()
@@ -3182,8 +3207,16 @@ class ActorWatchApp(App):
         self._sync_detail_view()
         # The terminal widget just unmounted — drop focus onto the tree
         # so the user can immediately navigate to another actor.
-        self.set_focus(None)
-        self.call_after_refresh(lambda: self.query_one(ActorTree).focus())
+        try:
+            self.set_focus(None)
+        except Exception:
+            return
+        def _focus_tree() -> None:
+            try:
+                self.query_one(ActorTree).focus()
+            except Exception:
+                pass
+        self.call_after_refresh(_focus_tree)
 
     def get_system_commands(self, screen):
         """Filter Textual's default system-command list and add
@@ -3412,7 +3445,10 @@ class ActorWatchApp(App):
 
     def _focus_detail_content(self, tab_id: str | None = None) -> None:
         if tab_id is None:
-            tabs = self.query_one("#tabs", TabbedContent)
+            try:
+                tabs = self.query_one("#tabs", TabbedContent)
+            except Exception:
+                return
             tab_id = tabs.active
 
         if tab_id == "interactive":
@@ -3477,7 +3513,15 @@ class ActorWatchApp(App):
         self._focus_actor_tree()
 
     def _tree_has_focus(self) -> bool:
-        return self.focused is self.query_one(ActorTree)
+        # Guard against teardown races: queries during the message-pump
+        # shutdown can hit a screen stack that's already been popped or
+        # a DOM that no longer contains the tree. Either way, "tree
+        # has focus" can't be true when there's nothing to focus, so
+        # return False rather than letting the exception propagate.
+        try:
+            return self.focused is self.query_one(ActorTree)
+        except Exception:
+            return False
 
     def action_navigate_left(self) -> None:
         if self._tree_has_focus():

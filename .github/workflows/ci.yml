@@ -23,5 +23,12 @@ jobs:
           done
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Run tests
+      - name: Run unit tests
         run: uv run python -m unittest discover tests
+
+      - name: Install actor CLI on PATH (needed by e2e harness)
+        run: uv tool install -e .
+
+      - name: Run e2e suite
+        # Hard gate: regressions surface as PR check failures.
+        run: uv run python -m unittest discover e2e

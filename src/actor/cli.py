@@ -475,15 +475,30 @@ def main(argv: Optional[List[str]] = None) -> None:
             if prompt:
                 try:
                     agent = agent_for(args.name)
-                    cmd_run(
+                    run_output = cmd_run(
                         db, agent, proc_mgr,
                         name=args.name,
                         prompt=prompt,
                         cli_overrides=ActorConfig(),  # creation flags already saved as defaults
                         app_config=app_config,
                     )
+                    if run_output:
+                        print(run_output, end="" if run_output.endswith("\n") else "\n")
                 except Exception as e:
                     print(f"error: actor created but run failed: {e}", file=sys.stderr)
+                    sys.exit(2)
+                # Propagate the agent's exit code if the run failed —
+                # otherwise `actor new foo "task"` would mask broken
+                # agents behind a 0 exit. `isinstance` guard so mocked
+                # tests that return MagicMocks don't trip it.
+                run_row = db.latest_run(args.name)
+                if (run_row is not None
+                        and isinstance(getattr(run_row, "exit_code", None), int)
+                        and run_row.exit_code != 0):
+                    print(
+                        f"error: run for '{args.name}' exited {run_row.exit_code}",
+                        file=sys.stderr,
+                    )
                     sys.exit(2)
 
         elif args.command == "run":
@@ -515,13 +530,29 @@ def main(argv: Optional[List[str]] = None) -> None:
             agent_cls = _agent_class(actor_row.agent)
             cli_overrides = _build_cli_overrides(agent_cls, list(args.config))
             agent = _create_agent(actor_row.agent)
-            cmd_run(
+            run_output = cmd_run(
                 db, agent, proc_mgr,
                 name=args.name,
                 prompt=prompt,
                 cli_overrides=cli_overrides,
                 app_config=app_config_run,
             )
+            # Show the agent's response so the user gets feedback
+            # without having to run `actor logs` after.
+            if run_output:
+                print(run_output, end="" if run_output.endswith("\n") else "\n")
+            # Propagate run exit code — silent success on a failed run
+            # was confusing. `isinstance` guard so mocked tests that
+            # return MagicMocks don't trip it.
+            run_row = db.latest_run(args.name)
+            if (run_row is not None
+                    and isinstance(getattr(run_row, "exit_code", None), int)
+                    and run_row.exit_code != 0):
+                print(
+                    f"error: run for '{args.name}' exited {run_row.exit_code}",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
 
         elif args.command == "list":
             output = cmd_list(db, proc_mgr, status_filter=args.status)

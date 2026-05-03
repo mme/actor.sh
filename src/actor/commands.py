@@ -225,7 +225,15 @@ def cmd_new(
         try:
             base_dir = Path(dir).resolve(strict=True)
         except (OSError, ValueError) as e:
-            raise ActorError(f"cannot resolve --dir: {e}")
+            # `Path.resolve(strict=True)` reports the deepest existing
+            # ancestor in OSError, not the original path. Include the
+            # caller's input verbatim so the message points at what
+            # they typed.
+            raise ActorError(f"cannot resolve --dir {dir!r}: {e}")
+        if not base_dir.is_dir():
+            raise ActorError(
+                f"--dir {dir!r} is not a directory"
+            )
     else:
         base_dir = Path.cwd()
 
@@ -677,6 +685,9 @@ def cmd_show(db: Database, pm: ProcessManager, name: str, runs_limit: int) -> st
     if actor.base_branch is not None:
         output += f"Base:      {actor.base_branch}\n"
 
+    if actor.parent is not None:
+        output += f"Parent:    {actor.parent}\n"
+
     # Display-only: merge both buckets for the user-facing `Config:` line.
     # Both dicts are disjoint by construction (an ACTOR_DEFAULTS key only
     # lands in actor_keys; everything else lands in agent_args), so the
@@ -802,15 +813,33 @@ def cmd_config(db: Database, name: str, config_pairs: List[str]) -> str:
     # agent class whitelist. This is the single boundary where user-entered
     # flat pairs get lifted into the split structure; the merge itself and
     # all downstream layers operate positionally.
-    updates = parse_config(config_pairs)
+    #
+    # `key=` (explicit empty value) deletes the key from the stored
+    # config rather than persisting an empty string. Bare `key` (no
+    # `=`) means "boolean flag" and stays as "" — the convention used
+    # by parse_config. The CLI pair-by-pair distinguishes:
+    #   "model="    → delete (split returns ("model", ""), delete=True)
+    #   "verbose"   → set to "" (no `=` in the input)
+    pairs_with_intent: list[tuple[str, str, bool]] = []
+    for pair in config_pairs:
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            pairs_with_intent.append((k, v, v == ""))  # delete iff value empty
+        else:
+            pairs_with_intent.append((pair, "", False))  # bare key, set to ""
+
     agent_cls = _agent_class(actor.agent)
     new_actor_keys = dict(actor.config.actor_keys)
     new_agent_args = dict(actor.config.agent_args)
-    for k, v in updates.items():
-        if k in agent_cls.ACTOR_DEFAULTS:
-            new_actor_keys[k] = v
+    for k, v, delete in pairs_with_intent:
+        target = (
+            new_actor_keys if k in agent_cls.ACTOR_DEFAULTS
+            else new_agent_args
+        )
+        if delete:
+            target.pop(k, None)
         else:
-            new_agent_args[k] = v
+            target[k] = v
     new_config = ActorConfig(
         actor_keys=_sorted_config(new_actor_keys),
         agent_args=_sorted_config(new_agent_args),
@@ -984,6 +1013,14 @@ def cmd_discard(
     # here also aborts the discard (no DB delete) unless force —
     # otherwise the user would end up with a dangling worktree on
     # disk and no DB row referring to it.
+    #
+    # Intentionally NOT deleting the underlying git branch: the
+    # default on-discard hook is `git diff --quiet`, which only
+    # checks unstaged modifications — committed work would be
+    # silently destroyed. The trade-off is that `actor new <same>`
+    # after discard fails with "branch already exists"; recovery is
+    # `git branch -D <name>` in the source repo (or rename the new
+    # actor). See discussion in the discard contract docs.
     if actor.worktree and actor.source_repo:
         wt_path = Path(actor.dir)
         if wt_path.is_dir():
