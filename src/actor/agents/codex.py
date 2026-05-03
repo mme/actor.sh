@@ -41,6 +41,11 @@ class CodexAgent(Agent):
     ACTOR_DEFAULTS: Dict[str, str] = {
         "use-subscription": "true",
     }
+    # codex has no first-class system-prompt CLI flag (instructions live in
+    # AGENTS.md / config.toml). Until that gap is bridged we surface the
+    # limitation loudly at actor creation rather than silently dropping
+    # the role's prompt.
+    SYSTEM_PROMPT_KEY: Optional[str] = None
 
     def __init__(self) -> None:
         self._children: Dict[int, _CodexChild] = {}

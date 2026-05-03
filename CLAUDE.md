@@ -2,13 +2,22 @@
 
 Manages multiple Claude/Codex agents running in isolated git worktrees.
 
+## Status: pre-release
+
+actor.sh has not had a public release yet. There are no users to keep
+on an old shape. **Do not add backwards-compatibility mechanisms** —
+no soft aliases, no deprecation warnings, no migration errors, no
+shims for renamed flags or moved config nodes. Rename, restructure,
+delete; update tests and docs to match. The codebase should always
+read as if the current shape is the only one that ever existed.
+
 ## Project structure
 
 ```
 src/actor/               # Python package
   cli.py                 # argparse CLI, command dispatch
   commands.py            # Command implementations (cmd_new, cmd_run, cmd_list, etc.)
-  config.py              # KDL loader for ~/.actor/settings.kdl + <repo>/.actor/settings.kdl — templates
+  config.py              # KDL loader for ~/.actor/settings.kdl + <repo>/.actor/settings.kdl — roles
   setup.py               # 'actor setup' / 'actor update' — deploy bundled skill + register MCP
   server.py              # MCP server entry point
   db.py                  # SQLite database layer (~/.actor/actor.db)
@@ -39,9 +48,6 @@ tests/
   test_*.py              # unittest suites
 spec/
   V2.md                  # V2 vision (MCP server, channels, dashboard, plugin)
-  PLAN.md                # Plan root index
-  PLAN-STAGE1.md         # Stage 1 implementation plan (minimal MCP server)
-  PLAN-CONFIG-SYSTEM.md  # Config / templates implementation plan
   DASHBOARD.md           # Watch dashboard spec
 ```
 
@@ -64,15 +70,26 @@ actor setup --for claude-code                    # user-wide
 actor setup --for claude-code --scope project    # project-local
 ```
 
-Launch a session that has the actor channel enabled:
+Launch the orchestrator session (claude with the `main` role applied
+and the actor channel enabled):
 
 ```bash
-actor claude                                      # wraps `claude --dangerously-load-development-channels server:actor`
+actor main                                        # appends main role's prompt + adds channel flag
+actor main "kick off the refactor"                # one-shot
+actor main --model opus                           # forwards trailing args to claude
 ```
 
-Sub-claudes spawned by actors inherit the same flag automatically (see
-`ClaudeAgent._CHANNEL_ARGS`), so nested actors can receive completion
-notifications too.
+`actor main` resolves the `main` role from settings.kdl (built-in if
+not overridden), takes its `prompt` as `--append-system-prompt`, and
+execs `claude --dangerously-load-development-channels server:actor
+[args...]`. Override the built-in by adding `role "main" { ... }` to
+`~/.actor/settings.kdl` (user) or `<repo>/.actor/settings.kdl`
+(project). Today only `agent "claude"` is supported on this command;
+overriding the role to use codex fails with a clear error.
+
+Sub-claudes spawned by actors inherit the channel flag automatically
+(see `ClaudeAgent._CHANNEL_ARGS`), so nested actors can receive
+completion notifications too.
 
 For dev work, after editing `src/actor/_skill/*.md`:
 
@@ -117,7 +134,7 @@ Local dev installs (`uv sync`) get a PEP 440 dev version like
 `actor --version`, the MCP server's announced version, and the deployed
 SKILL.md all agree and the drift check still works.
 
-## Config files & templates
+## Config files & roles
 
 `actor new` reads `~/.actor/settings.kdl` (user-wide) and
 `<repo>/.actor/settings.kdl` (project-local, discovered by walking up from
@@ -128,73 +145,89 @@ There is no `actor init` — create the file by hand (the `.actor/`
 directory is also used for worktrees and the SQLite DB, so it typically
 already exists).
 
-Templates are named presets for `actor new`:
+Roles are named presets for `actor new`:
 
 ```kdl
-template "qa" {
+role "reviewer" {
+    description "Concise code review; flag bugs and style issues."
     agent "claude"
     model "opus"
-    prompt "You're a QA engineer. Write tests for the changed code."
+    prompt "You are a senior code reviewer. Be concise; flag bugs, security issues, and style violations. Don't fix anything — report findings only."
 }
 ```
 
-Usage: `actor new foo --template qa` applies the template's agent + config +
-prompt. Explicit CLI flags (`--agent`, `--model`, `--config`, positional
-prompt / stdin) override the template. `agent` and `prompt` are promoted to
-top-level fields; every other child is stored as a config key (values
-coerced to strings).
+Usage: `actor new auth-review --role reviewer "Review src/auth/*.py for security issues"`.
+
+The role's `prompt` is the actor's **system prompt** (the role's
+identity / behavioral guidance), injected as `--append-system-prompt`
+for claude actors. The CLI's positional prompt is the **task**. They
+coexist — `--append-system-prompt` layers the role's identity on top
+of Claude Code's defaults; the task tells the actor what to do.
+
+`agent`, `prompt`, and `description` are promoted to top-level fields;
+every other child is stored as a config key (values coerced to
+strings). Explicit CLI flags (`--agent`, `--model`, `--config`)
+override the role's values for those slots; the per-call prompt is the
+task (it doesn't compete with the role's system prompt).
+
+Codex doesn't yet support role-level system prompts. A role with `prompt`
+and `agent "codex"` is rejected at `actor new` time with a clear error.
+
+To see what's defined, run `actor roles`. If a role-name typo lands in
+`actor new --role <bad>`, the error lists the available names.
+
+A built-in `main` role exists by default — the Master Orchestrator
+preset used by `actor main`. Override it with a `role "main" { ... }`
+block in settings.kdl to swap in your own orchestrator system prompt
+(whole-role replacement; there is no per-field merge).
 
 ### Per-agent defaults
 
-`agent "claude" { … }` / `agent "codex" { … }` blocks set defaults that
-apply to every actor of that kind:
+`defaults "claude" { … }` / `defaults "codex" { … }` blocks set
+defaults that apply to every actor of that kind:
 
 ```kdl
-agent "claude" {
+defaults "claude" {
     use-subscription true
-    defaults {
-        permission-mode "auto"
-        model "opus"
-    }
+    permission-mode "auto"
+    model "opus"
 }
 
-agent "codex" {
-    defaults {
-        m "o3"
-        sandbox "workspace-write"
-    }
+defaults "codex" {
+    m "o3"
+    sandbox "workspace-write"
 }
 ```
 
-Two shapes live inside an `agent` block:
+All keys live in one flat namespace. Each key is routed at parse time
+by checking the agent class's `ACTOR_DEFAULTS` whitelist:
 
-- **Flat keys** (e.g. `use-subscription`) are actor-sh interpreted —
-  they're never forwarded to the agent binary. The whitelist of allowed
-  flat keys per agent is `ACTOR_DEFAULTS` on the Agent subclass (currently
-  just `use-subscription` for both agents). Unknown flat keys raise
-  `ConfigError`.
-- **`defaults { }` children** become CLI flags on the agent binary.
-  Claude uses semantic long flags: `permission-mode "auto"` →
+- **Whitelisted keys** (e.g. `use-subscription`) are actor-sh
+  interpreted — they're never forwarded to the agent binary. The
+  whitelist per agent is `ACTOR_DEFAULTS` on the Agent subclass
+  (currently just `use-subscription` for both agents).
+- **Everything else** becomes a CLI flag on the agent binary. Claude
+  uses semantic long flags: `permission-mode "auto"` →
   `--permission-mode auto`. Codex uses native flag names verbatim:
   1-character keys become short flags (`m "o3"` → `-m o3`, `a "never"`
   → `-a never`), longer keys become long flags (`sandbox
-  "workspace-write"` → `--sandbox workspace-write`).
+  "workspace-write"` → `--sandbox workspace-write`). Unknown agent-arg
+  keys are forwarded as-is, the agent binary decides whether they're
+  valid.
 
 A `null` value cancels a lower-precedence default:
 
 ```kdl
-agent "claude" {
-    defaults {
-        permission-mode null   # drop the built-in "auto" default
-    }
+defaults "claude" {
+    permission-mode null   # drop the built-in "auto" default
 }
 ```
 
 Merge precedence at actor creation (`actor new`), lowest → highest:
 class `AGENT_DEFAULTS` + `ACTOR_DEFAULTS` (hardcoded on the Agent
-subclass) → user kdl `agent` block → project kdl `agent` block →
-template config (`--template`) → CLI `--config key=value`. The resolved
-merge is snapshotted into the DB at creation; later edits to
+subclass) → user kdl `defaults` block → project kdl `defaults` block →
+role config (`--role`) → CLI `--config key=value`. The
+resolved merge is snapshotted into the DB at creation; later edits to
 `settings.kdl` don't retroactively change existing actors — use `actor
 config <name> key=value` to mutate an actor's stored config. At run
 time (`actor run`), the stored config is the base and per-run
@@ -212,8 +245,8 @@ Built-in class defaults today:
 
 Unknown top-level nodes (e.g. `alias`) are silently ignored for
 forward-compat with follow-up tickets. A `defaults { ... }` block
-inside a template is rejected with a helpful error pointing users at
-the per-agent `agent "..." { defaults { ... } }` shape.
+inside a role is rejected with a helpful error pointing users at the
+per-agent `defaults "<name>" { ... }` shape.
 
 Load programmatically via `actor.config.load_config(cwd=..., home=...)` —
 both args default to `Path.cwd()` / `$HOME` so tests can inject temp dirs.
@@ -250,7 +283,7 @@ hooks {
   still reports the missing path so the script can detect it.
 
 Project hooks override user hooks per event (same merge rule as
-templates).
+roles).
 
 ## Watch theme
 

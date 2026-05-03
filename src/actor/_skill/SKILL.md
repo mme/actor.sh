@@ -1,7 +1,7 @@
 ---
 name: actor
 description: Manage coding agents running tasks in parallel. Use when the user wants to start, monitor, or finish background coding tasks — e.g. "spin up an actor to fix the auth module", "start three actors", "what are my actors doing", "make a PR for that actor".
-allowed-tools: mcp__actor__list_actors mcp__actor__show_actor mcp__actor__logs_actor mcp__actor__stop_actor mcp__actor__discard_actor mcp__actor__config_actor mcp__actor__new_actor mcp__actor__run_actor Bash(actor *)
+allowed-tools: mcp__actor__list_actors mcp__actor__show_actor mcp__actor__logs_actor mcp__actor__stop_actor mcp__actor__discard_actor mcp__actor__config_actor mcp__actor__new_actor mcp__actor__run_actor mcp__actor__list_roles Bash(actor *)
 ---
 
 # Actor — Parallel Coding Agent Orchestrator
@@ -9,7 +9,7 @@ allowed-tools: mcp__actor__list_actors mcp__actor__show_actor mcp__actor__logs_a
 <!-- BEGIN AUTO-UPDATED BY actor setup/update -->
 <!-- END AUTO-UPDATED BY actor setup/update -->
 
-You are an orchestrator that manages multiple coding agents running in parallel. Each agent runs in its own git worktree (by default) and has its own session that persists across runs.
+This skill exposes the actor.sh MCP tools for managing parallel coding agents (each in its own git worktree). **Behavioral guidance — when to spawn vs reuse, how to verify completion, when to escalate to the user, etc. — lives in your system prompt** (loaded by `actor main` from the resolved `main` role). This file is the tool reference.
 
 ## MCP is required for a good experience
 
@@ -33,9 +33,9 @@ This skill is designed around the `mcp__actor__*` tools. They return immediately
 >
 > 3. Launch a new session with:
 >    ```
->    actor claude
+>    actor main
 >    ```
->    (this enables channel notifications so the session learns when actors finish.)
+>    (this loads the `main` role's system prompt and enables channel notifications so the session learns when actors finish.)
 
 Only fall back to the CLI (see [cli.md](cli.md)) if the user explicitly prefers to skip MCP setup. When using the CLI fallback, completion is not pushed — you won't know when an actor finishes without asking.
 
@@ -45,17 +45,21 @@ Only fall back to the CLI (see [cli.md](cli.md)) if the user explicitly prefers 
 - **Codex (via MCP):** **NOT currently supported.** Codex does not forward MCP server notifications into the model's conversation — tracked in [openai/codex#17543](https://github.com/openai/codex/issues/17543) and [#18056](https://github.com/openai/codex/issues/18056). Actors spawned from Codex would finish silently; the model would never know. Tell the user to use Claude Code for actor.sh, or wait until Codex ships MCP notification forwarding.
 - **Other MCP-capable agents:** works if the agent routes custom notifications to the model's conversation. Check your host's docs.
 
-## Core Rules
+## Tool-call constraints
 
-1. **Actor runs are background work.** `new_actor` and `run_actor` return immediately; a channel notification arrives when each run completes. React when it arrives.
-2. **Each actor run MUST be its own tool call.** Never batch multiple `new_actor` / `run_actor` calls in one combined tool use — completion notifications get mis-routed.
-3. **ALWAYS read the notification when an actor finishes.** The actor may have asked a question, proposed a plan, or reported an error. You cannot know what happened without reading the notification body.
-4. **Do NOT use `logs_actor` for routine output.** The finish notification is your primary source. Only call `logs_actor` when the user explicitly asks or you need historical context.
-5. **Choose descriptive actor names.** The name becomes the git branch. Use lowercase with hyphens: `fix-auth`, `refactor-nav`, `add-tests`.
-6. **One actor per independent task.** Multiple parallel asks → multiple actors.
-7. **Use worktrees by default in git repos.** Each actor gets its own checkout so parallel work doesn't collide. Only pass `no_worktree=True` when the user explicitly asks or the directory is not a git repo.
-8. **Stay responsive.** Tell the user the actors are running and continue the conversation. Report results when the notification arrives.
-9. **Only check status when asked.** Don't proactively `list_actors` / `show_actor` / `logs_actor` unless the user asks.
+A few rules are mechanical (not behavioral) — they're about how the channel
+plumbing works, not how to manage tasks:
+
+1. **Each `new_actor` / `run_actor` MUST be its own tool call.** Never batch
+   multiple in one combined tool use — completion notifications get
+   mis-routed.
+2. **Actor names are git branch names.** Lowercase-with-hyphens:
+   `fix-auth`, `refactor-nav`, `add-tests`.
+3. **`no_worktree=True` only on explicit user request** or when the dir
+   isn't a git repo. Otherwise let actor.sh create the worktree.
+
+For everything else (when to spawn, when to verify, when to escalate to
+the user, how to compose prompts) — see your system prompt.
 
 ## Commands Reference
 
@@ -72,12 +76,12 @@ new_actor(name="fix-nav", prompt="...", no_worktree=True)                   # no
 new_actor(name="fix-nav", prompt="...", config=["model=opus"])              # saved defaults
 ```
 
-### Templates
+### Roles
 
-Templates are named bundles of actor defaults. They live in KDL files that
+Roles are named bundles of actor defaults. They live in KDL files that
 the user edits directly — there is no `actor init` command, so use the
 Read / Write / Edit tools when the user asks to view, add, or change a
-template.
+role.
 
 **File locations** (both optional; create whichever fits the user's ask):
 
@@ -86,14 +90,15 @@ template.
   from the current directory (git-style), so any cwd inside the repo sees
   it.
 
-**Precedence:** when the same template name appears in both files, the
-project file wins. Users can set a baseline template in `~/.actor/` and
+**Precedence:** when the same role name appears in both files, the
+project file wins. Users can set a baseline role in `~/.actor/` and
 override it per-repo.
 
-**Template block syntax:**
+**Role block syntax:**
 
 ```kdl
-template "qa" {
+role "qa" {
+    description "Run tests after changes; report failures concisely."
     agent "claude"
     model "opus"
     effort "max"
@@ -101,23 +106,38 @@ template "qa" {
     prompt "You're a QA engineer. Run the tests, report what fails."
 }
 
-template "reviewer" {
+role "reviewer" {
+    description "Concise code review; flag bugs and style issues."
     agent "claude"
     model "sonnet"
     prompt "You're a code reviewer. Be concise."
 }
 ```
 
-**Valid keys inside a template:**
+**Valid keys inside a role:**
 
 - `agent` (string) — `"claude"` or `"codex"`. Sets which CLI the actor runs.
-- `prompt` (string) — default prompt used when the user doesn't pass one
-  on the CLI.
+- `prompt` (string) — the role's **system prompt** (its identity /
+  behavioral guidance). Injected as `--append-system-prompt` for claude
+  agents. NOT a default task prompt — the per-call task is passed
+  separately and they coexist. Codex doesn't yet support role-level
+  system prompts; using `prompt` with `agent "codex"` is rejected at
+  actor creation.
+- `description` (string, optional) — short "when to use this role" line.
+  Surfaced by `actor roles` (CLI) and `mcp__actor__list_roles` (MCP) so
+  you can pick the right role without re-reading settings.kdl.
 - Any key from the agent's config reference ([claude-config.md](claude-config.md),
   [codex-config.md](codex-config.md)) — e.g. `model`, `effort`,
   `use-subscription`, `max-budget-usd`. Values may be strings, booleans, or
   numbers; they're all coerced to strings to match the actor config
   pipeline.
+
+**Discover what's defined.** Call `mcp__actor__list_roles` (MCP) or run
+`actor roles` (CLI) before applying a role — both print the same table
+of name, agent, and description, drawn live from the merged
+user+project settings.kdl. A built-in `main` role (claude + a short
+system prompt) is always present and can be overridden by a `role
+"main" { ... }` block in settings.kdl.
 
 Unknown top-level nodes (`alias`) parse as no-ops today — they're
 reserved for follow-up tickets. Malformed KDL raises an error with the
@@ -152,41 +172,40 @@ hooks {
 
 Project hooks override user hooks per event.
 
-**Per-agent defaults** live alongside templates and apply automatically
+**Per-agent defaults** live alongside roles and apply automatically
 to every new actor of that agent kind:
 
 ```kdl
-agent "claude" {
+defaults "claude" {
     use-subscription true
-    defaults {
-        permission-mode "auto"
-        model "opus"
-    }
+    permission-mode "auto"
+    model "opus"
 }
 
-agent "codex" {
-    defaults {
-        m "o3"
-        sandbox "workspace-write"
-    }
+defaults "codex" {
+    m "o3"
+    sandbox "workspace-write"
 }
 ```
 
-- **Flat keys** (outside `defaults { }`) are actor-sh controls. Today
-  only `use-subscription` is valid (strips `ANTHROPIC_API_KEY` /
-  `OPENAI_API_KEY` from the child env so the subscription login is
-  used instead of the API key).
-- **Keys inside `defaults { }`** map directly to the agent binary's
-  CLI flags. Claude uses semantic long flags (`model`, `permission-mode`).
-  Codex uses whatever flag names `codex` itself accepts — `-m` / `-a`
+All keys live in one flat namespace. Each key is routed at parse time
+by checking the agent class's `ACTOR_DEFAULTS` whitelist:
+
+- **Whitelisted keys** (today only `use-subscription` for both agents)
+  are actor-sh controls — `use-subscription` strips `ANTHROPIC_API_KEY`
+  / `OPENAI_API_KEY` from the child env so the subscription login is
+  used instead of the API key.
+- **Everything else** maps directly to the agent binary's CLI flags.
+  Claude uses semantic long flags (`model`, `permission-mode`). Codex
+  uses whatever flag names `codex` itself accepts — `-m` / `-a`
   (short), `--sandbox` / `--config` (long). No translation layer on
   either side.
 - **`null` cancels a lower-precedence value.** For example, a project
-  file can set `permission-mode null` under `agent "claude"` to erase
-  a user-level default without forcing a replacement.
+  file can set `permission-mode null` under `defaults "claude"` to
+  erase a user-level default without forcing a replacement.
 
 Precedence at `actor new` (low → high): class-level hardcoded defaults →
-user kdl → project kdl → template → CLI `--config`. The resolved merge
+user kdl → project kdl → role → CLI `--config`. The resolved merge
 is snapshotted onto the actor at creation time; later kdl edits don't
 retroactively mutate existing actors (use `actor config <name>` for
 that).
@@ -196,22 +215,30 @@ Built-in class defaults (no kdl file needed):
 - Codex: `use-subscription "true"`, `sandbox "danger-full-access"`,
   `a "never"`.
 
-**Applying a template** (CLI only — see note below):
+**Applying a role** (MCP):
 
-```bash
-actor new fix-auth --template qa                          # apply template
-actor new fix-auth --template qa --config model=haiku     # CLI overrides template
-actor new fix-auth --template qa --agent codex            # CLI agent beats template
-actor new fix-auth --template qa "custom prompt"          # CLI prompt beats template
+```
+new_actor(name="auth-review", role="reviewer", prompt="Review src/auth/*.py for security issues; report findings.")
 ```
 
-Explicit CLI flags (`--agent`, `--model`, `--config`, positional prompt,
-stdin) always beat the template's values.
+The role's `prompt` field is the actor's *system prompt* (injected as
+`--append-system-prompt` for claude). The `prompt` parameter you pass at
+the call site is the *task*. They coexist — the role gives the actor an
+identity, the task tells it what to do.
 
-**MCP note:** the `mcp__actor__new_actor` tool does not yet accept a
-`template` parameter. When the user asks for a templated actor, call
-`actor new … --template …` via the Bash tool instead. This is a known
-gap; a follow-up will add it to the MCP tool.
+Per-call `agent` / `config` / `use_subscription` parameters override the
+role's values for those slots. If the role name is wrong, the error
+lists the available names. If the role has a `prompt` and uses
+`agent "codex"`, actor creation fails — codex doesn't yet support
+role-level system prompts.
+
+**CLI equivalent:**
+
+```bash
+actor new auth-review --role reviewer "Review src/auth/*.py..."     # role + task
+actor new auth-review --role reviewer --config model=haiku "..."    # CLI overrides role config
+actor new auth-review --role reviewer --agent codex "..."           # CLI agent beats role (errors if role has a prompt)
+```
 
 ### Create without running
 
@@ -303,22 +330,49 @@ After finish: discard.
 ### User: "start a codex actor to fix the API"
 `new_actor(name="fix-api", agent="codex", prompt="Fix the /users API endpoint — it returns 500 on missing email field")`
 
-### User: "start an actor on the backend repo to fix the API"
-`new_actor(name="fix-api", dir="/path/to/backend-repo", prompt="Fix the /users API endpoint — it returns 500 on missing email field")`
+### Applying a role: "have a code reviewer look at the auth module"
+First check what roles are defined (don't guess names):
 
-## Crafting Prompts for Actors
+`list_roles()`
 
-Be explicit about what you expect. Actors are autonomous — they'll ask questions if the task is ambiguous unless you tell them not to.
+Then apply the role and pass the task as the per-call `prompt`. The role's
+`prompt` field is the actor's *system prompt* (its identity); the per-call
+`prompt` is the *task*:
 
-- **Just build:** end with "Do not ask questions. Just implement it."
-- **Questions welcome:** "If anything is unclear, stop and describe what you need clarification on."
+`new_actor(name="auth-review", role="reviewer", prompt="Review src/auth/*.py for security issues; report findings, don't fix.")`
 
-Choose based on context.
+### Applying a role for repeated work: "spin up a designer for the new feature"
+`new_actor(name="onboarding-design", role="designer", prompt="Design the onboarding flow — propose 2-3 layouts and pick one.")`
 
-## Important Notes
+### Spawning against a different repo (not the orchestrator's cwd)
+By default, sub-actors create their worktree from the directory the
+orchestrator was launched in (i.e. wherever the user ran `actor main`).
+If the user wants work done on a different repo, pass `dir` as an
+**absolute path** (relative paths resolve against the MCP server's cwd
+— fragile and surprising; expand `~` to the absolute home first):
 
-- Actors run autonomous-leaning by default — Claude uses `permission-mode "auto"` (agent decides when to ask; effectively autonomous inside a worktree), Codex uses `sandbox "danger-full-access"` + `a "never"` (truly unrestricted). To fully bypass Claude's permission checks, set `permission-mode "bypassPermissions"`. See the agent config reference for other options.
-- Each actor gets its own git worktree by default so parallel actors don't conflict.
-- Actor sessions persist — multiple runs against the same actor keep context.
-- If an actor errors, check verbose logs (`logs_actor(name=..., verbose=True)`) and retry with `run_actor`.
-- When the user says "kick off", "spin up", "start", "launch", or "create an actor" — that means `new_actor(name=..., prompt=...)`.
+`new_actor(name="fix-backend-api", dir="/home/user/work/backend", prompt="Fix the /users API endpoint — returns 500 on missing email")`
+
+When unsure which repo to use, ask the user before spawning.
+
+## Runtime facts
+
+These are mechanical defaults that affect tool calls, not behavioral
+guidance:
+
+- Claude actors run with `permission-mode "auto"` by default
+  (autonomous inside the worktree); set `permission-mode
+  "bypassPermissions"` via `config=[...]` to fully bypass permission
+  checks.
+- Codex actors run with `sandbox "danger-full-access"` + `a "never"`
+  by default (truly unrestricted).
+- Each actor gets its own git worktree by default; pass
+  `no_worktree=True` only when the user explicitly asks or the dir
+  isn't a git repo.
+- Actor sessions persist — multiple `run_actor` calls against the
+  same actor keep agent context across runs.
+- On error, `logs_actor(name=..., verbose=True)` shows tool calls +
+  thinking + timestamps for diagnosis.
+
+For everything else (when to spawn, when to verify, how to compose
+task prompts, when to escalate to the user), see your system prompt.

@@ -20,7 +20,7 @@ from actor import (
     # Database
     Database,
     # Commands
-    cmd_new, cmd_run, cmd_list, cmd_show, cmd_stop, cmd_config, cmd_logs, cmd_discard,
+    cmd_new, cmd_run, cmd_list, cmd_roles, cmd_show, cmd_stop, cmd_config, cmd_logs, cmd_discard,
     cmd_interactive, INTERACTIVE_PROMPT,
     # Helpers
     truncate, format_duration,
@@ -616,26 +616,26 @@ class TestCmdNew(unittest.TestCase):
 
 
 # ──────────────────────────────────────────────────────────────────────
-#  Test: cmd_new with --template (ticket #29)
+#  Test: cmd_new with --role (ticket #29)
 # ──────────────────────────────────────────────────────────────────────
 
-class TestCmdNewTemplate(unittest.TestCase):
+class TestCmdNewRole(unittest.TestCase):
 
     def _db(self) -> Database:
         return Database.open(":memory:")
 
     def _cfg_with_qa(self):
-        from actor import AppConfig, Template
-        return AppConfig(templates={
-            "qa": Template(
+        from actor import AppConfig, Role
+        return AppConfig(roles={
+            "qa": Role(
                 name="qa",
-                agent="codex",
-                prompt="you're qa",
+                agent="claude",
+                prompt="You are a QA engineer.",
                 config={"model": "opus", "effort": "max"},
             ),
         })
 
-    def test_template_applies_agent_and_config(self):
+    def test_role_applies_agent_and_config(self):
         db = self._db()
         git = FakeGit()
         actor = cmd_new(
@@ -646,14 +646,16 @@ class TestCmdNewTemplate(unittest.TestCase):
             base=None,
             agent_name=None,
             cli_overrides=ActorConfig(),
-            template_name="qa",
+            role_name="qa",
             app_config=self._cfg_with_qa(),
         )
-        self.assertEqual(actor.agent, AgentKind.CODEX)
+        self.assertEqual(actor.agent, AgentKind.CLAUDE)
         self.assertEqual(actor.config.agent_args["model"], "opus")
         self.assertEqual(actor.config.agent_args["effort"], "max")
 
-    def test_cli_agent_overrides_template_agent(self):
+    def test_role_prompt_becomes_append_system_prompt(self):
+        # role.prompt is the role's identity (system prompt), injected as
+        # claude's --append-system-prompt flag via the agent_args dict.
         db = self._db()
         git = FakeGit()
         actor = cmd_new(
@@ -662,14 +664,120 @@ class TestCmdNewTemplate(unittest.TestCase):
             dir="/tmp",
             no_worktree=True,
             base=None,
+            agent_name=None,
+            cli_overrides=ActorConfig(),
+            role_name="qa",
+            app_config=self._cfg_with_qa(),
+        )
+        self.assertEqual(
+            actor.config.agent_args.get("append-system-prompt"),
+            "You are a QA engineer.",
+        )
+
+    def test_role_with_codex_agent_and_prompt_rejected(self):
+        # Codex has no first-class system-prompt CLI flag, so applying a
+        # role with `prompt` to a codex actor must fail loudly rather than
+        # silently dropping the prompt.
+        from actor import AppConfig, Role
+        from actor.errors import ConfigError
+        db = self._db()
+        git = FakeGit()
+        cfg = AppConfig(roles={
+            "qa": Role(name="qa", agent="codex", prompt="You are a QA engineer."),
+        })
+        with self.assertRaises(ConfigError) as ctx:
+            cmd_new(
+                db, git,
+                name="fix-auth",
+                dir="/tmp",
+                no_worktree=True,
+                base=None,
+                agent_name=None,
+                cli_overrides=ActorConfig(),
+                role_name="qa",
+                app_config=cfg,
+            )
+        msg = str(ctx.exception)
+        self.assertIn("codex", msg)
+        self.assertIn("system prompt", msg)
+
+    def test_role_with_codex_no_prompt_works(self):
+        # A codex role without a `prompt` field is fine — only the
+        # system-prompt path triggers the codex limitation.
+        from actor import AppConfig, Role
+        db = self._db()
+        git = FakeGit()
+        cfg = AppConfig(roles={
+            "code": Role(name="code", agent="codex", config={"m": "o3"}),
+        })
+        actor = cmd_new(
+            db, git,
+            name="x",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name=None,
+            cli_overrides=ActorConfig(),
+            role_name="code",
+            app_config=cfg,
+        )
+        self.assertEqual(actor.agent, AgentKind.CODEX)
+        self.assertEqual(actor.config.agent_args["m"], "o3")
+
+    def test_explicit_append_system_prompt_in_role_config_beats_role_prompt(self):
+        # If the role both sets `prompt "X"` and includes
+        # `append-system-prompt "Y"` in its config, the explicit config
+        # key wins. The prompt-derived default uses setdefault.
+        from actor import AppConfig, Role
+        db = self._db()
+        git = FakeGit()
+        cfg = AppConfig(roles={
+            "qa": Role(
+                name="qa",
+                agent="claude",
+                prompt="prompt-field value",
+                config={"append-system-prompt": "config-key value"},
+            ),
+        })
+        actor = cmd_new(
+            db, git,
+            name="x",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name=None,
+            cli_overrides=ActorConfig(),
+            role_name="qa",
+            app_config=cfg,
+        )
+        self.assertEqual(
+            actor.config.agent_args["append-system-prompt"],
+            "config-key value",
+        )
+
+    def test_cli_agent_overrides_role_agent(self):
+        # Agent override has to use a role without a prompt so the
+        # codex-without-system-prompt path stays valid.
+        from actor import AppConfig, Role
+        db = self._db()
+        git = FakeGit()
+        cfg = AppConfig(roles={
+            "qa": Role(name="qa", agent="codex", config={"m": "o3"}),
+        })
+        actor = cmd_new(
+            db, git,
+            name="fix-auth",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
             agent_name="claude",
             cli_overrides=ActorConfig(),
-            template_name="qa",
-            app_config=self._cfg_with_qa(),
+            role_name="qa",
+            app_config=cfg,
         )
         self.assertEqual(actor.agent, AgentKind.CLAUDE)
 
-    def test_cli_config_pair_overrides_template_config(self):
+    def test_cli_config_pair_overrides_role_config(self):
         db = self._db()
         git = FakeGit()
         actor = cmd_new(
@@ -680,17 +788,19 @@ class TestCmdNewTemplate(unittest.TestCase):
             base=None,
             agent_name=None,
             cli_overrides=_cli('model=haiku'),
-            template_name="qa",
+            role_name="qa",
             app_config=self._cfg_with_qa(),
         )
         self.assertEqual(actor.config.agent_args["model"], "haiku")
         self.assertEqual(actor.config.agent_args["effort"], "max")
 
-    def test_unknown_template_raises_config_error(self):
+    def test_unknown_role_raises_config_error(self):
         from actor.errors import ConfigError
         db = self._db()
         git = FakeGit()
-        with self.assertRaises(ConfigError):
+        # The error message must list the available role names so the user
+        # can recover without opening settings.kdl.
+        with self.assertRaises(ConfigError) as ctx:
             cmd_new(
                 db, git,
                 name="fix-auth",
@@ -699,11 +809,33 @@ class TestCmdNewTemplate(unittest.TestCase):
                 base=None,
                 agent_name=None,
                 cli_overrides=ActorConfig(),
-                template_name="does-not-exist",
+                role_name="does-not-exist",
                 app_config=self._cfg_with_qa(),
             )
+        msg = str(ctx.exception)
+        self.assertIn("does-not-exist", msg)
+        self.assertIn("qa", msg)
 
-    def test_no_template_backward_compatible(self):
+    def test_unknown_role_with_no_roles_defined(self):
+        from actor import AppConfig
+        from actor.errors import ConfigError
+        db = self._db()
+        git = FakeGit()
+        with self.assertRaises(ConfigError) as ctx:
+            cmd_new(
+                db, git,
+                name="x",
+                dir="/tmp",
+                no_worktree=True,
+                base=None,
+                agent_name=None,
+                cli_overrides=ActorConfig(),
+                role_name="qa",
+                app_config=AppConfig(),
+            )
+        self.assertIn("no roles defined", str(ctx.exception))
+
+    def test_cmd_new_without_role(self):
         db = self._db()
         git = FakeGit()
         actor = cmd_new(
@@ -718,7 +850,7 @@ class TestCmdNewTemplate(unittest.TestCase):
         self.assertEqual(actor.agent, AgentKind.CLAUDE)
         self.assertEqual(actor.config.agent_args["model"], "sonnet")
 
-    def test_agent_name_none_without_template_defaults_to_claude(self):
+    def test_agent_name_none_without_role_defaults_to_claude(self):
         db = self._db()
         git = FakeGit()
         actor = cmd_new(
@@ -735,7 +867,7 @@ class TestCmdNewTemplate(unittest.TestCase):
 
 class TestCmdNewAgentDefaults(unittest.TestCase):
     """Precedence ladder: class defaults -> kdl agent_defaults ->
-    template -> CLI."""
+    role -> CLI."""
 
     def _db(self) -> Database:
         return Database.open(":memory:")
@@ -752,7 +884,7 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
             base=None,
             agent_name="claude",
             cli_overrides=ActorConfig(),
-            template_name=None,
+            role_name=None,
             app_config=AppConfig(),
         )
         self.assertEqual(actor.config.agent_args.get("permission-mode"), "auto")
@@ -844,13 +976,13 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
         # Other class defaults still apply.
         self.assertEqual(actor.config.actor_keys.get("use-subscription"), "true")
 
-    def test_template_overrides_kdl_agent_defaults(self):
-        from actor import AgentDefaults, AppConfig, Template
+    def test_role_overrides_kdl_agent_defaults(self):
+        from actor import AgentDefaults, AppConfig, Role
         db = self._db()
         git = FakeGit()
         app = AppConfig(
-            templates={
-                "qa": Template(name="qa", config={"permission-mode": "plan"}),
+            roles={
+                "qa": Role(name="qa", config={"permission-mode": "plan"}),
             },
             agent_defaults={
                 "claude": AgentDefaults(agent_args={"permission-mode": "auto"}),
@@ -864,18 +996,18 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
             base=None,
             agent_name="claude",
             cli_overrides=ActorConfig(),
-            template_name="qa",
+            role_name="qa",
             app_config=app,
         )
         self.assertEqual(actor.config.agent_args.get("permission-mode"), "plan")
 
-    def test_cli_overrides_template_over_kdl_over_class_defaults(self):
-        from actor import AgentDefaults, AppConfig, Template
+    def test_cli_overrides_role_over_kdl_over_class_defaults(self):
+        from actor import AgentDefaults, AppConfig, Role
         db = self._db()
         git = FakeGit()
         app = AppConfig(
-            templates={
-                "qa": Template(
+            roles={
+                "qa": Role(
                     name="qa",
                     config={"permission-mode": "plan", "extra": "tpl"},
                 ),
@@ -895,7 +1027,7 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
             base=None,
             agent_name="claude",
             cli_overrides=_cli('model=haiku'),
-            template_name="qa",
+            role_name="qa",
             app_config=app,
         )
         self.assertEqual(actor.config.agent_args.get("model"), "haiku")            # CLI wins
@@ -936,10 +1068,8 @@ class TestCmdNewAgentDefaults(unittest.TestCase):
             kdl = Path(cwd) / ".actor" / "settings.kdl"
             kdl.parent.mkdir()
             kdl.write_text(
-                'agent "claude" {\n'
-                '    defaults {\n'
-                '        permission-mode null\n'
-                '    }\n'
+                'defaults "claude" {\n'
+                '    permission-mode null\n'
                 '}\n'
             )
             cfg = load_config(cwd=Path(cwd), home=Path(home))
@@ -1385,6 +1515,51 @@ class TestCmdList(unittest.TestCase):
         self.assertNotIn("dead", output)
         lines = output.splitlines()
         self.assertEqual(len(lines), 2)  # header + 1 actor
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  Test: cmd_roles
+# ──────────────────────────────────────────────────────────────────────
+
+class TestCmdRoles(unittest.TestCase):
+
+    def test_empty_config_emits_help_message(self):
+        from actor import AppConfig
+        out = cmd_roles(AppConfig())
+        self.assertIn("No roles defined", out)
+        self.assertIn("settings.kdl", out)
+
+    def test_roles_listed_with_agent_and_description(self):
+        from actor import AppConfig, Role
+        cfg = AppConfig(roles={
+            "qa": Role(
+                name="qa",
+                agent="claude",
+                description="Run tests; report failures.",
+            ),
+            "reviewer": Role(
+                name="reviewer",
+                agent="codex",
+                description="Concise code review.",
+            ),
+        })
+        out = cmd_roles(cfg)
+        self.assertIn("NAME", out)
+        self.assertIn("AGENT", out)
+        self.assertIn("DESCRIPTION", out)
+        self.assertIn("qa", out)
+        self.assertIn("reviewer", out)
+        self.assertIn("claude", out)
+        self.assertIn("codex", out)
+        self.assertIn("Run tests; report failures.", out)
+        # Sorted alphabetically: qa appears after reviewer.
+        self.assertLess(out.index("qa"), out.index("reviewer"))
+
+    def test_role_without_agent_defaults_to_claude_in_listing(self):
+        from actor import AppConfig, Role
+        cfg = AppConfig(roles={"r": Role(name="r")})
+        out = cmd_roles(cfg)
+        self.assertIn("claude", out)
 
 
 # ──────────────────────────────────────────────────────────────────────

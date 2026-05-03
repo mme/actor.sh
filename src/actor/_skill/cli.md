@@ -36,18 +36,19 @@ actor new fix-nav --dir /path/to/repo "..."                                 # wo
 actor new fix-nav --no-worktree "..."                                       # no worktree
 actor new fix-nav --config model=opus "..."                                 # saved defaults
 actor new fix-nav --no-use-subscription "..."                               # pass API keys through
-actor new fix-nav --template qa                                             # apply a template from settings.kdl
+actor new fix-nav --role qa                                                 # apply a role from settings.kdl
 echo "fix it" | actor new fix-nav                                           # prompt from stdin
 ```
 
-Templates come from `~/.actor/settings.kdl` (user) or
+Roles come from `~/.actor/settings.kdl` (user) or
 `<repo>/.actor/settings.kdl` (project-local; project wins on overlap).
 These files don't exist by default — create them by hand when the user
-wants a template. A template can set the agent, prompt, and any config
-keys:
+wants a role. A role can set the agent, prompt, an optional
+`description` (shown by `actor roles`), and any config keys:
 
 ```kdl
-template "qa" {
+role "qa" {
+    description "Run tests after changes; report failures concisely."
     agent "claude"
     model "opus"
     prompt "You're a QA engineer. Write tests for the changed code."
@@ -55,7 +56,13 @@ template "qa" {
 ```
 
 Any explicit flag on the CLI (`--agent`, `--model`, `--config`, positional
-prompt / stdin) beats the template's value.
+prompt / stdin) beats the role's value.
+
+To see what's defined right now:
+
+```bash
+actor roles                                                                 # name / agent / description table
+```
 
 ## Create without running
 

@@ -36,7 +36,7 @@ from .types import (
 )
 
 # Config
-from .config import AgentDefaults, AppConfig, Hooks, Template, load_config
+from .config import AgentDefaults, AppConfig, Hooks, Role, load_config
 
 # Hooks runtime
 from .hooks import HookResult, HookRunner, hook_env, run_hook
@@ -71,6 +71,7 @@ from .commands import (
     cmd_interactive,
     INTERACTIVE_PROMPT,
     cmd_list,
+    cmd_roles,
     cmd_show,
     cmd_stop,
     cmd_config,
@@ -113,7 +114,7 @@ __all__ = [
     "AgentDefaults",
     "AppConfig",
     "Hooks",
-    "Template",
+    "Role",
     "load_config",
     # Hooks runtime
     "HookResult",
@@ -142,6 +143,7 @@ __all__ = [
     "cmd_interactive",
     "INTERACTIVE_PROMPT",
     "cmd_list",
+    "cmd_roles",
     "cmd_show",
     "cmd_stop",
     "cmd_config",

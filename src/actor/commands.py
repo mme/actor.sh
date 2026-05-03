@@ -127,21 +127,28 @@ def cmd_new(
     base: Optional[str],
     agent_name: Optional[str],
     cli_overrides: ActorConfig,
-    template_name: Optional[str] = None,
+    role_name: Optional[str] = None,
     app_config: Optional["AppConfig"] = None,
     hook_runner: Optional[HookRunner] = None,
 ) -> Actor:
     validate_name(name)
 
-    template = None
-    if template_name is not None:
-        if app_config is None or template_name not in app_config.templates:
-            raise ConfigError(f"unknown template: '{template_name}'")
-        template = app_config.templates[template_name]
+    role = None
+    if role_name is not None:
+        roles = app_config.roles if app_config is not None else {}
+        if role_name not in roles:
+            available = sorted(roles)
+            hint = (
+                f"available: {', '.join(available)}"
+                if available
+                else "no roles defined in settings.kdl"
+            )
+            raise ConfigError(f"unknown role: '{role_name}' ({hint})")
+        role = roles[role_name]
 
-    # Agent precedence: explicit CLI flag > template's agent > "claude"
+    # Agent precedence: explicit CLI flag > role's agent > "claude"
     if agent_name is None:
-        agent_name = template.agent if (template and template.agent) else "claude"
+        agent_name = role.agent if (role and role.agent) else "claude"
     agent_kind = AgentKind.from_str(agent_name)
 
     if not binary_exists(agent_kind.binary_name):
@@ -151,8 +158,8 @@ def cmd_new(
     # dicts (actor_keys, agent_args) — the split is preserved positionally
     # across every layer; nothing downstream reconstructs it via name lookup:
     #   1. Agent class defaults (ACTOR_DEFAULTS / AGENT_DEFAULTS baseline)
-    #   2. kdl `agent "<name>" { ... }` block for this agent_kind
-    #   3. Template config (kdl template is a flat namespace; we partition
+    #   2. kdl `defaults "<name>" { ... }` block for this agent_kind
+    #   3. Role config (kdl role is a flat namespace; we partition
     #      each key here using the agent class's ACTOR_DEFAULTS whitelist)
     #   4. CLI overrides (already structured by the CLI layer, which also
     #      validates that `--config` keys don't collide with actor-keys)
@@ -178,15 +185,30 @@ def cmd_new(
                 else:
                     merged_agent_args[k] = v
 
-    # Layer 3: template config. The kdl template namespace is flat, so we
-    # partition by checking each key against the agent's ACTOR_DEFAULTS
-    # whitelist — this is an input-boundary split, not runtime routing.
-    if template is not None:
-        for k, v in template.config.items():
+    # Layer 3: role config + role.prompt as a system prompt. The kdl role
+    # namespace is flat, so we partition each `config` key against the
+    # agent's ACTOR_DEFAULTS whitelist (input-boundary split). The role's
+    # `prompt` field is the role's *identity* — its system prompt — and
+    # gets injected under the agent's SYSTEM_PROMPT_KEY (e.g.
+    # `append-system-prompt` for claude). `setdefault` so an explicit
+    # config key in the role still wins over the prompt-derived default.
+    if role is not None:
+        for k, v in role.config.items():
             if k in agent_cls.ACTOR_DEFAULTS:
                 merged_actor_keys[k] = v
             else:
                 merged_agent_args[k] = v
+        if role.prompt:
+            sp_key = agent_cls.SYSTEM_PROMPT_KEY
+            if sp_key is None:
+                raise ConfigError(
+                    f"role '{role.name}' has a `prompt` field, but agent "
+                    f"'{agent_kind.value}' doesn't yet support role-level "
+                    f"system prompts. Either remove the prompt and put the "
+                    f"guidance in the per-call task prompt, or use a "
+                    f"claude-based role."
+                )
+            merged_agent_args.setdefault(sp_key, role.prompt)
 
     # Layer 4: CLI overrides (already split by the CLI layer).
     for k, v in cli_overrides.actor_keys.items():
@@ -606,6 +628,35 @@ def cmd_list(db: Database, pm: ProcessManager, status_filter: Optional[str]) -> 
     for name, st, prompt in rows:
         output += f"{name:<{name_width}}  {st.as_str():<{status_width}}  {prompt}\n"
 
+    return output
+
+
+# -- cmd_show --
+
+def cmd_roles(app_config: "AppConfig") -> str:
+    roles = app_config.roles
+    if not roles:
+        return "No roles defined. Add a `role \"<name>\" { ... }` block to ~/.actor/settings.kdl or <repo>/.actor/settings.kdl.\n"
+
+    h_name = "NAME"
+    h_agent = "AGENT"
+    h_desc = "DESCRIPTION"
+
+    rows: List[Tuple[str, str, str]] = []
+    for name in sorted(roles):
+        r = roles[name]
+        agent = r.agent or "claude"
+        desc = r.description or ""
+        rows.append((name, agent, desc))
+
+    name_width = max((len(r[0]) for r in rows), default=0)
+    name_width = max(name_width, len(h_name))
+    agent_width = max((len(r[1]) for r in rows), default=0)
+    agent_width = max(agent_width, len(h_agent))
+
+    output = f"{h_name:<{name_width}}  {h_agent:<{agent_width}}  {h_desc}\n"
+    for name, agent, desc in rows:
+        output += f"{name:<{name_width}}  {agent:<{agent_width}}  {desc}\n"
     return output
 
 

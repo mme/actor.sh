@@ -1053,7 +1053,7 @@ class ActorWatchApp(App):
         The class-defaults filter is what makes this row meaningful —
         `permission-mode=auto` on a vanilla Claude actor isn't 'extra
         config', it's the baseline. We only want to surface things
-        the user actually customized (or that a template / kdl set
+        the user actually customized (or that a role / kdl set
         explicitly to something non-default)."""
         from rich.text import Text
 

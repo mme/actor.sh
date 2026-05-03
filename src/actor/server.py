@@ -27,6 +27,7 @@ from .commands import (
     cmd_list,
     cmd_logs,
     cmd_new,
+    cmd_roles,
     cmd_run,
     cmd_show,
     cmd_stop,
@@ -103,6 +104,20 @@ def list_actors(status: str | None = None) -> str:
         status: Optional filter — e.g. "running", "done", "error".
     """
     return cmd_list(_db(), RealProcessManager(), status_filter=status)
+
+
+@mcp.tool()
+def list_roles() -> str:
+    """List available roles from settings.kdl.
+
+    Roles are named presets users define in `~/.actor/settings.kdl` (user-wide)
+    or `<repo>/.actor/settings.kdl` (project-local). Each role can set the
+    agent, prompt, and any config keys, plus an optional `description` that
+    explains when to use it. Apply a role at actor creation by passing
+    `role="<name>"` to `new_actor`.
+    """
+    from .config import load_config
+    return cmd_roles(load_config())
 
 
 @mcp.tool()
@@ -237,7 +252,8 @@ def _spawn_background_run(
 def new_actor(
     name: str,
     prompt: str | None = None,
-    agent: Literal["claude", "codex"] = "claude",
+    agent: Literal["claude", "codex"] | None = None,
+    role: str | None = None,
     dir: str | None = None,
     base: str | None = None,
     no_worktree: bool = False,
@@ -249,31 +265,47 @@ def new_actor(
 
     Args:
         name: Actor name (becomes the git branch). Use lowercase with hyphens.
-        prompt: Optional prompt to run immediately after creation.
-        agent: Coding agent — "claude" or "codex".
-        dir: Base directory for the worktree (defaults to current working directory).
+        prompt: Optional task prompt to run immediately after creation. The
+            role's `prompt` field is its system prompt (injected as
+            `--append-system-prompt`), not a task fallback — omit `prompt`
+            to create the actor idle and run it later with `run_actor`.
+        agent: Coding agent — "claude" or "codex". Defaults to the role's
+            agent (if a role is applied) or "claude" otherwise.
+        role: Apply a named role from settings.kdl. Use `list_roles` to see
+            what's defined. The role's agent + config snapshot onto the
+            actor; an unknown name fails with the available list.
+        dir: Base directory (repo root) for the worktree. **Must be an
+            absolute path** when set — relative paths resolve against the
+            MCP server's cwd, which is rarely what the caller intends and
+            is fragile across sessions. Defaults to the orchestrator
+            session's cwd (i.e. wherever the user ran `actor main`), which
+            is the right default when sub-actors should work in the same
+            repo. Pass an explicit absolute path when targeting a
+            different repo.
         base: Branch to create the worktree from (defaults to current branch).
         no_worktree: If True, skip worktree creation.
         config: Config key=value pairs saved as actor defaults (e.g. ["model=opus", "effort=max"]).
             Agent-args only; actor-keys like "use-subscription" are rejected here — use the
-            dedicated parameter below.
+            dedicated parameter below. CLI-level overrides beat the role's values.
         use_subscription: When True, force subscription auth (strip the agent's API key env var).
             When False, pass the API key through. When omitted (None), defer to lower-precedence
-            layers (template / settings.kdl / class default).
+            layers (role / settings.kdl / class default).
     """
     db = _db()
     git = RealGit()
+    from .config import load_config
+    app_config = load_config()
     # MCP mirrors the CLI's positional split: `config` pairs go into
     # agent_args (rejected if they collide with an actor-key); the dedicated
     # `use_subscription` param populates actor_keys directly. Validation
-    # and bucketing are the same code path as the CLI.
-    agent_kind = _resolve_agent_kind_for_cli(agent, None, None)
+    # and bucketing are the same code path as the CLI. Agent resolution also
+    # mirrors the CLI: explicit `agent` wins, otherwise the role's agent,
+    # otherwise "claude".
+    agent_kind = _resolve_agent_kind_for_cli(agent, role, app_config)
     agent_cls = _agent_class(agent_kind)
     cli_overrides = _build_cli_overrides(
         agent_cls, config or [], use_subscription=use_subscription,
     )
-    from .config import load_config
-    app_config = load_config()
     actor = cmd_new(
         db, git,
         name=name,
@@ -282,6 +314,7 @@ def new_actor(
         base=base,
         agent_name=agent,
         cli_overrides=cli_overrides,
+        role_name=role,
         app_config=app_config,
     )
 

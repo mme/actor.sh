@@ -22,6 +22,11 @@ class ClaudeAgent(Agent):
     ACTOR_DEFAULTS: Dict[str, str] = {
         "use-subscription": "true",
     }
+    # The agent_args key under which a role's `prompt` field gets injected.
+    # claude has `--append-system-prompt` to layer extra instructions on top
+    # of Claude Code's defaults — exactly the right shape for "role
+    # personality + Claude Code's standard tools".
+    SYSTEM_PROMPT_KEY: Optional[str] = "append-system-prompt"
 
     def __init__(self) -> None:
         self._children: Dict[int, subprocess.Popen] = {}  # type: ignore[type-arg]
