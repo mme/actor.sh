@@ -1,12 +1,9 @@
 """e2e TUI: actor tree fails to re-sort when statuses change.
 
-`helpers.group_by_parent` defines a status-based ordering (RUNNING <
-ERROR < IDLE < DONE < STOPPED), but `ActorTree.update_actors` only
-runs the sort when the set of actor names changes. Status transitions
-that happen on a stable name set leave the tree's order stale —
-finished actors stay above newly-running ones, etc. Each test below
-sets up a known-stable name set, triggers a status change, and asserts
-the order updated.
+`helpers.group_by_parent` defines status + recency ordering for every
+tree group. These tests cover both root actors and child actors under
+an expanded parent: when the actor set is stable, status or metadata
+updates must still reorder the visible rows in that group.
 """
 from __future__ import annotations
 
@@ -21,11 +18,40 @@ from e2e.harness.pilot import wait_for_actor_in_tree, watch_app
 
 class DiscoveredActorWatchUiFailures(unittest.IsolatedAsyncioTestCase):
 
+    def _find_tree_node(self, node, name: str):
+        for child in node.children:
+            if child.data and child.data.name == name:
+                return child
+            hit = self._find_tree_node(child, name)
+            if hit is not None:
+                return hit
+        return None
+
     def _actor_tree_names(self, app) -> list[str]:
         from actor.watch.app import ActorTree
 
         tree = app.query_one(ActorTree)
         return [node.data.name for node in tree.root.children if node.data]
+
+    def _child_tree_names(self, app, parent: str) -> list[str]:
+        from actor.watch.app import ActorTree
+
+        tree = app.query_one(ActorTree)
+        parent_node = self._find_tree_node(tree.root, parent)
+        if parent_node is None:
+            return []
+        return [node.data.name for node in parent_node.children if node.data]
+
+    async def _wait_for_actor_anywhere(self, pilot, app, name: str,
+                                       timeout: float = 8.0) -> None:
+        from actor.watch.app import ActorTree
+
+        for _ in range(int(timeout / 0.05)):
+            await pilot.pause(0.05)
+            tree = app.query_one(ActorTree)
+            if self._find_tree_node(tree.root, name) is not None:
+                return
+        raise AssertionError(f"actor {name!r} never appeared in the tree")
 
     async def test_actor_tree_reorders_when_running_actor_finishes(self):
         with isolated_home() as env:
@@ -157,6 +183,127 @@ class DiscoveredActorWatchUiFailures(unittest.IsolatedAsyncioTestCase):
                     self._actor_tree_names(app)[:2],
                     ["lima", "mike"],
                     "actor tree does not move the most recently updated actor",
+                )
+
+    async def test_actor_tree_reorders_child_when_running_actor_finishes(self):
+        with isolated_home() as env:
+            env.run_cli(["new", "parent"])
+            env.run_cli(["new", "idle-child"], ACTOR_NAME="parent")
+            proc = subprocess.Popen(
+                ["actor", "new", "running-child", "short task"],
+                env=env.env(
+                    ACTOR_NAME="parent",
+                    **claude_responds("ok", sleep=1.0),
+                ),
+                cwd=str(env.cwd),
+            )
+            try:
+                time.sleep(0.2)
+                async with watch_app(env, size=(100, 30)) as (app, pilot):
+                    for name in ("parent", "idle-child", "running-child"):
+                        await self._wait_for_actor_anywhere(pilot, app, name)
+                    parent_node = self._find_tree_node(
+                        app.query_one("#actor-tree").root, "parent"
+                    )
+                    parent_node.expand()
+                    self.assertEqual(
+                        self._child_tree_names(app, "parent")[:2],
+                        ["running-child", "idle-child"],
+                    )
+
+                    proc.wait(timeout=5)
+                    for _ in range(50):
+                        await pilot.pause(0.1)
+                        status = app._prev_statuses.get("running-child")
+                        if status is not None and status.value == "done":
+                            break
+
+                    self.assertEqual(
+                        self._child_tree_names(app, "parent")[:2],
+                        ["idle-child", "running-child"],
+                        "child tree keeps a completed child above an idle child",
+                    )
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=5)
+
+    async def test_actor_tree_reorders_child_when_existing_actor_starts_running(self):
+        with isolated_home() as env:
+            env.run_cli(["new", "parent"])
+            env.run_cli(["new", "done-child", "done"],
+                        ACTOR_NAME="parent", **claude_responds("ok"))
+            env.run_cli(["new", "idle-child"], ACTOR_NAME="parent")
+            async with watch_app(env, size=(100, 30)) as (app, pilot):
+                for name in ("parent", "done-child", "idle-child"):
+                    await self._wait_for_actor_anywhere(pilot, app, name)
+                parent_node = self._find_tree_node(
+                    app.query_one("#actor-tree").root, "parent"
+                )
+                parent_node.expand()
+                self.assertEqual(
+                    self._child_tree_names(app, "parent")[:2],
+                    ["idle-child", "done-child"],
+                )
+
+                proc = subprocess.Popen(
+                    ["actor", "run", "done-child", "again"],
+                    env=env.env(**claude_responds("ok", sleep=5)),
+                    cwd=str(env.cwd),
+                )
+                try:
+                    time.sleep(0.4)
+                    for _ in range(50):
+                        await pilot.pause(0.1)
+                        status = app._prev_statuses.get("done-child")
+                        if status is not None and status.value == "running":
+                            break
+
+                    self.assertEqual(
+                        self._child_tree_names(app, "parent")[:2],
+                        ["done-child", "idle-child"],
+                        "child tree leaves a newly running child below idle children",
+                    )
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.wait(timeout=5)
+
+    async def test_actor_tree_reorders_child_when_metadata_updates(self):
+        with isolated_home() as env:
+            env.run_cli(["new", "parent"])
+            env.run_cli(["new", "older-child"], ACTOR_NAME="parent")
+            time.sleep(0.05)
+            env.run_cli(["new", "newer-child"], ACTOR_NAME="parent")
+            async with watch_app(env, size=(100, 30)) as (app, pilot):
+                for name in ("parent", "older-child", "newer-child"):
+                    await self._wait_for_actor_anywhere(pilot, app, name)
+                parent_node = self._find_tree_node(
+                    app.query_one("#actor-tree").root, "parent"
+                )
+                parent_node.expand()
+                self.assertEqual(
+                    self._child_tree_names(app, "parent")[:2],
+                    ["newer-child", "older-child"],
+                )
+
+                time.sleep(0.05)
+                env.run_cli(["config", "older-child", "effort=max"])
+                for _ in range(50):
+                    await pilot.pause(0.1)
+                    node = self._find_tree_node(
+                        app.query_one("#actor-tree").root, "older-child"
+                    )
+                    if (
+                        node is not None
+                        and node.data.config.agent_args.get("effort") == "max"
+                    ):
+                        break
+
+                self.assertEqual(
+                    self._child_tree_names(app, "parent")[:2],
+                    ["older-child", "newer-child"],
+                    "child tree does not move the most recently updated child",
                 )
 
 
