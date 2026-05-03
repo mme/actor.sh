@@ -68,7 +68,7 @@ class ActorWatchApp(App):
     CSS = """
     Screen, Tabs, Tab, TabbedContent, TabPane,
     ContentSwitcher, VerticalScroll, RichLog,
-    DataTable, Tree, #detail-panel, #status-bar {
+    DataTable, Tree, #detail-panel {
         background: ansi_default;
     }
     #actor-panel {
@@ -200,12 +200,6 @@ class ActorWatchApp(App):
     #runs-table { display: none; }
     SearchIcon {
         color: $text;
-    }
-    #status-bar {
-        dock: bottom;
-        height: 1;
-        padding: 0 1;
-        color: $text-muted;
     }
     #splash, #main-layout {
         display: none;
@@ -411,7 +405,6 @@ class ActorWatchApp(App):
                     with TabPane("DIFF", id="diff"):
                         yield VerticalScroll(id="diff-scroll")
         yield Splash(id="splash", animate=self._animate)
-        yield Static("Loading...", id="status-bar")
         yield Footer(show_command_palette=False)
 
     def on_ready(self) -> None:
@@ -656,16 +649,6 @@ class ActorWatchApp(App):
             # DOM first; otherwise the Footer re-queries bindings from
             # a stale layout and keeps showing the full set.
             self.call_after_refresh(self._refresh_footer_bindings)
-
-        running = sum(1 for s in statuses.values() if s == Status.RUNNING)
-        done = sum(1 for s in statuses.values() if s == Status.DONE)
-        errors = sum(1 for s in statuses.values() if s == Status.ERROR)
-        total = len(actors)
-        status_bar = self.query_one("#status-bar", Static)
-        status_bar.update(
-            f" {total} actors: {running} running, {done} done, {errors} error"
-            f"{'  ' * 10}localhost:2204"
-        )
 
         self._refresh_detail()
 

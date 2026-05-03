@@ -10,15 +10,6 @@ from e2e.harness.pilot import select_actor, watch_app
 
 class MorePotentialBugsTests(unittest.IsolatedAsyncioTestCase):
 
-    async def test_status_bar_displayed(self):
-        with isolated_home() as env:
-            env.run_cli(["new", "alice"])
-            async with watch_app(env) as (app, pilot):
-                # status-bar widget should exist.
-                from textual.widgets import Static
-                bars = list(app.query("#status-bar"))
-                self.assertEqual(len(bars), 1)
-
     async def test_overview_runs_label_present(self):
         # The OVERVIEW pane should have a Runs label widget.
         with isolated_home() as env:
