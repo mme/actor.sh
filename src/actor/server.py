@@ -72,6 +72,44 @@ def _build_instructions(for_host: str | None = None) -> str:
 mcp = ActorMCP("actor.sh", instructions=_build_instructions())
 
 
+def _resolve_ask_strings() -> dict[str, str]:
+    """Resolve the `ask { }` strings from settings.kdl, falling back to
+    hardcoded defaults if the kdl is missing/malformed.
+
+    Computed once at module load — tool descriptions are then static for
+    the server's lifetime. A malformed settings.kdl logs a warning to
+    stderr but doesn't crash the import; defaults take over so MCP still
+    works.
+    """
+    from .config import ASK_DEFAULTS, load_config
+    try:
+        cfg = load_config()
+    except Exception as e:
+        print(
+            f"[actor-mcp] ignoring settings.kdl for ask block (will use "
+            f"hardcoded defaults): {e}",
+            file=sys.stderr,
+        )
+        return dict(ASK_DEFAULTS)
+    return {key: cfg.ask.resolved(key, default) for key, default in ASK_DEFAULTS.items()}
+
+
+_ASK_RESOLVED: dict[str, str] = _resolve_ask_strings()
+
+
+def _ask_tool(ask_key: str):
+    """Decorator wrapper around `@mcp.tool()` that appends the resolved
+    `ask` guidance for `ask_key` to the tool's docstring before
+    registering. Empty / silenced ask values append nothing — the
+    docstring stays as-is."""
+    def decorator(func):
+        base = (func.__doc__ or "").rstrip()
+        appendix = _ASK_RESOLVED.get(ask_key, "")
+        description = base + ("\n\n" + appendix if appendix else "")
+        return mcp.tool(description=description)(func)
+    return decorator
+
+
 def _db() -> Database:
     return Database.open(_db_path())
 
@@ -158,7 +196,7 @@ def stop_actor(name: str) -> str:
     return cmd_stop(db, agent, RealProcessManager(), name=name)
 
 
-@mcp.tool()
+@_ask_tool("on-discard")
 def discard_actor(name: str, force: bool = False) -> str:
     """Remove an actor from the database. Stops it first if running. Worktree stays on disk.
 
@@ -248,7 +286,7 @@ def _spawn_background_run(
     threading.Thread(target=_run, daemon=True).start()
 
 
-@mcp.tool()
+@_ask_tool("on-start")
 def new_actor(
     name: str,
     prompt: str | None = None,
@@ -331,7 +369,7 @@ def new_actor(
     return f"Actor '{name}' created at {actor.dir}."
 
 
-@mcp.tool()
+@_ask_tool("before-run")
 def run_actor(
     name: str,
     prompt: str,

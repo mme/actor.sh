@@ -251,6 +251,39 @@ per-agent `defaults "<name>" { ... }` shape.
 Load programmatically via `actor.config.load_config(cwd=..., home=...)` —
 both args default to `Path.cwd()` / `$HOME` so tests can inject temp dirs.
 
+### Ask block
+
+A top-level `ask { }` block holds free-form natural-language guidance
+that gets appended to the corresponding MCP tool descriptions at server
+startup. The orchestrator reads them as part of its tool catalog and
+decides when to use `AskUserQuestion` before acting.
+
+```kdl
+ask {
+    on-start   "Always confirm the agent kind for risky tasks."
+    before-run "Skip questions; assume per-run config never changes."
+    on-discard null   # silence the default — discard never asks
+}
+```
+
+Valid keys: `on-start` (appended to `new_actor`), `before-run`
+(appended to `run_actor`), `on-discard` (appended to `discard_actor`).
+No `after-run` — there's nothing to ask after a run completes.
+
+Per-key resolution:
+
+- key absent → fall through to the hardcoded default (orchestrator's
+  baseline guidance for that tool)
+- value is a string → append that string verbatim
+- value is `null` or `""` → user opt-out; append nothing
+
+Tool descriptions are static per MCP-server lifetime. Edits to
+`settings.kdl` apply on the next `actor main` (re-exec to pick them
+up). Project-level `ask` blocks override user-level per key, same merge
+rule as templates and hooks.
+
+The hardcoded defaults live in `ASK_DEFAULTS` in `src/actor/config.py`.
+
 ### Lifecycle hooks
 
 A top-level `hooks { }` block declares shell commands that fire around
