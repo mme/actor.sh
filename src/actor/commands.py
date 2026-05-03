@@ -784,12 +784,26 @@ def cmd_stop(
         db.update_run_status(latest.id, Status.ERROR, -1)
         return f"{name} was already dead \u2014 marked as error"
 
-    # Process is alive -- ask the agent to stop it
+    # Process is alive -- ask the agent to stop it.
+    #
+    # Order matters: write STOPPED to the DB BEFORE sending the
+    # signal. cmd_new is blocked in `agent.wait(pid)`; the moment
+    # the signal lands, claude exits and cmd_new wakes up, reads
+    # `db.latest_run`, and re-writes the row based on what it sees.
+    # If the DB still shows RUNNING at that moment, cmd_new's "wait
+    # returned non-zero -> ERROR" branch overwrites our pending
+    # STOPPED with ERROR(-15). Writing STOPPED first lets cmd_new's
+    # race-check (line ~434) see the terminal state and return
+    # early instead. If the signal fails (rare — pid was alive a
+    # moment ago) revert the optimistic write so callers see the
+    # actual state of the world.
     assert pid is not None  # alive==True implies pid is not None
-    agent.stop(pid)
-
-    # Update run status to stopped
     db.update_run_status(latest.id, Status.STOPPED, None)
+    try:
+        agent.stop(pid)
+    except Exception:
+        db.update_run_status(latest.id, Status.RUNNING, None)
+        raise
 
     return f"{name} stopped"
 

@@ -61,14 +61,21 @@ async def wait_for_actor_in_tree(pilot, app, name: str,
 
 
 async def select_actor(pilot, app, name: str) -> None:
-    """Move the tree cursor to the given actor and trigger selection."""
+    """Move the tree cursor onto the actor's row.
+
+    Uses `move_cursor` (highlight-only) rather than `select_node`
+    (which fires NodeSelected → action_enter_interactive → switches
+    the detail tab to Interactive and collapses the OVERVIEW log
+    widget to width 0). Highlighting is what triggers
+    `_refresh_detail`, which is what tests actually want.
+    """
     from actor.watch.app import ActorTree
     await wait_for_actor_in_tree(pilot, app, name)
     tree = app.query_one(ActorTree)
     tree.focus()
     for node in tree.root.children:
         if name in str(node.label):
-            tree.select_node(node)
+            tree.move_cursor(node)
             break
     await pilot.pause(0.1)
 

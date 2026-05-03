@@ -151,17 +151,34 @@ class ActorTree(Tree[Actor]):
         self._statuses = statuses
 
         new_snapshot = {a.name: statuses.get(a.name, Status.IDLE) for a in actors}
+        actor_by_name = {a.name: a for a in actors}
 
-        if new_snapshot == self._snapshot:
+        # `group_by_parent` is the single source of truth for ordering
+        # (status precedence, then most-recently-updated within the
+        # group). Compare the desired full-tree order to the current
+        # one so status transitions and `updated_at` bumps trigger a
+        # rebuild at every depth — without this, `actor run` finishing
+        # or `actor config` bumping a row leaves the tree's order
+        # frozen for both root rows and children of expanded parents.
+        by_parent = group_by_parent(actors, statuses)
+        desired_order = self._flatten_desired_order(by_parent)
+        current_order = self._flatten_current_order(self.root)
+        structure_changed = set(new_snapshot.keys()) != set(self._snapshot.keys())
+        order_changed = desired_order != current_order
+
+        if not structure_changed and not order_changed:
+            # In-place fast path: same set of actors, same root
+            # ordering. Refresh node.data so a discard+recreate within
+            # one poll window swaps in the new row, then refresh
+            # labels if any status flipped.
+            self._refresh_node_data(self.root, actor_by_name)
+            if new_snapshot != self._snapshot:
+                self._refresh_all_labels(self.root)
+                self._snapshot = new_snapshot
             return
 
-        if set(new_snapshot.keys()) == set(self._snapshot.keys()):
-            # Same actors, status changed — update labels in place
-            self._refresh_all_labels(self.root)
-            self._snapshot = new_snapshot
-            return
-
-        # Structure changed — full rebuild
+        # Either the actor set changed or existing rows need to
+        # reshuffle. Full rebuild — preserves cursor + expanded set.
         selected_name = None
         if self.cursor_node and self.cursor_node.data:
             selected_name = self.cursor_node.data.name
@@ -171,7 +188,6 @@ class ActorTree(Tree[Actor]):
 
         self.clear()
         self._snapshot = new_snapshot
-        by_parent = group_by_parent(actors, statuses)
         visited: set[str] = set()
 
         def _add_children(parent_node, parent_key: str | None) -> None:
@@ -205,6 +221,42 @@ class ActorTree(Tree[Actor]):
                 if str(child.label) != new_label:
                     child.set_label(new_label)
             self._refresh_all_labels(child)
+
+    @staticmethod
+    def _flatten_desired_order(
+        by_parent: dict, root_key: str | None = None,
+    ) -> list[str]:
+        """Walk `group_by_parent`'s output depth-first, collecting actor
+        names in the order they should appear in the rendered tree."""
+        out: list[str] = []
+        for actor in by_parent.get(root_key, []):
+            out.append(actor.name)
+            if actor.name in by_parent:
+                out.extend(ActorTree._flatten_desired_order(by_parent, actor.name))
+        return out
+
+    @staticmethod
+    def _flatten_current_order(node) -> list[str]:
+        """Walk the live tree depth-first, collecting actor names in the
+        order they currently render."""
+        out: list[str] = []
+        for child in node.children:
+            if child.data is not None:
+                out.append(child.data.name)
+            out.extend(ActorTree._flatten_current_order(child))
+        return out
+
+    def _refresh_node_data(self, node, actor_by_name: dict[str, Actor]) -> None:
+        """Replace each node's `data` with the current Actor row for that
+        name. Catches the discard-and-recreate-within-one-poll case
+        where node.name is unchanged but the underlying row has a new
+        session_id / dir / config."""
+        for child in node.children:
+            if child.data is not None:
+                fresh = actor_by_name.get(child.data.name)
+                if fresh is not None:
+                    child.data = fresh
+            self._refresh_node_data(child, actor_by_name)
 
     def _collect_expanded(self, node, expanded: set[str]) -> None:
         for child in node.children:
