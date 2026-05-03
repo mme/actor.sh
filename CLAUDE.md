@@ -91,6 +91,19 @@ Sub-claudes spawned by actors inherit the channel flag automatically
 (see `ClaudeAgent._CHANNEL_ARGS`), so nested actors can receive
 completion notifications too.
 
+### `/actor` slash command
+
+The deployed skill (`src/actor/_skill/SKILL.md`, frontmatter
+`name: actor`) is also a user-typable slash command. The user can
+type `/actor` for a quick status, `/actor stop fix-nav` for a direct
+lifecycle op, or `/actor spin up a reviewer to look at the auth
+module` for a natural-language task. The skill's "Slash invocation"
+section interprets `$ARGUMENTS` and routes to the right MCP tool.
+
+Both invocation paths (model-driven discovery and user-typed slash)
+work — `disable-model-invocation` is intentionally NOT set in the
+frontmatter.
+
 For dev work, after editing `src/actor/_skill/*.md`:
 
 ```bash
