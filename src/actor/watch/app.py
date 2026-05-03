@@ -221,6 +221,14 @@ class ActorWatchApp(App):
         # Footer uncluttered (a row of arrow keys is noise next to the
         # named actions), but `description` is set so the keys panel
         # surfaces them under the global keymap.
+        #
+        # priority=True on left/right is load-bearing for #24: every
+        # ScrollView descendant (RichLog, VerticalScroll, etc.) inherits
+        # "left" / "right" bindings for horizontal scroll. Without
+        # priority, the focused widget consumes the arrow before our
+        # App-level navigation runs, trapping focus inside the detail
+        # pane. `check_action` excludes the embedded TerminalWidget so
+        # its passthrough still works; modal screens are excluded too.
         Binding("left,ctrl+b", "navigate_left", "Move left", show=False, priority=True),
         Binding("right,ctrl+f", "navigate_right", "Move right", show=False, priority=True),
         Binding("up,ctrl+p", "navigate_up", "Move up", show=False),
