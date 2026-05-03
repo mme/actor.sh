@@ -1658,6 +1658,15 @@ class ActorWatchApp(App):
     _last_log_width: int = 0
     _last_log_entries: list = []
 
+    # Calls to _set_logs that arrive while the RichLog is collapsed
+    # (zero width) stash here for replay once the widget has a real
+    # width. Kept separate from _last_log_* so that the short-circuit
+    # logic — which assumes _last_log_* reflects what the widget has
+    # actually committed — doesn't wrongly skip a render after a
+    # zero-width call set _last_log_actor=actor without rendering.
+    _pending_log_actor: str | None = None
+    _pending_log_entries: list = []
+
     # Full-rebuild builds run in a worker thread. `_log_build_token`
     # increments on every kick-off; the worker's apply callback is a
     # no-op if a newer build has started in the meantime. `_pending`
@@ -1731,11 +1740,19 @@ class ActorWatchApp(App):
         # immediately followed by a re-render at the real width.
         # Stash entries but skip the render while we can't draw the
         # real layout; _flush_pending_logs re-invokes us once LIVE
-        # is actually visible.
+        # is actually visible. _last_log_* must NOT change here — it
+        # would lie about what the widget has committed and cause the
+        # next call to short-circuit a render that never happened.
         if log.size.width == 0:
-            self._last_log_actor = actor_name
-            self._last_log_entries = entries
+            self._pending_log_actor = actor_name
+            self._pending_log_entries = entries
             return
+
+        # We have a real width — clear any pending zero-width stash;
+        # this call (and the _last_log_* update on its render path)
+        # supersedes whatever was waiting.
+        self._pending_log_actor = None
+        self._pending_log_entries = []
 
         actor_changed = actor_name != self._last_log_actor
         width_changed = log.size.width != self._last_log_width
@@ -1756,6 +1773,7 @@ class ActorWatchApp(App):
         elif (
             not actor_changed
             and not width_changed
+            and entries is self._last_log_entries
             and len(entries) == self._last_log_count
         ):
             return
@@ -1785,6 +1803,11 @@ class ActorWatchApp(App):
         #   - no full build currently in flight (committed state
         #     matches the widget)
         #   - same actor (prior_count + entries refer to the same stream)
+        #   - same bucket object (a discard+recreate or `actor run`
+        #     under the same actor name pops and rebuilds the bucket;
+        #     appending the new entries onto the widget that still
+        #     holds the old session's render concatenates two
+        #     transcripts under one name — full rebuild instead)
         #   - same width (RichLog's cached segments are width-specific)
         #   - entry list only grew (prior_count <= new_count)
         #   - the new tail contains no tool_result (if it did, it might
@@ -1794,6 +1817,7 @@ class ActorWatchApp(App):
         can_append = (
             not self._log_build_pending
             and not actor_changed
+            and entries is self._last_log_entries
             and not width_changed
             and 0 <= prior_count <= len(entries)
             and not self._tail_has_tool_result(entries, prior_count)
@@ -2640,8 +2664,10 @@ class ActorWatchApp(App):
         switched away and back, nothing changed" case — we just
         replay; it returns early when the committed state already
         matches the stashed state."""
-        if not self._last_log_entries or self._last_log_actor is None:
+        if not self._pending_log_entries or self._pending_log_actor is None:
             return
+        actor_name = self._pending_log_actor
+        entries = self._pending_log_entries
         def _attempt() -> None:
             try:
                 log = self.query_one("#logs-content", RichLog)
@@ -2649,7 +2675,7 @@ class ActorWatchApp(App):
                 return
             if log.size.width == 0:
                 return
-            self._set_logs(self._last_log_actor, self._last_log_entries)
+            self._set_logs(actor_name, entries)
         self.call_after_refresh(_attempt)
 
     @on(events.Click, "#tabs Tabs, #tabs Tab")

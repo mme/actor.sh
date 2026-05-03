@@ -151,12 +151,23 @@ class ActorTree(Tree[Actor]):
         self._statuses = statuses
 
         new_snapshot = {a.name: statuses.get(a.name, Status.IDLE) for a in actors}
+        actor_by_name = {a.name: a for a in actors}
 
         if new_snapshot == self._snapshot:
+            # Names + statuses unchanged from a TUI standpoint, but
+            # the actor row underneath could have been replaced — a
+            # discard+recreate that lands within one poll window
+            # gives us the same name with a new session_id, new dir,
+            # etc. Refresh node.data so downstream consumers
+            # (`_refresh_logs`, `_refresh_detail`) see the new row.
+            self._refresh_node_data(self.root, actor_by_name)
             return
 
         if set(new_snapshot.keys()) == set(self._snapshot.keys()):
-            # Same actors, status changed — update labels in place
+            # Same actors, status changed — update labels in place.
+            # Same data-staleness concern as the snapshot-equal path
+            # above; refresh node.data alongside the labels.
+            self._refresh_node_data(self.root, actor_by_name)
             self._refresh_all_labels(self.root)
             self._snapshot = new_snapshot
             return
@@ -205,6 +216,18 @@ class ActorTree(Tree[Actor]):
                 if str(child.label) != new_label:
                     child.set_label(new_label)
             self._refresh_all_labels(child)
+
+    def _refresh_node_data(self, node, actor_by_name: dict[str, Actor]) -> None:
+        """Replace each node's `data` with the current Actor row for that
+        name. Catches the discard-and-recreate-within-one-poll case
+        where node.name is unchanged but the underlying row has a new
+        session_id / dir / config."""
+        for child in node.children:
+            if child.data is not None:
+                fresh = actor_by_name.get(child.data.name)
+                if fresh is not None:
+                    child.data = fresh
+            self._refresh_node_data(child, actor_by_name)
 
     def _collect_expanded(self, node, expanded: set[str]) -> None:
         for child in node.children:
