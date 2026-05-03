@@ -1,6 +1,7 @@
 ---
 name: actor
 description: Manage coding agents running tasks in parallel. Use when the user wants to start, monitor, or finish background coding tasks — e.g. "spin up an actor to fix the auth module", "start three actors", "what are my actors doing", "make a PR for that actor".
+argument-hint: [list | <actor-name> [command] | natural-language task]
 allowed-tools: mcp__actor__list_actors mcp__actor__show_actor mcp__actor__logs_actor mcp__actor__stop_actor mcp__actor__discard_actor mcp__actor__config_actor mcp__actor__new_actor mcp__actor__run_actor mcp__actor__list_roles Bash(actor *)
 ---
 
@@ -10,6 +11,39 @@ allowed-tools: mcp__actor__list_actors mcp__actor__show_actor mcp__actor__logs_a
 <!-- END AUTO-UPDATED BY actor setup/update -->
 
 This skill exposes the actor.sh MCP tools for managing parallel coding agents (each in its own git worktree). **Behavioral guidance — when to spawn vs reuse, how to verify completion, when to escalate to the user, etc. — lives in your system prompt** (loaded by `actor main` from the resolved `main` role). This file is the tool reference.
+
+## Slash invocation (`/actor`)
+
+The user typed: **$ARGUMENTS**
+
+Interpret `$ARGUMENTS` and route to the right MCP tool. Common shapes:
+
+- **Empty** (just `/actor` with nothing after it) — they want a quick
+  status. Call `list_actors()` and summarize. End with a one-line
+  hint about how to spawn one if there are zero actors.
+- **`list`** / **`status`** / **`what's running`** — same as empty.
+- **`<actor-name> <task>`** (where `<actor-name>` matches an existing
+  actor) — `run_actor(name=<actor-name>, prompt=<task>)`.
+- **`stop <name>`** / **`discard <name>`** — direct lifecycle ops.
+  Confirm via `AskUserQuestion` for `discard` if uncommitted work
+  might be lost (the on-discard hook check normally guards this).
+- **`<name> logs`** / **`what is <name> doing`** — `logs_actor(name=<name>)`
+  or `show_actor(name=<name>)`.
+- **Natural-language task** ("spin up a fix-auth actor to patch the
+  login bug", "review the auth module") — `new_actor(name=<derived>,
+  prompt=<the task>)`. Pick a descriptive lowercase-with-hyphens
+  name. Apply a role (`role="<name>"`) when one of the user's defined
+  roles fits — call `list_roles()` first if you haven't already this
+  session.
+
+When `$ARGUMENTS` is ambiguous (no existing actor name matches and the
+intent isn't a clear lifecycle command), default to spawning a new
+actor with the text as the task prompt rather than asking the user to
+clarify the command shape.
+
+If the MCP tools aren't available (see "MCP is required" below), fall
+back to `Bash(actor ...)` for the equivalent CLI commands instead of
+silently failing.
 
 ## MCP is required for a good experience
 
