@@ -44,11 +44,11 @@ class HookLifecycleTests(unittest.TestCase):
     def test_project_hook_overrides_user_hook(self):
         with isolated_home() as env:
             env.write_settings_kdl(
-                'hooks { on-start "echo USER >> $HOME/marker.txt" }\n',
+                'hooks {\n    on-start "echo USER >> $HOME/marker.txt"\n}\n',
                 scope="user",
             )
             env.write_settings_kdl(
-                'hooks { on-start "echo PROJECT >> $HOME/marker.txt" }\n',
+                'hooks {\n    on-start "echo PROJECT >> $HOME/marker.txt"\n}\n',
                 scope="project",
             )
             env.run_cli(["new", "alice"])

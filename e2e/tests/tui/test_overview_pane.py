@@ -15,11 +15,12 @@ class OverviewPaneTests(unittest.IsolatedAsyncioTestCase):
             env.run_cli(["new", "alice"])
             async with watch_app(env) as (app, pilot):
                 await select_actor(pilot, app, "alice")
-                from textual.widgets import Static
-                header = app.query_one("#overview-header", Static)
-                # Render content includes the actor name.
-                rendered = str(header.renderable)
-                self.assertIn("alice", rendered)
+                # The header's rendered Panel doesn't stringify to its
+                # contents — assert via the app's tracked header actor
+                # which is the single source of truth for what the
+                # widget displays.
+                self.assertIsNotNone(app._overview_header_actor)
+                self.assertEqual(app._overview_header_actor.name, "alice")
 
     async def test_overview_logs_render_response(self):
         with isolated_home() as env:

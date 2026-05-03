@@ -40,7 +40,11 @@ class McpClient:
         self._proc: Optional[subprocess.Popen] = None
         self._next_id = 1
         self._reader_thread: Optional[threading.Thread] = None
-        self._inbox: "Queue[dict]" = Queue()
+        # Per-instance queues (the class-level `_notifications` below
+        # was a typing artifact that accidentally created a shared
+        # queue across all McpClient instances — now per-instance).
+        self._responses: "Queue[dict]" = Queue()
+        self._notifications: "Queue[dict]" = Queue()
         self._stopped = False
 
     # ------- lifecycle -------
@@ -83,6 +87,11 @@ class McpClient:
     # ------- low-level send/recv -------
 
     def _read_loop(self) -> None:
+        """Demultiplex incoming MCP frames: responses (have `id`) go
+        to `_responses`; notifications (no `id`) go to
+        `_notifications`. Runs continuously until stopped, so
+        notifications fire even between `_request` calls.
+        """
         proc = self._proc
         assert proc is not None and proc.stdout is not None
         for line in proc.stdout:
@@ -93,7 +102,10 @@ class McpClient:
                 msg = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            self._inbox.put(msg)
+            if "id" in msg:
+                self._responses.put(msg)
+            else:
+                self._notifications.put(msg)
             if self._stopped:
                 break
 
@@ -113,19 +125,24 @@ class McpClient:
             "method": method,
             "params": params or {},
         })
+        # Drain `_responses` until the matching id arrives (other
+        # outstanding ids — none in our usage today — get held in
+        # the queue's tail order, which is fine).
         deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                msg = self._inbox.get(timeout=0.1)
-            except Empty:
-                continue
-            if msg.get("id") == rid:
-                return msg
-            # Notification or unrelated response — push back? for
-            # simplicity, route via notification queue.
-            if "method" in msg and "id" not in msg:
-                self._notifications.put(msg)
-        raise TimeoutError(f"MCP request {method} timed out after {timeout}s")
+        held: list[dict] = []
+        try:
+            while time.time() < deadline:
+                try:
+                    msg = self._responses.get(timeout=0.1)
+                except Empty:
+                    continue
+                if msg.get("id") == rid:
+                    return msg
+                held.append(msg)
+            raise TimeoutError(f"MCP request {method} timed out after {timeout}s")
+        finally:
+            for m in held:
+                self._responses.put(m)
 
     def _notify(self, method: str, params: Optional[dict] = None) -> None:
         self._send({
@@ -135,8 +152,6 @@ class McpClient:
         })
 
     # ------- public API -------
-
-    _notifications: "Queue[dict]" = Queue()
 
     def initialize(self) -> dict:
         resp = self._request("initialize", {

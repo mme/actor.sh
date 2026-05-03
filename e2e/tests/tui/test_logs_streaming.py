@@ -23,11 +23,13 @@ class LogsStreamingTests(unittest.IsolatedAsyncioTestCase):
             env.run_cli(["new", "alice", "first"], **claude_responds("first response"))
             actor = env.fetch_actor("alice")
             session = actor.agent_session
-            # Locate the JSONL log via ClaudeAgent's encoding rules.
+            # Locate the JSONL log via the encoded-dir scheme — fake
+            # claude wrote it under the test's $HOME, so resolve the
+            # path against env.home explicitly (ClaudeAgent's helper
+            # uses the runtime $HOME, which differs from env.home).
             from actor.agents.claude import ClaudeAgent
-            log_path = Path(ClaudeAgent._session_file_path(
-                Path(actor.dir), session
-            ))
+            encoded = ClaudeAgent._encode_dir(Path(actor.dir))
+            log_path = env.home / ".claude" / "projects" / encoded / f"{session}.jsonl"
             self.assertTrue(log_path.is_file(), f"missing log {log_path}")
 
             async with watch_app(env) as (app, pilot):

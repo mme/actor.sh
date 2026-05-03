@@ -23,19 +23,19 @@ class McpDiscardActorTests(unittest.TestCase):
         with isolated_home() as env:
             env.run_cli(["new", "alice"])
             actor = env.fetch_actor("alice")
-            (Path(actor.dir) / "dirty.txt").write_text("uncommitted")
+            # Modify a tracked file (README.md from the harness's git
+            # init) so the default `git diff --quiet` flags it.
+            (Path(actor.dir) / "README.md").write_text("modified")
             with McpClient(env=env.env(), cwd=env.cwd) as client:
                 client.initialize()
                 client.call_tool("discard_actor", {"name": "alice"})
-            # Actor still in DB because the on-discard hook (default
-            # `git diff --quiet`) failed.
             self.assertIn("alice", env.list_actor_names())
 
     def test_discard_with_force(self):
         with isolated_home() as env:
             env.run_cli(["new", "alice"])
             actor = env.fetch_actor("alice")
-            (Path(actor.dir) / "dirty.txt").write_text("x")
+            (Path(actor.dir) / "README.md").write_text("modified")
             with McpClient(env=env.env(), cwd=env.cwd) as client:
                 client.initialize()
                 client.call_tool(

@@ -26,18 +26,20 @@ class ActorDiscardTests(unittest.TestCase):
         with isolated_home() as env:
             env.run_cli(["new", "alice"])
             actor = env.fetch_actor("alice")
-            # Dirty the worktree.
-            (Path(actor.dir) / "dirty.txt").write_text("uncommitted\n")
+            # The default on-discard hook is `git diff --quiet`, which
+            # only flags MODIFIED tracked files (not untracked). Modify
+            # the README.md the harness committed at git init.
+            (Path(actor.dir) / "README.md").write_text("modified\n")
             r = env.run_cli(["discard", "alice"])
             self.assertNotEqual(r.returncode, 0)
-            # Actor still in DB.
             self.assertIn("alice", env.list_actor_names())
 
     def test_discard_force_overrides_dirty_check(self):
         with isolated_home() as env:
             env.run_cli(["new", "alice"])
             actor = env.fetch_actor("alice")
-            (Path(actor.dir) / "dirty.txt").write_text("uncommitted\n")
+            # Modify a tracked file so `git diff --quiet` returns nonzero.
+            (Path(actor.dir) / "README.md").write_text("modified\n")
             r = env.run_cli(["discard", "alice", "--force"])
             self.assertEqual(r.returncode, 0, msg=r.stderr)
             self.assertEqual(env.list_actor_names(), [])
@@ -83,10 +85,19 @@ class ActorDiscardTests(unittest.TestCase):
             self.assertIn("alice", env.list_actor_names())
 
     def test_discard_missing_worktree_runs_hook_from_home(self):
+        # Per CLAUDE.md: "If the worktree is gone, the hook runs from
+        # $HOME instead and ACTOR_DIR still reports the missing path so
+        # the script can detect it." Use a hook that does just that —
+        # the default `git diff --quiet` would die from $HOME (not a
+        # git repo) which is the documented why-you-write-your-own case.
         with isolated_home() as env:
+            env.write_settings_kdl(
+                'hooks {\n'
+                '    on-discard "[ ! -d \\"$ACTOR_DIR\\" ] || git -C \\"$ACTOR_DIR\\" diff --quiet"\n'
+                '}\n'
+            )
             env.run_cli(["new", "alice"])
             actor = env.fetch_actor("alice")
-            # Manually nuke the worktree.
             import shutil
             shutil.rmtree(actor.dir, ignore_errors=True)
             r = env.run_cli(["discard", "alice"])

@@ -81,10 +81,21 @@ class IsolatedHome:
 
     # ------- CLI helpers -------
 
-    def run_cli(self, args: list[str], **env_overrides) -> "CompletedProcess":
-        """Run `actor <args...>` with this env's HOME and PATH."""
+    def run_cli(self, args: list[str], *,
+                input: Optional[str] = None,
+                timeout: float = 30.0,
+                **env_overrides) -> "CompletedProcess":
+        """Run `actor <args...>` with this env's HOME and PATH.
+
+        `input` (kwarg-only) feeds stdin to the subprocess. Without it,
+        stdin is a real PTY (no data) — see `harness.cli.run_actor_cli`
+        for why that matters. `env_overrides` populate FAKE_*_RESPONSE
+        and similar fake-control env vars."""
         from .cli import run_actor_cli
-        return run_actor_cli(args, env=self.env(**env_overrides), cwd=self.cwd)
+        return run_actor_cli(
+            args, env=self.env(**env_overrides), cwd=self.cwd,
+            input=input, timeout=timeout,
+        )
 
     # ------- DB helpers -------
 

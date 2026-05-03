@@ -54,7 +54,7 @@ class EdgeCaseTests(unittest.TestCase):
         with isolated_home() as env:
             env.write_settings_kdl(
                 'alias "max" template="qa"\n'
-                'role "qa" { agent "claude" }\n'
+                'role "qa" {\n    agent "claude"\n}\n'
             )
             r = env.run_cli(["roles"])
             self.assertEqual(r.returncode, 0, msg=r.stderr)

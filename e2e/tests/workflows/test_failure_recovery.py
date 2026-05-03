@@ -29,7 +29,7 @@ class FailureRecoveryTests(unittest.TestCase):
     def test_on_start_hook_failure_rolls_back_actor_and_worktree(self):
         with isolated_home() as env:
             env.write_settings_kdl(
-                'hooks { on-start "exit 7" }\n'
+                'hooks {\n    on-start "exit 7"\n}\n'
             )
             r = env.run_cli(["new", "alice"])
             self.assertNotEqual(r.returncode, 0)

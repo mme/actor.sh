@@ -50,7 +50,11 @@ class OrchestratorSessionTests(unittest.TestCase):
                     "new_actor",
                     {"name": "subactor", "prompt": "delegated task"},
                 )
-                self.assertNotIn("error", str(result).lower())
+                # `result["isError"]` is the structured signal — plain
+                # substring matching trips on the literal "isError"
+                # field name in the response payload.
+                self.assertFalse(result.get("isError", False),
+                                 f"new_actor reported error: {result}")
                 note = client.recv_notification(timeout=15)
                 self.assertEqual(
                     note["params"]["meta"]["actor"], "subactor"

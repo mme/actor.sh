@@ -32,8 +32,8 @@ class ActorRolesTests(unittest.TestCase):
     def test_roles_sorted_alphabetically(self):
         with isolated_home() as env:
             env.write_settings_kdl(
-                'role "zebra" { agent "claude" }\n'
-                'role "apple" { agent "claude" }\n'
+                'role "zebra" {\n    agent "claude"\n}\n'
+                'role "apple" {\n    agent "claude"\n}\n'
             )
             r = env.run_cli(["roles"])
             self.assertEqual(r.returncode, 0, msg=r.stderr)
@@ -44,7 +44,7 @@ class ActorRolesTests(unittest.TestCase):
     def test_roles_role_without_description_renders_empty_cell(self):
         with isolated_home() as env:
             env.write_settings_kdl(
-                'role "qa" { agent "claude" }\n'  # no description set
+                'role "qa" {\n    agent "claude"\n}\n'  # no description set
             )
             r = env.run_cli(["roles"])
             self.assertEqual(r.returncode, 0, msg=r.stderr)

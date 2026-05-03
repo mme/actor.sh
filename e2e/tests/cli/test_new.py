@@ -142,7 +142,11 @@ class ActorNewTests(unittest.TestCase):
 
     def test_new_with_unknown_role_lists_available(self):
         with isolated_home() as env:
-            env.write_settings_kdl('role "qa" { agent "claude" }\n')
+            env.write_settings_kdl(
+                'role "qa" {\n'
+                '    agent "claude"\n'
+                '}\n'
+            )
             r = env.run_cli(["new", "alice", "--role", "missing"])
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("qa", r.stderr + r.stdout)

@@ -24,11 +24,9 @@ class MultiActorStateTests(unittest.IsolatedAsyncioTestCase):
             env.run_cli(["new", "bob"])
             async with watch_app(env) as (app, pilot):
                 await select_actor(pilot, app, "alice")
-                from textual.widgets import Static
-                header = app.query_one("#overview-header", Static)
-                self.assertIn("alice", str(header.renderable))
+                self.assertEqual(app._overview_header_actor.name, "alice")
                 await select_actor(pilot, app, "bob")
-                self.assertIn("bob", str(header.renderable))
+                self.assertEqual(app._overview_header_actor.name, "bob")
 
 
 if __name__ == "__main__":

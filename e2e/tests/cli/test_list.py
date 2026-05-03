@@ -31,11 +31,12 @@ class ActorListTests(unittest.TestCase):
         # next `list` should detect the dead PID and flip to ERROR.
         with isolated_home() as env:
             env.run_cli(["new", "alice"])
-            from actor.types import Run, Status
+            from actor.types import ActorConfig, Run, Status
             with env.db() as db:
                 db.insert_run(Run(
                     id=0, actor_name="alice", prompt="doomed",
                     status=Status.RUNNING, pid=999999,
+                    config=ActorConfig(),
                     started_at="2026-01-01T00:00:00Z",
                     finished_at=None, exit_code=None,
                 ))

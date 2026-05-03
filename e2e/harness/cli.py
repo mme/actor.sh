@@ -30,10 +30,43 @@ def run_actor_cli(
 ) -> subprocess.CompletedProcess:
     """Invoke `actor <args...>`. Captures stdout, stderr, exit code.
 
-    Set `input` to feed stdin (e.g. for `actor new foo` reading a
-    piped prompt). Defaults to no stdin (subprocess.DEVNULL).
+    When `input` is None, the subprocess's stdin is a real PTY (no
+    data) — this mimics a user typing in a terminal, which is what
+    actor's CLI checks via `sys.stdin.isatty()` before deciding to
+    consume stdin as a prompt. Without a TTY, every `actor new
+    <name>` (no positional prompt) would error with "stdin was
+    empty — expected a prompt", which is a subprocess artifact, not
+    a real CLI behavior the user would hit.
+
+    When `input` is a string, stdin is a normal pipe and the data
+    is fed in — matches `echo prompt | actor new <name>`.
     """
     cmd = [_resolve_actor_bin(), *args]
+    if input is None:
+        master_fd, slave_fd = _openpty_pair()
+        try:
+            r = subprocess.run(
+                cmd,
+                env=env,
+                cwd=str(cwd) if cwd else None,
+                stdin=slave_fd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout,
+                close_fds=True,
+            )
+            return r
+        finally:
+            import os
+            try:
+                os.close(slave_fd)
+            except OSError:
+                pass
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
     return subprocess.run(
         cmd,
         env=env,
@@ -42,7 +75,10 @@ def run_actor_cli(
         capture_output=True,
         text=True,
         timeout=timeout,
-        # input=None becomes empty stdin; explicit DEVNULL keeps
-        # behavior consistent across Python versions.
-        stdin=subprocess.DEVNULL if input is None else None,
     )
+
+
+def _openpty_pair() -> tuple[int, int]:
+    """Open a pty pair. Returns (master_fd, slave_fd). Caller closes."""
+    import pty
+    return pty.openpty()

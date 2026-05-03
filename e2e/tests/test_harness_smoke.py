@@ -94,7 +94,9 @@ class HarnessSmokeTests(unittest.TestCase):
 
     def test_settings_kdl_project_scope(self):
         with isolated_home() as env:
-            env.write_settings_kdl('hooks { on-start "echo hi" }', scope="project")
+            env.write_settings_kdl(
+                'hooks {\n    on-start "echo hi"\n}\n', scope="project"
+            )
             self.assertTrue((env.cwd / ".actor" / "settings.kdl").is_file())
 
 

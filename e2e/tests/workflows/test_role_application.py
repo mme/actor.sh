@@ -45,7 +45,7 @@ class RoleApplicationTests(unittest.TestCase):
     def test_cli_overrides_role_config(self):
         with isolated_home() as env:
             env.write_settings_kdl(
-                'role "qa" { agent "claude"; model "opus" }\n'
+                'role "qa" {\n    agent "claude"\n    model "opus"\n}\n'
             )
             env.run_cli(["new", "alice", "--role", "qa", "do x",
                          "--config", "model=haiku"],

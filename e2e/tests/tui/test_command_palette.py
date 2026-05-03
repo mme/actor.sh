@@ -20,10 +20,10 @@ class CommandPaletteTests(unittest.IsolatedAsyncioTestCase):
                 from textual.screen import SystemModalScreen
                 self.assertIsInstance(app.screen, SystemModalScreen)
 
-    async def test_question_mark_opens_help(self):
+    async def test_action_show_help_panel_opens_overlay(self):
         with isolated_home() as env:
             async with watch_app(env) as (app, pilot):
-                await pilot.press("?")
+                app.action_show_help_panel()
                 await pilot.pause(0.2)
                 from actor.watch.help_overlay import HelpOverlay
                 self.assertIsInstance(app.screen, HelpOverlay)
@@ -31,7 +31,7 @@ class CommandPaletteTests(unittest.IsolatedAsyncioTestCase):
     async def test_help_dismisses_with_escape(self):
         with isolated_home() as env:
             async with watch_app(env) as (app, pilot):
-                await pilot.press("?")
+                app.action_show_help_panel()
                 await pilot.pause(0.2)
                 await pilot.press("escape")
                 await pilot.pause(0.2)
