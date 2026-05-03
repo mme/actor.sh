@@ -680,7 +680,10 @@ class ActorWatchApp(App):
             pass
 
     def _refresh_detail(self) -> None:
-        actor_list = self.query_one(ActorTree)
+        try:
+            actor_list = self.query_one(ActorTree)
+        except Exception:
+            return
         actor = actor_list.selected_actor
         if actor is None:
             self._clear_detail()
@@ -3434,7 +3437,10 @@ class ActorWatchApp(App):
 
     def _focus_detail_content(self, tab_id: str | None = None) -> None:
         if tab_id is None:
-            tabs = self.query_one("#tabs", TabbedContent)
+            try:
+                tabs = self.query_one("#tabs", TabbedContent)
+            except Exception:
+                return
             tab_id = tabs.active
 
         if tab_id == "interactive":
