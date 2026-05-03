@@ -3207,8 +3207,16 @@ class ActorWatchApp(App):
         self._sync_detail_view()
         # The terminal widget just unmounted — drop focus onto the tree
         # so the user can immediately navigate to another actor.
-        self.set_focus(None)
-        self.call_after_refresh(lambda: self.query_one(ActorTree).focus())
+        try:
+            self.set_focus(None)
+        except Exception:
+            return
+        def _focus_tree() -> None:
+            try:
+                self.query_one(ActorTree).focus()
+            except Exception:
+                pass
+        self.call_after_refresh(_focus_tree)
 
     def get_system_commands(self, screen):
         """Filter Textual's default system-command list and add
