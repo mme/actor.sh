@@ -1,0 +1,5 @@
+#!/bin/sh
+# Thin wrapper that execs the python fake. Lives next to a `codex`
+# wrapper in this same dir; tests prepend this dir to PATH so the fakes
+# get picked up before any real claude/codex binaries.
+exec python3 "$(dirname "$0")/../fake_claude.py" "$@"
