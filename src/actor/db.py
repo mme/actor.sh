@@ -70,15 +70,20 @@ class Database:
     @classmethod
     def open(cls, path: str) -> Database:
         if path == ":memory:":
-            conn = sqlite3.connect(":memory:")
+            conn = sqlite3.connect(":memory:", timeout=10.0)
         else:
             parent = os.path.dirname(path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-            conn = sqlite3.connect(path)
+            # `timeout=10` waits up to 10 seconds for the file lock
+            # before raising. PRAGMA statements below also need to
+            # acquire the lock — without this, two concurrent CLI
+            # creates can race during schema-init and one fails with
+            # "database is locked" before busy_timeout below kicks in.
+            conn = sqlite3.connect(path, timeout=10.0)
 
         conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout=5000;")
+        conn.execute("PRAGMA busy_timeout=10000;")
         conn.execute("PRAGMA foreign_keys=ON;")
 
         conn.executescript("""

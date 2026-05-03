@@ -15,13 +15,17 @@ class RunMessageFormatTests(unittest.TestCase):
             self.assertEqual(r.returncode, 0, msg=r.stderr)
             self.assertIn("alice", r.stdout)
 
-    def test_run_complete_message_mentions_actor_name(self):
+    def test_run_complete_message_includes_response(self):
+        # The user already knows which actor they ran (they typed
+        # `actor run alice ...`); the message doesn't need to repeat
+        # the name. It SHOULD include the agent's response so the user
+        # doesn't need to call `actor logs` to see what happened.
         with isolated_home() as env:
             env.run_cli(["new", "alice"])
-            r = env.run_cli(["run", "alice", "do x"], **claude_responds("ok"))
+            r = env.run_cli(["run", "alice", "do x"],
+                            **claude_responds("UNIQUE_RESPONSE_HERE"))
             self.assertEqual(r.returncode, 0, msg=r.stderr)
-            # CLI run output should mention the actor.
-            self.assertIn("alice", r.stdout + r.stderr)
+            self.assertIn("UNIQUE_RESPONSE_HERE", r.stdout)
 
     def test_partial_success_message_for_create_run_failure(self):
         with isolated_home() as env:

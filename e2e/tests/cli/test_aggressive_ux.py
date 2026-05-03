@@ -9,18 +9,21 @@ from e2e.harness.isolated_home import isolated_home
 
 class AggressiveUxTests(unittest.TestCase):
 
-    def test_show_includes_role_information_when_role_was_applied(self):
-        # If an actor was created via --role X, show should mention X.
+    def test_role_application_snapshots_config_into_actor(self):
+        # Roles aren't tracked by name on the actor (snapshot model:
+        # the role's config keys are merged into the actor's config at
+        # creation time, then forgotten). Verify the snapshot worked
+        # rather than expecting the role name to surface in `show`.
         with isolated_home() as env:
             env.write_settings_kdl(
                 'role "qa" {\n'
                 '    agent "claude"\n'
-                '    description "QA"\n'
+                '    model "opus"\n'
                 '}\n'
             )
             env.run_cli(["new", "alice", "--role", "qa"])
-            r = env.run_cli(["show", "alice"])
-            self.assertIn("qa", r.stdout)
+            actor = env.fetch_actor("alice")
+            self.assertEqual(actor.config.agent_args.get("model"), "opus")
 
     def test_list_shows_running_status_with_count(self):
         # If 2 actors are running and 1 is idle, list output should

@@ -145,18 +145,25 @@ def _write_rollout(parsed: dict) -> None:
     }))
     sys.stdout.flush()
 
+    # Modern codex rollout format: every record has a top-level
+    # `type` and a nested `payload`. actor.sh's CodexAgent parses
+    # `event_msg` records by their `payload.type` (agent_message,
+    # user_message, token_count); the older flat-shape frames the
+    # fake used to emit don't make it into `actor logs`.
     frames: list[dict] = []
     frames.append({
         "type": "session_meta",
-        "session_id": sid,
-        "model": parsed["model"] or "default",
-        "ts": _ts(),
+        "payload": {
+            "session_id": sid,
+            "model": parsed["model"] or "default",
+        },
+        "timestamp": _ts(),
     })
     if parsed["prompt"]:
         frames.append({
             "type": "event_msg",
-            "msg": {"type": "user_input", "text": parsed["prompt"]},
-            "ts": _ts(),
+            "payload": {"type": "user_message", "message": parsed["prompt"]},
+            "timestamp": _ts(),
         })
     tools_json = os.environ.get("FAKE_CODEX_TOOLS")
     if tools_json:
@@ -166,40 +173,78 @@ def _write_rollout(parsed: dict) -> None:
             tool_calls = []
         for call in tool_calls:
             frames.append({
-                "type": "tool_call",
-                "call_id": call.get("id", str(uuid.uuid4())),
-                "name": call.get("name", "shell"),
-                "args": call.get("args", {}),
-                "ts": _ts(),
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "call_id": call.get("id", str(uuid.uuid4())),
+                    "name": call.get("name", "shell"),
+                    "arguments": json.dumps(call.get("args", {})),
+                },
+                "timestamp": _ts(),
             })
             frames.append({
-                "type": "tool_call_output",
-                "call_id": call.get("id", ""),
-                "output": call.get("result", "ok"),
-                "ts": _ts(),
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": call.get("id", ""),
+                    "output": call.get("result", "ok"),
+                },
+                "timestamp": _ts(),
             })
     reasoning = os.environ.get("FAKE_CODEX_REASONING")
     if reasoning:
         frames.append({
-            "type": "reasoning",
-            "text": reasoning,
-            "ts": _ts(),
+            "type": "response_item",
+            "payload": {
+                "type": "reasoning",
+                "summary": [{"text": reasoning}],
+            },
+            "timestamp": _ts(),
         })
     frames.append({
-        "type": "agent_message",
-        "text": response,
-        "ts": _ts(),
+        "type": "event_msg",
+        "payload": {"type": "agent_message", "message": response},
+        "timestamp": _ts(),
     })
     frames.append({
-        "type": "token_count",
-        "input_tokens": 100,
-        "output_tokens": len(response),
-        "ts": _ts(),
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "last_token_usage": {
+                    "input_tokens": 100,
+                    "output_tokens": len(response),
+                },
+            },
+        },
+        "timestamp": _ts(),
     })
 
     with open(log_path, "a") as f:
         for frame in frames:
             f.write(json.dumps(frame) + "\n")
+
+    # actor.sh's codex log reader looks the rollout path up in
+    # `~/.codex/state_5.sqlite` keyed by thread_id. Real codex
+    # maintains this DB; the fake populates it so the parser can find
+    # the rollout we just wrote.
+    state_db = Path(home) / ".codex" / "state_5.sqlite"
+    state_db.parent.mkdir(parents=True, exist_ok=True)
+    import sqlite3 as _sqlite3
+    conn = _sqlite3.connect(str(state_db), timeout=10.0)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS threads ("
+            "id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL"
+            ")"
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO threads (id, rollout_path) VALUES (?, ?)",
+            (sid, str(log_path)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     # actor.sh's CodexAgent relay reads `item.completed` events with
     # an `agent_message` item. Emit one so the actor's output appears

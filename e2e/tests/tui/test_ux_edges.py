@@ -84,32 +84,43 @@ class UxEdgeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsInstance(app.screen, HelpOverlay)
                 # The bindings table should reference quit somehow.
 
-    async def test_running_actor_shows_running_in_tree_label(self):
-        # Spawn a long-sleeping run; watch app should see "running".
+    async def test_running_actor_label_visually_distinct_from_idle(self):
+        # The tree uses icon glyphs (RUNNING_FRAMES = "♤♡♢♧") not the
+        # word "running" — assert the running label differs from the
+        # idle label rather than searching for literal "running".
         import subprocess, time
         with isolated_home() as env:
+            env.run_cli(["new", "idle-one"])
             p = subprocess.Popen(
-                ["actor", "new", "alice", "long task"],
+                ["actor", "new", "running-one", "long task"],
                 env=env.env(**claude_responds("ok", sleep=3)),
                 cwd=str(env.cwd),
             )
             try:
                 time.sleep(0.5)
                 async with watch_app(env) as (app, pilot):
-                    await wait_for_actor_in_tree(pilot, app, "alice")
+                    await wait_for_actor_in_tree(pilot, app, "running-one")
+                    await wait_for_actor_in_tree(pilot, app, "idle-one")
                     from actor.watch.app import ActorTree
                     tree = app.query_one(ActorTree)
-                    label = ""
+                    idle_label = running_label = ""
                     for _ in range(30):
                         await pilot.pause(0.1)
                         for node in tree.root.children:
-                            if "alice" in str(node.label):
-                                label = str(node.label)
-                                break
-                        if "running" in label.lower():
+                            label = str(node.label)
+                            if "idle-one" in label:
+                                idle_label = label
+                            elif "running-one" in label:
+                                running_label = label
+                        if (idle_label and running_label
+                                and idle_label.replace("idle-one", "")
+                                != running_label.replace("running-one", "")):
                             break
-                    self.assertIn("running", label.lower(),
-                                  f"expected running indicator; got {label!r}")
+                    self.assertNotEqual(
+                        idle_label.replace("idle-one", "").strip(),
+                        running_label.replace("running-one", "").strip(),
+                        "running and idle labels should look different",
+                    )
             finally:
                 if p.poll() is None:
                     p.kill()

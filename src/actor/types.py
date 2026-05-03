@@ -110,19 +110,29 @@ class Run:
 
 
 def validate_name(name: str) -> None:
-    """Validate an actor name, raising InvalidNameError on failure."""
+    """Validate an actor name, raising InvalidNameError on failure.
+
+    Errors include the offending name verbatim so the user sees what
+    they actually typed (matters when the name is misquoted by their
+    shell or autocompleted from history)."""
     if not name:
         raise InvalidNameError("actor name cannot be empty")
     if len(name) > 64:
-        raise InvalidNameError("actor name cannot exceed 64 characters")
+        raise InvalidNameError(
+            f"actor name {name!r} exceeds 64 characters ({len(name)})"
+        )
     first = name[0]
     if not first.isascii() or not first.isalnum():
-        raise InvalidNameError("actor name must start with a letter or number")
+        raise InvalidNameError(
+            f"actor name {name!r} must start with a letter or number"
+        )
     if not all(c.isascii() and (c.isalnum() or c in "._-") for c in name):
-        raise InvalidNameError("actor name can only contain [a-zA-Z0-9._-]")
+        raise InvalidNameError(
+            f"actor name {name!r} can only contain [a-zA-Z0-9._-]"
+        )
     reserved = ["main", "master", "HEAD"]
     if name in reserved:
-        raise InvalidNameError(f"'{name}' is a reserved name")
+        raise InvalidNameError(f"{name!r} is a reserved name")
 
 
 def parse_config(pairs: List[str]) -> Dict[str, str]:

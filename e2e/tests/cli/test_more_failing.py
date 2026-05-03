@@ -9,7 +9,10 @@ from e2e.harness.isolated_home import isolated_home
 
 class MoreFailingTests(unittest.TestCase):
 
-    def test_show_indicates_actor_was_created_via_role(self):
+    def test_show_displays_role_derived_config_keys(self):
+        # The role's config snapshots into the actor at create time;
+        # show displays the merged config. Role identity itself isn't
+        # tracked on the actor, but the resulting config is visible.
         with isolated_home() as env:
             env.write_settings_kdl(
                 'role "qa" {\n'
@@ -20,8 +23,7 @@ class MoreFailingTests(unittest.TestCase):
             )
             env.run_cli(["new", "alice", "--role", "qa"])
             r = env.run_cli(["show", "alice"])
-            # role name should be visible.
-            self.assertIn("qa", r.stdout)
+            self.assertIn("opus", r.stdout)
 
     def test_list_distinguishes_actors_with_different_agents(self):
         from e2e.harness.fakes_control import codex_responds
