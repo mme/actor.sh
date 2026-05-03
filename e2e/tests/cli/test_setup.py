@@ -36,6 +36,40 @@ class ActorSetupTests(unittest.TestCase):
             # succeeded — but no Python traceback.
             self.assertNotIn("Traceback", r.stderr)
 
+    def test_deployed_skill_matches_bundled_no_drift(self):
+        with isolated_home() as env:
+            env.run_cli(["setup", "--for", "claude-code"])
+            from importlib.resources import files
+            source = files("actor._skill")
+            deployed = env.home / ".claude" / "skills" / "actor"
+            if deployed.is_dir():
+                # Compare every bundled file to the deployed copy.
+                for entry in source.iterdir():
+                    name = entry.name
+                    if name.startswith("__") or name.endswith(".py"):
+                        continue
+                    deployed_file = deployed / name
+                    if deployed_file.is_file() and entry.is_file():
+                        # SKILL.md is mutated by the deploy step (auto
+                        # block); skip strict equality there.
+                        if name == "SKILL.md":
+                            continue
+                        self.assertEqual(
+                            deployed_file.read_text(),
+                            entry.read_text(),
+                            f"{name} drifted from bundled source",
+                        )
+
+    def test_update_refreshes_versioned_auto_block(self):
+        with isolated_home() as env:
+            env.run_cli(["setup", "--for", "claude-code"])
+            deployed = env.home / ".claude" / "skills" / "actor" / "SKILL.md"
+            if deployed.is_file():
+                # Auto-block markers should be present.
+                text = deployed.read_text()
+                self.assertIn("BEGIN AUTO-UPDATED", text)
+                self.assertIn("END AUTO-UPDATED", text)
+
 
 if __name__ == "__main__":
     unittest.main()

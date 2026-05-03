@@ -78,6 +78,40 @@ class ActorRunTests(unittest.TestCase):
             self.assertNotEqual(r.returncode, 0)
             self.assertEqual(env.claude_invocations(), [])
 
+    def test_run_on_already_running_actor_errors(self):
+        import subprocess, time
+        with isolated_home() as env:
+            env.run_cli(["new", "alice"])
+            # Spawn a long-sleeping background run.
+            p = subprocess.Popen(
+                ["actor", "run", "alice", "long task"],
+                env=env.env(**claude_responds("ok", sleep=10)),
+                cwd=str(env.cwd),
+            )
+            try:
+                time.sleep(0.5)
+                r = env.run_cli(["run", "alice", "concurrent"])
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("running", (r.stderr + r.stdout).lower())
+            finally:
+                if p.poll() is None:
+                    p.kill()
+                    p.wait(timeout=3)
+
+    def test_after_run_hook_failure_does_not_fail_the_run(self):
+        with isolated_home() as env:
+            env.write_settings_kdl(
+                'hooks {\n    after-run "exit 1"\n}\n'
+            )
+            env.run_cli(["new", "alice"])
+            r = env.run_cli(["run", "alice", "do x"], **claude_responds("ok"))
+            # Run itself should be DONE; hook failure logs a warning
+            # but doesn't flip the run to ERROR.
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            with env.db() as db:
+                run = db.latest_run("alice")
+                self.assertEqual(run.status.as_str(), "done")
+
     def test_run_fires_after_run_hook_with_metadata(self):
         with isolated_home() as env:
             env.write_settings_kdl(

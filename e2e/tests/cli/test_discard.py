@@ -54,6 +54,34 @@ class ActorDiscardTests(unittest.TestCase):
             self.assertEqual(r.returncode, 0, msg=r.stderr)
             self.assertTrue((env.home / "discarded.txt").exists())
 
+    def test_discard_parent_cascades_to_children_leaves_first(self):
+        with isolated_home() as env:
+            env.run_cli(["new", "parent"])
+            # Manually insert a child row referencing parent.
+            from actor.types import Actor, ActorConfig, AgentKind
+            with env.db() as db:
+                db.insert_actor(Actor(
+                    name="child", agent=AgentKind.CLAUDE,
+                    agent_session=None, dir=str(env.cwd),
+                    source_repo=None, base_branch=None, worktree=False,
+                    parent="parent", config=ActorConfig(),
+                    created_at="2026-01-01T00:00:00Z",
+                    updated_at="2026-01-01T00:00:00Z",
+                ))
+            r = env.run_cli(["discard", "parent"])
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            self.assertEqual(env.list_actor_names(), [])
+
+    def test_discard_on_discard_hook_failure_aborts_without_force(self):
+        with isolated_home() as env:
+            env.write_settings_kdl(
+                'hooks {\n    on-discard "exit 1"\n}\n'
+            )
+            env.run_cli(["new", "alice"])
+            r = env.run_cli(["discard", "alice"])
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("alice", env.list_actor_names())
+
     def test_discard_missing_worktree_runs_hook_from_home(self):
         with isolated_home() as env:
             env.run_cli(["new", "alice"])

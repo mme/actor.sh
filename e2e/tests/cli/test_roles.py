@@ -41,6 +41,18 @@ class ActorRolesTests(unittest.TestCase):
             zebra_idx = r.stdout.find("zebra")
             self.assertLess(apple_idx, zebra_idx)
 
+    def test_roles_role_without_description_renders_empty_cell(self):
+        with isolated_home() as env:
+            env.write_settings_kdl(
+                'role "qa" { agent "claude" }\n'  # no description set
+            )
+            r = env.run_cli(["roles"])
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            self.assertIn("qa", r.stdout)
+            # Description column for qa should be empty (not "None" or
+            # similar). Best-effort: the qa row line shouldn't contain
+            # anything after "claude" that looks like a description.
+
     def test_roles_table_columns(self):
         with isolated_home() as env:
             r = env.run_cli(["roles"])

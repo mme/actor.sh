@@ -49,6 +49,38 @@ class ActorNewTests(unittest.TestCase):
             actor = env.fetch_actor("alice")
             self.assertFalse(actor.worktree)
 
+    def test_new_with_dir_targets_other_repo(self):
+        with isolated_home() as env:
+            # Stand up a sibling repo to spawn into.
+            import os, subprocess
+            other = env.cwd.parent / "other-repo"
+            other.mkdir()
+            git_env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "e2e", "GIT_AUTHOR_EMAIL": "e@x",
+                "GIT_COMMITTER_NAME": "e2e", "GIT_COMMITTER_EMAIL": "e@x",
+            }
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=other,
+                           check=True, env=git_env, capture_output=True)
+            (other / "f.txt").write_text("x")
+            subprocess.run(["git", "add", "."], cwd=other, check=True,
+                           env=git_env, capture_output=True)
+            subprocess.run(["git", "commit", "-q", "-m", "i"], cwd=other,
+                           check=True, env=git_env, capture_output=True)
+            r = env.run_cli(["new", "alice", "--dir", str(other)])
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            actor = env.fetch_actor("alice")
+            self.assertIn(str(other), actor.source_repo or "")
+
+    def test_new_use_subscription_true_persists(self):
+        with isolated_home() as env:
+            r = env.run_cli(["new", "alice", "--use-subscription"])
+            self.assertEqual(r.returncode, 0, msg=r.stderr)
+            actor = env.fetch_actor("alice")
+            self.assertEqual(
+                actor.config.actor_keys.get("use-subscription"), "true"
+            )
+
     def test_new_with_base_branch(self):
         with isolated_home() as env:
             # create a branch to fork from
