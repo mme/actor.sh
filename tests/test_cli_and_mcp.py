@@ -659,5 +659,70 @@ class McpToolTests(unittest.TestCase):
         spawn.assert_not_called()
 
 
+class AskBlockIntegrationTests(unittest.TestCase):
+    """`ask { }` strings are appended to the affected MCP tool descriptions
+    at server-startup time. Verified by inspecting the registered tool's
+    description via FastMCP's tool list."""
+
+    def _tool_descriptions(self):
+        # Run the async list against an isolated event loop so the test
+        # works in any host context.
+        import asyncio
+        from actor import server
+        return {t.name: t.description for t in asyncio.run(server.mcp.list_tools())}
+
+    def test_default_ask_strings_present_in_tool_descriptions(self):
+        # The hardcoded defaults should already be appended (no settings.kdl
+        # in the test cwd, so resolved() returns the defaults — _ASK_RESOLVED
+        # captured them at module import).
+        from actor.config import ASK_DEFAULTS
+        descs = self._tool_descriptions()
+        # Each affected tool should contain the FIRST line of its default
+        # — not full equality, since the docstring base is also there.
+        first_line = lambda s: s.splitlines()[0]
+        self.assertIn(first_line(ASK_DEFAULTS["on-start"]), descs["new_actor"])
+        self.assertIn(first_line(ASK_DEFAULTS["before-run"]), descs["run_actor"])
+        self.assertIn(first_line(ASK_DEFAULTS["on-discard"]), descs["discard_actor"])
+
+    def test_unaffected_tools_have_no_ask_appendix(self):
+        # `list_actors`, `show_actor`, etc. don't take ask annotations —
+        # their descriptions stay as the original docstring.
+        from actor.config import ASK_DEFAULTS
+        descs = self._tool_descriptions()
+        # The on-start default mentions "AskUserQuestion" — make sure it
+        # didn't accidentally land in tools that aren't supposed to carry it.
+        self.assertNotIn("AskUserQuestion", descs["list_actors"])
+        self.assertNotIn("AskUserQuestion", descs["show_actor"])
+        self.assertNotIn("AskUserQuestion", descs["stop_actor"])
+        self.assertNotIn("AskUserQuestion", descs["list_roles"])
+
+    def test_ask_tool_decorator_with_silenced_value_appends_nothing(self):
+        # Direct unit test of the helper — given an empty appendix, no
+        # blank line gets tacked onto the docstring.
+        from actor import server
+        # Build a fresh decorator with a synthetic ask key/value mapping
+        # that's silenced. Use a temporary FastMCP so we don't mutate the
+        # module-level `mcp`.
+        from mcp.server.fastmcp import FastMCP
+        local_mcp = FastMCP("test")
+        original_mcp = server.mcp
+        original_resolved = server._ASK_RESOLVED
+        try:
+            server.mcp = local_mcp
+            server._ASK_RESOLVED = {"on-start": ""}
+
+            @server._ask_tool("on-start")
+            def fake_tool() -> str:
+                """base docstring"""
+                return "ok"
+
+            import asyncio
+            tools = {t.name: t for t in asyncio.run(local_mcp.list_tools())}
+            self.assertEqual(tools["fake_tool"].description, "base docstring")
+        finally:
+            server.mcp = original_mcp
+            server._ASK_RESOLVED = original_resolved
+
+
 if __name__ == "__main__":
     unittest.main()

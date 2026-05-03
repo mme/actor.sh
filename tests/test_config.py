@@ -568,5 +568,144 @@ class TestLoadConfigAgentBlocks(unittest.TestCase):
             )
 
 
+class TestLoadConfigAskBlock(unittest.TestCase):
+    """`ask { }` top-level block — guidance strings appended to MCP tool docs."""
+
+    def _write(self, path: Path, body: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+
+    def test_ask_absent_resolves_to_default(self):
+        # No settings.kdl → ask is empty → resolved() returns default.
+        from actor.config import ASK_DEFAULTS
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(
+                cfg.ask.resolved("on-start", ASK_DEFAULTS["on-start"]),
+                ASK_DEFAULTS["on-start"],
+            )
+
+    def test_ask_string_value_overrides_default(self):
+        from actor.config import ASK_DEFAULTS
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'ask {\n    on-start "custom guidance"\n}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(
+                cfg.ask.resolved("on-start", ASK_DEFAULTS["on-start"]),
+                "custom guidance",
+            )
+
+    def test_ask_null_value_silences_default(self):
+        # `null` means "user opted out" — resolved() returns "" so the
+        # caller appends nothing.
+        from actor.config import ASK_DEFAULTS
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'ask {\n    on-start null\n}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(
+                cfg.ask.resolved("on-start", ASK_DEFAULTS["on-start"]),
+                "",
+            )
+
+    def test_ask_empty_string_silences_default(self):
+        # `""` is the second documented opt-out form. Same effect as null.
+        from actor.config import ASK_DEFAULTS
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'ask {\n    on-start ""\n}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(
+                cfg.ask.resolved("on-start", ASK_DEFAULTS["on-start"]),
+                "",
+            )
+
+    def test_ask_unknown_key_rejected(self):
+        # The whitelist gates which keys are allowed. `after-run` isn't
+        # in it (nothing to ask after the run finishes).
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'ask {\n    after-run "nope"\n}\n',
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn("after-run", str(ctx.exception))
+            self.assertIn("on-start", str(ctx.exception))
+
+    def test_ask_non_string_non_null_rejected(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'ask {\n    on-start 42\n}\n',
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn("string", str(ctx.exception))
+
+    def test_ask_duplicate_key_rejected(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'ask {\n    on-start "a"\n    on-start "b"\n}\n',
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn("duplicate", str(ctx.exception))
+
+    def test_ask_duplicate_block_rejected(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'ask {\n    on-start "a"\n}\nask {\n    before-run "b"\n}\n',
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(cwd=Path(cwd), home=Path(home))
+            self.assertIn("duplicate ask", str(ctx.exception))
+
+    def test_ask_project_overrides_user_per_key(self):
+        # Per-key overlay: project's set wins for keys it specifies; user's
+        # set survives for keys project doesn't touch.
+        from actor.config import ASK_DEFAULTS
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'ask {\n    on-start "user start"\n    before-run "user run"\n}\n',
+            )
+            self._write(
+                Path(cwd) / ".actor" / "settings.kdl",
+                'ask {\n    on-start "project start"\n}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            self.assertEqual(
+                cfg.ask.resolved("on-start", ASK_DEFAULTS["on-start"]),
+                "project start",
+            )
+            # User's before-run is preserved (project didn't override).
+            self.assertEqual(
+                cfg.ask.resolved("before-run", ASK_DEFAULTS["before-run"]),
+                "user run",
+            )
+
+    def test_ask_empty_block_is_no_op(self):
+        # `ask { }` parses fine; resolved() returns defaults for all keys.
+        from actor.config import ASK_DEFAULTS
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            self._write(
+                Path(home) / ".actor" / "settings.kdl",
+                'ask {\n}\n',
+            )
+            cfg = load_config(cwd=Path(cwd), home=Path(home))
+            for key, default in ASK_DEFAULTS.items():
+                self.assertEqual(cfg.ask.resolved(key, default), default)
+
+
 if __name__ == "__main__":
     unittest.main()

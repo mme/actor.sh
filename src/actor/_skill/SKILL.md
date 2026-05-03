@@ -240,6 +240,18 @@ actor new auth-review --role reviewer --config model=haiku "..."    # CLI overri
 actor new auth-review --role reviewer --agent codex "..."           # CLI agent beats role (errors if role has a prompt)
 ```
 
+### Ask block (user-configurable tool guidance)
+
+The user can put a top-level `ask { }` block in settings.kdl whose
+strings get appended to the descriptions of `new_actor`, `run_actor`,
+and `discard_actor` at MCP-server startup. You read those appendices
+as part of the tool's description and follow them — they tell you when
+to use `AskUserQuestion` before calling the tool. Defaults exist if
+the user hasn't customized them.
+
+You don't need to read settings.kdl yourself; the guidance is already
+folded into the tool description you see. Just follow it.
+
 ### Create without running
 
 ```
