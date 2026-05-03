@@ -58,7 +58,7 @@ class DiscoveredActorWatchUiFailures(unittest.IsolatedAsyncioTestCase):
             env.run_cli(["new", "bravo"])
             proc = subprocess.Popen(
                 ["actor", "new", "golf", "short task"],
-                env=env.env(**claude_responds("ok", sleep=1.0)),
+                env=env.env(**claude_responds("ok", sleep=5.0)),
                 cwd=str(env.cwd),
             )
             try:
@@ -66,11 +66,20 @@ class DiscoveredActorWatchUiFailures(unittest.IsolatedAsyncioTestCase):
                 async with watch_app(env, size=(100, 30)) as (app, pilot):
                     await wait_for_actor_in_tree(pilot, app, "golf", timeout=8)
                     await wait_for_actor_in_tree(pilot, app, "bravo", timeout=8)
+                    # Wait for the watch app to actually observe golf
+                    # as RUNNING — sleep=5 gives a wide window, but on
+                    # a slow CI the first poll could otherwise land
+                    # before claude's row is alive.
+                    for _ in range(80):
+                        await pilot.pause(0.1)
+                        status = app._prev_statuses.get("golf")
+                        if status is not None and status.value == "running":
+                            break
                     self.assertEqual(self._actor_tree_names(app)[:2],
                                      ["golf", "bravo"])
 
-                    proc.wait(timeout=5)
-                    for _ in range(50):
+                    proc.wait(timeout=10)
+                    for _ in range(80):
                         await pilot.pause(0.1)
                         status = app._prev_statuses.get("golf")
                         if status is not None and status.value == "done":
