@@ -469,13 +469,6 @@ def main(argv: Optional[List[str]] = None) -> None:
             if prompt is None and not sys.stdin.isatty():
                 prompt = sys.stdin.read().strip()
                 stdin_consumed = True
-            # Role prompt fallback runs before the empty-stdin check so
-            # that `echo "" | actor new foo --role qa` uses the role's
-            # prompt instead of erroring.
-            if not prompt and args.role is not None:
-                role = app_config.roles.get(args.role)
-                if role is not None and role.prompt:
-                    prompt = role.prompt
             if stdin_consumed and not prompt:
                 print("error: stdin was empty — expected a prompt", file=sys.stderr)
                 sys.exit(1)

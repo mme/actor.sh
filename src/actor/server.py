@@ -265,8 +265,10 @@ def new_actor(
 
     Args:
         name: Actor name (becomes the git branch). Use lowercase with hyphens.
-        prompt: Optional prompt to run immediately after creation. Falls back
-            to the role's prompt (if any) when omitted.
+        prompt: Optional task prompt to run immediately after creation. The
+            role's `prompt` field is its system prompt (injected as
+            `--append-system-prompt`), not a task fallback — omit `prompt`
+            to create the actor idle and run it later with `run_actor`.
         agent: Coding agent — "claude" or "codex". Defaults to the role's
             agent (if a role is applied) or "claude" otherwise.
         role: Apply a named role from settings.kdl. Use `list_roles` to see
@@ -311,11 +313,6 @@ def new_actor(
 
     if prompt is not None:
         prompt = prompt.strip()
-    # Role's prompt is a fallback only — an explicit `prompt` always wins.
-    if not prompt and role is not None:
-        applied = app_config.roles.get(role)
-        if applied is not None and applied.prompt:
-            prompt = applied.prompt
     if prompt:
         try:
             _spawn_background_run(name, prompt, cli_overrides=ActorConfig(), ctx=ctx)

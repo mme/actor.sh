@@ -122,7 +122,10 @@ Applying roles:
 - Use MCP only.
 - Apply roles by passing role="<name>" to mcp__actor__new_actor.
 - Do not shell out or use CLI fallbacks.
-- Explicit agent/config/prompt overrides beat the role defaults.
+- A role's `prompt` field is the actor's *system prompt* (its identity / behavioral guidance), NOT a default task prompt. The `prompt` parameter you pass to new_actor is the *task* — they coexist, they don't compete.
+  Example: mcp__actor__new_actor(name="auth-review", role="reviewer", prompt="Review src/auth/*.py for security issues; report findings.")
+  → role.prompt becomes the actor's append-system-prompt; "Review src/auth/*.py..." is the task it works on.
+- Explicit agent / config / prompt parameters beat the role's defaults for those fields, but the role's system-prompt-via-prompt always applies (it's not the same field as the task).
 - If the MCP environment does not support role application as expected, surface that clearly instead of attempting a non-MCP workaround.
 
 Lifecycle:
@@ -131,6 +134,13 @@ Lifecycle:
 - mcp__actor__stop_actor interrupts a run but keeps the actor.
 - mcp__actor__discard_actor deletes the actor and worktree.
 - Never use force discard unless the user has explicitly confirmed that losing uncommitted work is acceptable.
+
+Worktree base directory:
+- Sub-actors default to creating their worktree from the *current working directory of the orchestrator session* (i.e. wherever the user ran `actor main`).
+- This is correct when the user is asking you to do work on the repo they launched you from.
+- If the user asks you to work on a *different repo* (e.g. "fix the API in ~/work/backend"), you MUST pass dir="<absolute path>" to mcp__actor__new_actor — otherwise the sub-actor's worktree is created in the wrong repo.
+  Example: mcp__actor__new_actor(name="fix-api", dir="/home/user/work/backend", prompt="Fix the /users endpoint")
+- When in doubt, ask the user which repo before spawning.
 
 Inspection:
 - Use mcp__actor__list_actors for inventory, not for completion polling.

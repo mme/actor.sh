@@ -130,7 +130,10 @@ class NewCommandTests(unittest.TestCase):
         overrides = cmd_new.call_args.kwargs["cli_overrides"]
         self.assertEqual(overrides.actor_keys.get("use-subscription"), "true")
 
-    def test_new_passes_role_arg_to_cmd_new_and_uses_role_prompt(self):
+    def test_new_passes_role_arg_to_cmd_new(self):
+        # `actor new foo --role qa` (no prompt) creates the actor with the
+        # role applied but does not auto-run — the role's `prompt` is the
+        # actor's system prompt, not a fallback task.
         fake_db = MagicMock()
         fake_actor = MagicMock()
         fake_actor.name = "foo"
@@ -140,7 +143,7 @@ class NewCommandTests(unittest.TestCase):
 
         from actor import AppConfig, Role
         fake_app_cfg = AppConfig(roles={
-            "qa": Role(name="qa", agent="claude", prompt="run tests"),
+            "qa": Role(name="qa", agent="claude", prompt="You are a QA engineer."),
         })
 
         stdin = io.StringIO("")
@@ -163,10 +166,10 @@ class NewCommandTests(unittest.TestCase):
         self.assertEqual(kwargs["role_name"], "qa")
         self.assertIsNotNone(kwargs["app_config"])
         self.assertEqual(code, 0)
-        cmd_run.assert_called_once()
-        self.assertEqual(cmd_run.call_args.kwargs["prompt"], "run tests")
+        # No auto-run: a role's prompt is its identity, not a default task.
+        cmd_run.assert_not_called()
 
-    def test_new_cli_prompt_beats_role_prompt(self):
+    def test_new_with_role_and_explicit_prompt_runs_with_explicit_prompt(self):
         fake_db = MagicMock()
         fake_actor = MagicMock()
         fake_actor.name = "foo"
@@ -176,7 +179,7 @@ class NewCommandTests(unittest.TestCase):
 
         from actor import AppConfig, Role
         fake_app_cfg = AppConfig(roles={
-            "qa": Role(name="qa", agent="claude", prompt="role says run tests"),
+            "qa": Role(name="qa", agent="claude", prompt="You are a QA engineer."),
         })
 
         stdin = io.StringIO("")
@@ -189,8 +192,8 @@ class NewCommandTests(unittest.TestCase):
              patch("actor.cli._create_agent", return_value=MagicMock()), \
              patch("sys.stdin", stdin):
             db_cls.open.return_value = fake_db
-            main(["new", "foo", "custom prompt", "--role", "qa"])
-        self.assertEqual(cmd_run.call_args.kwargs["prompt"], "custom prompt")
+            main(["new", "foo", "review the auth module", "--role", "qa"])
+        self.assertEqual(cmd_run.call_args.kwargs["prompt"], "review the auth module")
 
     def test_new_without_role_does_not_pass_role_kwargs(self):
         """Regression check: normal `actor new foo` must still work end-to-end."""
@@ -199,9 +202,10 @@ class NewCommandTests(unittest.TestCase):
         self.assertIsNone(kwargs["role_name"])
         self.assertEqual(code, 0)
 
-    def test_new_empty_stdin_with_role_prompt_falls_back(self):
-        """`echo "" | actor new foo --role qa` must use the role's
-        prompt instead of erroring on empty stdin."""
+    def test_new_empty_stdin_with_role_does_not_run(self):
+        """`echo "" | actor new foo --role qa` creates the actor without
+        auto-running — empty stdin no longer falls back to the role's
+        prompt (which is now a system prompt, not a task)."""
         fake_db = MagicMock()
         fake_actor = MagicMock()
         fake_actor.name = "foo"
@@ -211,7 +215,7 @@ class NewCommandTests(unittest.TestCase):
 
         from actor import AppConfig, Role
         fake_app_cfg = AppConfig(roles={
-            "qa": Role(name="qa", agent="claude", prompt="run tests"),
+            "qa": Role(name="qa", agent="claude", prompt="You are a QA engineer."),
         })
 
         stdin = io.StringIO("")
@@ -222,16 +226,13 @@ class NewCommandTests(unittest.TestCase):
              patch("actor.config.load_config", return_value=fake_app_cfg), \
              patch("actor.cli.Database") as db_cls, \
              patch("actor.cli._create_agent", return_value=MagicMock()), \
-             patch("sys.stdin", stdin):
+             patch("sys.stdin", stdin), \
+             patch("sys.stderr", io.StringIO()):
             db_cls.open.return_value = fake_db
-            try:
+            with self.assertRaises(SystemExit) as ctx:
                 main(["new", "foo", "--role", "qa"])
-                code = 0
-            except SystemExit as e:
-                code = e.code if isinstance(e.code, int) else 1
-        self.assertEqual(code, 0)
-        cmd_run.assert_called_once()
-        self.assertEqual(cmd_run.call_args.kwargs["prompt"], "run tests")
+            self.assertEqual(ctx.exception.code, 1)
+        cmd_run.assert_not_called()
 
     def test_new_surfaces_config_error_from_load_config(self):
         """A malformed settings.kdl must exit non-zero with the error text
@@ -515,14 +516,16 @@ class McpToolTests(unittest.TestCase):
         self.assertIn("created", msg)
         self.assertIn("run failed to start", msg)
 
-    def test_new_actor_passes_role_to_cmd_new(self):
+    def test_new_actor_passes_role_to_cmd_new_no_auto_run(self):
+        # `new_actor(role="qa")` with no prompt creates an idle actor —
+        # the role's `prompt` is its system prompt, not a fallback task,
+        # so nothing to run.
         from actor import server, AppConfig, Role
         cfg = AppConfig(roles={
-            "qa": Role(name="qa", agent="claude", prompt="run tests"),
+            "qa": Role(name="qa", agent="claude", prompt="You are a QA engineer."),
         })
         with patch("actor.server.cmd_new") as cmd_new, \
              patch("actor.server._spawn_background_run") as spawn, \
-             patch("actor.server.load_config", return_value=cfg, create=True), \
              patch("actor.config.load_config", return_value=cfg):
             fake_actor = MagicMock()
             fake_actor.dir = "/tmp/foo"
@@ -530,13 +533,12 @@ class McpToolTests(unittest.TestCase):
             server.new_actor(name="foo", role="qa")
         kwargs = cmd_new.call_args.kwargs
         self.assertEqual(kwargs["role_name"], "qa")
-        # Role's prompt fires the background run even without an explicit prompt.
-        spawn.assert_called_once()
+        spawn.assert_not_called()
 
-    def test_new_actor_explicit_prompt_beats_role_prompt(self):
+    def test_new_actor_role_with_explicit_prompt_runs_with_explicit(self):
         from actor import server, AppConfig, Role
         cfg = AppConfig(roles={
-            "qa": Role(name="qa", agent="claude", prompt="role prompt"),
+            "qa": Role(name="qa", agent="claude", prompt="You are a QA engineer."),
         })
         with patch("actor.server.cmd_new") as cmd_new, \
              patch("actor.server._spawn_background_run") as spawn, \
@@ -544,14 +546,12 @@ class McpToolTests(unittest.TestCase):
             fake_actor = MagicMock()
             fake_actor.dir = "/tmp/foo"
             cmd_new.return_value = fake_actor
-            server.new_actor(name="foo", role="qa", prompt="explicit")
-        # spawn receives the explicit prompt verbatim, not the role's.
+            server.new_actor(name="foo", role="qa", prompt="review the auth module")
+        # spawn receives the explicit task prompt, not the role's prompt.
         spawn.assert_called_once()
         spawn_args = spawn.call_args
-        # _spawn_background_run signature: (name, prompt, ..., ctx=...)
-        # second positional or kwargs["prompt"]
         prompt_arg = spawn_args.args[1] if len(spawn_args.args) > 1 else spawn_args.kwargs["prompt"]
-        self.assertEqual(prompt_arg, "explicit")
+        self.assertEqual(prompt_arg, "review the auth module")
 
     def test_new_actor_role_agent_used_when_agent_param_omitted(self):
         from actor import server, AppConfig, Role

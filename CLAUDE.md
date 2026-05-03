@@ -148,29 +148,38 @@ already exists).
 Roles are named presets for `actor new`:
 
 ```kdl
-role "qa" {
-    description "Run tests after changes; report failures concisely."
+role "reviewer" {
+    description "Concise code review; flag bugs and style issues."
     agent "claude"
     model "opus"
-    prompt "You're a QA engineer. Write tests for the changed code."
+    prompt "You are a senior code reviewer. Be concise; flag bugs, security issues, and style violations. Don't fix anything — report findings only."
 }
 ```
 
-Usage: `actor new foo --role qa` applies the role's agent + config +
-prompt. Explicit CLI flags (`--agent`, `--model`, `--config`, positional
-prompt / stdin) override the role. `agent`, `prompt`, and `description`
-are promoted to top-level fields; every other child is stored as a
-config key (values coerced to strings). `description` is informational
-— shown by `actor roles` (CLI) and `mcp__actor__list_roles` (MCP) so an
-agent / user can pick the right role without opening settings.kdl.
+Usage: `actor new auth-review --role reviewer "Review src/auth/*.py for security issues"`.
+
+The role's `prompt` is the actor's **system prompt** (the role's
+identity / behavioral guidance), injected as `--append-system-prompt`
+for claude actors. The CLI's positional prompt is the **task**. They
+coexist — `--append-system-prompt` layers the role's identity on top
+of Claude Code's defaults; the task tells the actor what to do.
+
+`agent`, `prompt`, and `description` are promoted to top-level fields;
+every other child is stored as a config key (values coerced to
+strings). Explicit CLI flags (`--agent`, `--model`, `--config`)
+override the role's values for those slots; the per-call prompt is the
+task (it doesn't compete with the role's system prompt).
+
+Codex doesn't yet support role-level system prompts. A role with `prompt`
+and `agent "codex"` is rejected at `actor new` time with a clear error.
 
 To see what's defined, run `actor roles`. If a role-name typo lands in
 `actor new --role <bad>`, the error lists the available names.
 
-A built-in `main` role exists by default — a generic coding-agent
-preset (claude + a short system prompt). Override it with a `role
-"main" { ... }` block in settings.kdl to swap in your own system
-prompt (whole-role replacement; there is no per-field merge).
+A built-in `main` role exists by default — the Master Orchestrator
+preset used by `actor main`. Override it with a `role "main" { ... }`
+block in settings.kdl to swap in your own orchestrator system prompt
+(whole-role replacement; there is no per-field merge).
 
 ### Per-agent defaults
 

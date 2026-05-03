@@ -185,15 +185,30 @@ def cmd_new(
                 else:
                     merged_agent_args[k] = v
 
-    # Layer 3: role config. The kdl role namespace is flat, so we
-    # partition by checking each key against the agent's ACTOR_DEFAULTS
-    # whitelist — this is an input-boundary split, not runtime routing.
+    # Layer 3: role config + role.prompt as a system prompt. The kdl role
+    # namespace is flat, so we partition each `config` key against the
+    # agent's ACTOR_DEFAULTS whitelist (input-boundary split). The role's
+    # `prompt` field is the role's *identity* — its system prompt — and
+    # gets injected under the agent's SYSTEM_PROMPT_KEY (e.g.
+    # `append-system-prompt` for claude). `setdefault` so an explicit
+    # config key in the role still wins over the prompt-derived default.
     if role is not None:
         for k, v in role.config.items():
             if k in agent_cls.ACTOR_DEFAULTS:
                 merged_actor_keys[k] = v
             else:
                 merged_agent_args[k] = v
+        if role.prompt:
+            sp_key = agent_cls.SYSTEM_PROMPT_KEY
+            if sp_key is None:
+                raise ConfigError(
+                    f"role '{role.name}' has a `prompt` field, but agent "
+                    f"'{agent_kind.value}' doesn't yet support role-level "
+                    f"system prompts. Either remove the prompt and put the "
+                    f"guidance in the per-call task prompt, or use a "
+                    f"claude-based role."
+                )
+            merged_agent_args.setdefault(sp_key, role.prompt)
 
     # Layer 4: CLI overrides (already split by the CLI layer).
     for k, v in cli_overrides.actor_keys.items():

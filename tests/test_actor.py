@@ -629,8 +629,8 @@ class TestCmdNewRole(unittest.TestCase):
         return AppConfig(roles={
             "qa": Role(
                 name="qa",
-                agent="codex",
-                prompt="you're qa",
+                agent="claude",
+                prompt="You are a QA engineer.",
                 config={"model": "opus", "effort": "max"},
             ),
         })
@@ -649,13 +649,121 @@ class TestCmdNewRole(unittest.TestCase):
             role_name="qa",
             app_config=self._cfg_with_qa(),
         )
-        self.assertEqual(actor.agent, AgentKind.CODEX)
+        self.assertEqual(actor.agent, AgentKind.CLAUDE)
         self.assertEqual(actor.config.agent_args["model"], "opus")
         self.assertEqual(actor.config.agent_args["effort"], "max")
 
-    def test_cli_agent_overrides_role_agent(self):
+    def test_role_prompt_becomes_append_system_prompt(self):
+        # role.prompt is the role's identity (system prompt), injected as
+        # claude's --append-system-prompt flag via the agent_args dict.
         db = self._db()
         git = FakeGit()
+        actor = cmd_new(
+            db, git,
+            name="fix-auth",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name=None,
+            cli_overrides=ActorConfig(),
+            role_name="qa",
+            app_config=self._cfg_with_qa(),
+        )
+        self.assertEqual(
+            actor.config.agent_args.get("append-system-prompt"),
+            "You are a QA engineer.",
+        )
+
+    def test_role_with_codex_agent_and_prompt_rejected(self):
+        # Codex has no first-class system-prompt CLI flag, so applying a
+        # role with `prompt` to a codex actor must fail loudly rather than
+        # silently dropping the prompt.
+        from actor import AppConfig, Role
+        from actor.errors import ConfigError
+        db = self._db()
+        git = FakeGit()
+        cfg = AppConfig(roles={
+            "qa": Role(name="qa", agent="codex", prompt="You are a QA engineer."),
+        })
+        with self.assertRaises(ConfigError) as ctx:
+            cmd_new(
+                db, git,
+                name="fix-auth",
+                dir="/tmp",
+                no_worktree=True,
+                base=None,
+                agent_name=None,
+                cli_overrides=ActorConfig(),
+                role_name="qa",
+                app_config=cfg,
+            )
+        msg = str(ctx.exception)
+        self.assertIn("codex", msg)
+        self.assertIn("system prompt", msg)
+
+    def test_role_with_codex_no_prompt_works(self):
+        # A codex role without a `prompt` field is fine — only the
+        # system-prompt path triggers the codex limitation.
+        from actor import AppConfig, Role
+        db = self._db()
+        git = FakeGit()
+        cfg = AppConfig(roles={
+            "code": Role(name="code", agent="codex", config={"m": "o3"}),
+        })
+        actor = cmd_new(
+            db, git,
+            name="x",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name=None,
+            cli_overrides=ActorConfig(),
+            role_name="code",
+            app_config=cfg,
+        )
+        self.assertEqual(actor.agent, AgentKind.CODEX)
+        self.assertEqual(actor.config.agent_args["m"], "o3")
+
+    def test_explicit_append_system_prompt_in_role_config_beats_role_prompt(self):
+        # If the role both sets `prompt "X"` and includes
+        # `append-system-prompt "Y"` in its config, the explicit config
+        # key wins. The prompt-derived default uses setdefault.
+        from actor import AppConfig, Role
+        db = self._db()
+        git = FakeGit()
+        cfg = AppConfig(roles={
+            "qa": Role(
+                name="qa",
+                agent="claude",
+                prompt="prompt-field value",
+                config={"append-system-prompt": "config-key value"},
+            ),
+        })
+        actor = cmd_new(
+            db, git,
+            name="x",
+            dir="/tmp",
+            no_worktree=True,
+            base=None,
+            agent_name=None,
+            cli_overrides=ActorConfig(),
+            role_name="qa",
+            app_config=cfg,
+        )
+        self.assertEqual(
+            actor.config.agent_args["append-system-prompt"],
+            "config-key value",
+        )
+
+    def test_cli_agent_overrides_role_agent(self):
+        # Agent override has to use a role without a prompt so the
+        # codex-without-system-prompt path stays valid.
+        from actor import AppConfig, Role
+        db = self._db()
+        git = FakeGit()
+        cfg = AppConfig(roles={
+            "qa": Role(name="qa", agent="codex", config={"m": "o3"}),
+        })
         actor = cmd_new(
             db, git,
             name="fix-auth",
@@ -665,7 +773,7 @@ class TestCmdNewRole(unittest.TestCase):
             agent_name="claude",
             cli_overrides=ActorConfig(),
             role_name="qa",
-            app_config=self._cfg_with_qa(),
+            app_config=cfg,
         )
         self.assertEqual(actor.agent, AgentKind.CLAUDE)
 
