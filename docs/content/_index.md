@@ -1,12 +1,12 @@
 ---
 title: "actor.sh"
-description: "Stop managing agents. Start directing outcomes. Parallel AI coding from your main Claude Code session — peer-level actors with their own context, in isolated git worktrees."
+description: "One prompt. Total power. Parallel AI coding from your main Claude Code session — peer-level actors with their own context, in isolated git worktrees."
 weight: 0
 ---
 
-# Stop managing agents. Start directing outcomes.
+# One prompt. Total power.
 
-**Ten terminals, one of you. Let's fix that.**
+**One of you vs ten terminals demanding attention. Let's fix that.**
 
 Parallel AI coding should give you leverage — not more tabs to manage. Most multi-agent setups quietly turn you into the middle manager: opening terminals, spinning up branches, copying prompts around, checking on progress, gathering results, deciding what's next.
 
