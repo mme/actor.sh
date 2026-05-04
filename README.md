@@ -1,6 +1,6 @@
 # actor.sh
 
-A Master Orchestrator session backed by parallel coding sub-agents. You
+A main actor session backed by parallel coding sub-agents. You
 talk to one Claude session — `actor main` — and it spawns specialized
 sub-actors in isolated git worktrees to handle the actual work,
 verifies their output, and reports back.
@@ -32,7 +32,7 @@ actor main
 ```
 
 `actor main` launches Claude Code with the built-in `main` role's
-system prompt (the Master Orchestrator brief) and the actor channel
+system prompt (the main actor brief) and the actor channel
 enabled, so completion notifications from sub-actors flow back into
 the conversation.
 
@@ -47,7 +47,7 @@ the work, and tells you when there's something for you to look at.
 ## Roles
 
 A role is a named preset for sub-actors — agent + system prompt +
-config. The built-in `main` role is the Master Orchestrator (always
+config. The built-in `main` role is the main actor (always
 present). To define your own, drop a block in
 `~/.actor/settings.kdl` (user-wide) or `<repo>/.actor/settings.kdl`
 (project-local):

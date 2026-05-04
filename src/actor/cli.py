@@ -308,7 +308,7 @@ Loads the resolved `main` role from settings.kdl and launches its agent
 with the role's prompt appended as a system prompt and the actor channel
 enabled. Trailing arguments are forwarded to the agent CLI verbatim.
 
-The built-in `main` role ships as the Master Orchestrator; override it
+The built-in `main` role ships as the main actor; override it
 with a `role "main" { ... }` block in settings.kdl to swap in your own
 prompt or agent.
 

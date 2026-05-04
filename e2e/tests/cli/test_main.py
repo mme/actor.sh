@@ -29,7 +29,7 @@ class ActorMainTests(unittest.TestCase):
             parsed = invs[0]["parsed"]
             self.assertTrue(parsed["channel_flag"])
             self.assertIsNotNone(parsed["append_system_prompt"])
-            self.assertIn("Master Orchestrator", parsed["append_system_prompt"])
+            self.assertIn("main actor", parsed["append_system_prompt"])
 
     def test_actor_main_overridden_role_uses_custom_prompt(self):
         with isolated_home() as env:
