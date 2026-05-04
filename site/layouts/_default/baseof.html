@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+  {{ partial "head.html" . }}
+</head>
+<body>
+  {{ partial "sidebar.html" . }}
+  <main class="main">
+    <article class="article">
+      {{ block "main" . }}{{ end }}
+    </article>
+    {{ partial "footer.html" . }}
+  </main>
+</body>
+</html>

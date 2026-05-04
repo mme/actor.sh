@@ -1,0 +1,39 @@
+{{ define "main" }}
+<header class="page-header">
+  <h1>{{ .Title }}</h1>
+  {{ with .Description }}<p class="lede">{{ . }}</p>{{ end }}
+</header>
+<div class="prose">
+  {{ .Content }}
+</div>
+{{ $section := .CurrentSection }}
+{{ if $section }}
+  {{ $pages := $section.Pages.ByWeight }}
+  {{ $idx := -1 }}
+  {{ range $i, $p := $pages }}
+    {{ if eq $p.RelPermalink $.RelPermalink }}{{ $idx = $i }}{{ end }}
+  {{ end }}
+  {{ if ge $idx 0 }}
+    {{ $prev := false }}
+    {{ $next := false }}
+    {{ if gt $idx 0 }}{{ $prev = index $pages (sub $idx 1) }}{{ end }}
+    {{ if lt $idx (sub (len $pages) 1) }}{{ $next = index $pages (add $idx 1) }}{{ end }}
+    {{ if or $prev $next }}
+      <nav class="pager">
+        {{ if $prev }}
+          <a class="pager-prev" href="{{ $prev.RelPermalink }}">
+            <span class="pager-label">← Previous</span>
+            <span class="pager-title">{{ $prev.Title }}</span>
+          </a>
+        {{ else }}<span></span>{{ end }}
+        {{ if $next }}
+          <a class="pager-next" href="{{ $next.RelPermalink }}">
+            <span class="pager-label">Next →</span>
+            <span class="pager-title">{{ $next.Title }}</span>
+          </a>
+        {{ else }}<span></span>{{ end }}
+      </nav>
+    {{ end }}
+  {{ end }}
+{{ end }}
+{{ end }}

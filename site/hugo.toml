@@ -1,0 +1,18 @@
+baseURL = "/"
+locale = "en-us"
+title = "actor.sh"
+contentDir = "../docs/content"
+enableRobotsTXT = true
+
+[markup]
+  [markup.goldmark]
+    [markup.goldmark.renderer]
+      unsafe = true
+  [markup.highlight]
+    style = "github"
+    noClasses = false
+    lineNos = false
+    tabWidth = 2
+
+[params]
+  description = "actor.sh manages parallel Claude/Codex coding agents in isolated git worktrees."
