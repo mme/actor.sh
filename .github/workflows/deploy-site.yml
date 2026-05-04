@@ -29,6 +29,8 @@ jobs:
           extended: true
       - uses: actions/configure-pages@v5
         id: pages
+        with:
+          enablement: true
       - name: Build
         working-directory: site
         run: hugo --minify --baseURL "${{ steps.pages.outputs.base_url }}/"
