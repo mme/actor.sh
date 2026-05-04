@@ -2,6 +2,7 @@
 title: "Lifecycle hooks"
 description: "Shell commands that fire around actor create, run, and discard events."
 weight: 3
+slug: "hooks"
 ---
 
 Lifecycle hooks let you run shell commands around the events in an actor's life: creation, before each run, after each run, and on discard. They're declared in a top-level `hooks { }` block in `settings.kdl`, and each value is run via `/bin/sh -c` — so anything you can write in a shell line works.

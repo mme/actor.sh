@@ -2,6 +2,7 @@
 title: "Actors and worktrees"
 description: "An actor is a coding agent running a task on its own git branch in an isolated worktree."
 weight: 1
+slug: "actors-and-worktrees"
 ---
 
 An **actor** is a coding agent — `claude` or `codex` — running a task on its own git branch, inside its own working tree. Actors are the unit of work in actor.sh: each one is isolated from your main checkout and from every other actor, so you can run several in parallel without them stepping on each other's edits.

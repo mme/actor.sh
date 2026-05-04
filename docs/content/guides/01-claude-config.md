@@ -2,6 +2,7 @@
 title: "Configuring the Claude Agent"
 description: "Every config key the Claude agent accepts, with CLI and settings.kdl examples."
 weight: 1
+slug: "claude-config"
 ---
 
 The Claude agent is configured through key-value pairs that you pass on the CLI, define inside a [Role](../../concepts/02-roles/), or set as defaults in [settings.kdl](../03-settings-kdl/). All three paths use the same key names — what changes is how the value is layered into the final config.

@@ -2,6 +2,7 @@
 title: "MCP Tool Reference"
 description: "Every tool the actor MCP exposes, with arguments, defaults, and behavior."
 weight: 2
+slug: "mcp-tools"
 ---
 
 The actor MCP server exposes nine tools to the orchestrator. From a Claude Code perspective each one is named `mcp__actor__<tool>`. This page is the contract: arguments, defaults, return shape, and any constraints.

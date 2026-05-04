@@ -2,6 +2,7 @@
 title: "Config Keys"
 description: "Every config key per agent — actor-keys, agent-args, defaults, and valid values."
 weight: 3
+slug: "config-keys"
 ---
 
 Every config key actor-sh recognizes, grouped by agent. Use this page when you need to look up what a key does, what its default is, or what values it accepts.

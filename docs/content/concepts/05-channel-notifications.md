@@ -2,6 +2,7 @@
 title: "Channel notifications"
 description: "How actor completion events flow back into the orchestrator's conversation."
 weight: 5
+slug: "channel-notifications"
 ---
 
 When you spawn an actor with `new_actor` or `run_actor`, the MCP tool returns immediately — the agent runs in a background thread. The orchestrator doesn't poll for completion; it gets a push notification when each actor finishes. That mechanism is the **actor channel**.

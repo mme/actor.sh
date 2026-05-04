@@ -2,6 +2,7 @@
 title: "Ask blocks"
 description: "Customize when the orchestrator asks the user before spawning, running, or discarding actors."
 weight: 4
+slug: "ask-blocks"
 ---
 
 The `ask { }` block in `settings.kdl` lets you tune the orchestrator's "should I ask the user a question first?" behavior for the three lifecycle MCP tools that take meaningful parameters: `new_actor`, `run_actor`, and `discard_actor`. The strings you write are appended to the tools' descriptions at MCP-server startup, so they show up directly in the orchestrator's tool catalog.

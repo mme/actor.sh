@@ -2,6 +2,7 @@
 title: "The watch dashboard"
 description: "Tour the Textual TUI for live actor status, logs, diffs, and embedded sessions."
 weight: 4
+slug: "watch-dashboard"
 ---
 
 `actor watch` opens a live dashboard for everything you have in flight. It's a Textual app — runs in your terminal by default, or in a browser via textual-serve. Most workflows keep it open in one pane while the orchestrator runs in another.

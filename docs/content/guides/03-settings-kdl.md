@@ -2,6 +2,7 @@
 title: "settings.kdl Tour"
 description: "Roles, per-agent defaults, hooks, and ask blocks — every top-level node explained."
 weight: 3
+slug: "settings-kdl"
 ---
 
 `settings.kdl` is where you teach actor.sh about the roles, defaults, hooks, and orchestrator guidance specific to your environment. This tour walks through every top-level block and explains how the user-wide and project-local files combine.

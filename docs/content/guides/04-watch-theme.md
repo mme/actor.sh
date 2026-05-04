@@ -2,6 +2,7 @@
 title: "Theming the Watch Dashboard"
 description: "Built-in claude-dark / claude-light themes plus omarchy desktop integration."
 weight: 4
+slug: "watch-theme"
 ---
 
 `actor watch` ships with two built-in themes — `claude-dark` and `claude-light` — and an opt-in omarchy integration that reflavors whichever one is active so the TUI matches your desktop palette. This guide covers both, plus the live-reload hook that keeps the dashboard in sync when you change desktop themes.

@@ -2,6 +2,7 @@
 title: "Your first actor"
 description: "Launch the orchestrator, spawn an actor, and inspect the work it did."
 weight: 3
+slug: "first-actor"
 ---
 
 This walk-through takes you from a fresh shell to a finished actor. You'll launch the main actor, ask it to spin up a sub-actor in natural language, then inspect the work and clean up.

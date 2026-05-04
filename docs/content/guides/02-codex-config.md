@@ -2,6 +2,7 @@
 title: "Configuring the Codex Agent"
 description: "Every config key the Codex agent accepts, with CLI and settings.kdl examples."
 weight: 2
+slug: "codex-config"
 ---
 
 The Codex agent is configured the same way as Claude — `--config` on the CLI, inside a [Role](../../concepts/02-roles/), or as defaults in [settings.kdl](../03-settings-kdl/). The difference is that Codex uses its native flag names verbatim: there's no semantic translation layer between what you write and what `codex` receives.

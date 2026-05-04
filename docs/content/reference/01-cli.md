@@ -2,6 +2,7 @@
 title: "CLI Reference"
 description: "Every actor subcommand with its flags and a worked example."
 weight: 1
+slug: "cli"
 ---
 
 Complete reference for the `actor` CLI. Each section covers one subcommand: its flags, defaults, and a minimal example. Run `actor --help` or `actor <cmd> --help` for the in-terminal version.

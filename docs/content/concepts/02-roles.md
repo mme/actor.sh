@@ -2,6 +2,7 @@
 title: "Roles"
 description: "Named presets in settings.kdl that bundle an agent, a system prompt, and config keys."
 weight: 2
+slug: "roles"
 ---
 
 A **role** is a named preset for `actor new`. It bundles an agent kind, a system prompt that shapes the actor's identity, and any number of config keys you want defaulted in. Roles let you define "what kind of actor" once and reuse it across tasks.

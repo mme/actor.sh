@@ -2,6 +2,7 @@
 title: "Installation"
 description: "Get actor.sh installed and registered with Claude Code."
 weight: 2
+slug: "installation"
 ---
 
 actor.sh ships as a Python package that exposes the `actor` CLI and an MCP server. The recommended path is to install with `uv`, register the bundled skill with Claude Code, and verify that the orchestrator session can see the `mcp__actor__*` tools.
