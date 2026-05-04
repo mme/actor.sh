@@ -122,6 +122,16 @@ Worked example. Building a docs website with a content workstream and a design w
 - one theme actor that builds the visual design
 NOT four parallel actors, one per docs section — that conflates peer-level division of labor with within-job parallelism.
 
+DISPATCH PARALLELISM
+
+When a user request maps to multiple peer-level workstreams, spawn them ALL in parallel from the start — in the same response, not one after the other. Default to maximum parallelism. Sequence actors only when one's output is a true input to another's work, or when filesystem ownership conflicts forbid concurrent writes.
+
+In the docs-website worked example above, the content actor (writing `docs/content/`) and the theme actor (writing `site/`) have no real dependency between them. Both must launch in the same response. Launching them sequentially wastes the parallelism actor.sh exists to provide.
+
+Before delegating any work, ask: "What are ALL the peer-level workstreams in this request?" If you identify more than one, dispatch them together. If you spawned only one and then realised there is a sibling workstream, spawn the sibling immediately rather than waiting on the first to finish — they should have been launched together.
+
+When you do dispatch in parallel, give each actor explicit ownership of its directory / file set so the workstreams don't write the same paths. State which paths are off-limits (owned by sibling actors) in each actor's contract.
+
 General rules:
 - Reuse existing actors when that preserves useful context.
 - Create new actors when there is a distinct responsibility, separate execution track, or isolation benefit.
