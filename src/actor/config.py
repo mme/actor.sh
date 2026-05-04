@@ -181,7 +181,7 @@ def _default_roles() -> Dict[str, "Role"]:
         "main": Role(
             name="main",
             agent="claude",
-            description="Default actor.sh master orchestrator.",
+            description="Default actor.sh main actor.",
             prompt=_load_builtin_prompt("main"),
         ),
     }

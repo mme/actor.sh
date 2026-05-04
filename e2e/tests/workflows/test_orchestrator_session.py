@@ -34,8 +34,8 @@ class OrchestratorSessionTests(unittest.TestCase):
             self.assertEqual(len(invs), 1)
             sp = invs[0]["parsed"]["append_system_prompt"]
             self.assertIsNotNone(sp)
-            # Spot-check key phrases from the orchestrator prompt.
-            self.assertIn("Master Orchestrator", sp)
+            # Spot-check key phrases from the main actor prompt.
+            self.assertIn("main actor", sp)
             self.assertIn("actor", sp.lower())
 
     def test_mcp_can_spawn_sub_actor_during_session(self):

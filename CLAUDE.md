@@ -247,9 +247,9 @@ and `agent "codex"` is rejected at `actor new` time with a clear error.
 To see what's defined, run `actor roles`. If a role-name typo lands in
 `actor new --role <bad>`, the error lists the available names.
 
-A built-in `main` role exists by default — the Master Orchestrator
+A built-in `main` role exists by default — the main actor
 preset used by `actor main`. Override it with a `role "main" { ... }`
-block in settings.kdl to swap in your own orchestrator system prompt
+block in settings.kdl to swap in your own main actor system prompt
 (whole-role replacement; there is no per-field merge).
 
 ### Per-agent defaults
