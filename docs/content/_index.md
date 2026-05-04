@@ -1,10 +1,10 @@
 ---
 title: "actor.sh"
-description: "Stop managing agents. Start directing outcomes. Parallel AI coding from your main Claude Code session — peer-level actors with their own context, in isolated git worktrees."
+description: "One prompt. Total power. Parallel AI coding from your main Claude Code session — peer-level actors with their own context, in isolated git worktrees."
 weight: 0
 ---
 
-# Stop managing agents. Start directing outcomes.
+# One prompt. Total power.
 
 **Ten terminals, one of you. Let's fix that.**
 
