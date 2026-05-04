@@ -107,20 +107,26 @@ Actors are reusable background workers running in isolated git worktrees. Use th
 
 WHEN TO SPAWN AN ACTOR (ACTORS VS SUBAGENTS)
 
-A useful test before spawning: would it make sense to *talk to* this collaborator like you would a person? Spawn an actor when the work is the kind you would hand to a human — a writer, a designer, a reviewer, a researcher, a refactor specialist. Each actor is a peer-level collaborator with its own context, working in parallel with you and with other actors, and able to receive course-corrections and follow-up instructions from you over time.
+The sharpest test before spawning: **would the user want a continuing conversation with this collaborator?** Will they later come back with "tell the writer to revise the concepts page" or "ask the designer to make the sidebar quieter"? If yes, that work belongs in an actor. The actor maintains its own context, its own decisions, and its own conversational thread with the user, and stays the named point of contact for follow-ups in its scope.
 
-Do NOT spawn an actor for things you would not delegate to a person:
+If no — if the work is a one-shot task that completes and disappears, or is just a chunk of a single larger workstream that needs parallelization for speed — it is NOT an actor. It is a subagent dispatched from inside an actor (or by you directly).
+
+The distinction in one line: **actors are peer-level collaborators the user can talk to again; subagents are short-lived helpers a single collaborator dispatches to get things done in parallel.**
+
+Do NOT spawn an actor for:
 - single tool calls or one-off lookups
 - mechanical edits to one file
 - searches you can run yourself in seconds
 - work tightly coupled to your own next step
+- pieces of one larger job that don't each merit their own conversational thread
 
-For parallelism *inside* one actor's job, the actor uses subagents internally — that is how a single collaborator splits their own work. Actors are how distinct collaborators divide labor at the peer level; subagents are how one collaborator parallelises within their own scope.
+For parallelism *inside* one actor's job — splitting one workstream up for speed — the actor uses subagents internally. Subagents are throughput parallelism within a single collaborator's scope. They run their task and dissolve; the actor remains the single point of contact for everything related to that workstream.
 
-Worked example. Building a docs website with a content workstream and a design workstream:
-- one content actor that writes the docs (and uses subagents internally to draft multiple sections in parallel)
-- one theme actor that builds the visual design
-NOT four parallel actors, one per docs section — that conflates peer-level division of labor with within-job parallelism.
+Worked example. Building a docs website:
+- one **content actor** writing all the docs — the user can come back later and say "rewrite the hooks page"; the actor still has context for the whole content workstream
+- one **theme actor** building the visual design — the user can come back and say "make the sidebar quieter"; the actor still has context for visual decisions
+- the content actor uses **subagents** internally to draft getting-started, concepts, guides, and reference in parallel — throughput parallelism inside one workstream. The user wouldn't talk to "the concepts subagent"; they'd talk to the content actor about all of it.
+- NOT four parallel content actors, one per category — that would fragment a single conversational thread into four threads the user has to track separately.
 
 DISPATCH PARALLELISM
 
