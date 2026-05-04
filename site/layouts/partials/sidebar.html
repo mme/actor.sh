@@ -1,0 +1,20 @@
+{{- $current := . -}}
+<aside class="sidebar">
+  <div class="sidebar-inner">
+    <a class="brand" href="{{ "/" | relURL }}">actor.sh</a>
+    <nav class="nav">
+      {{ range site.Sections.ByWeight }}
+        {{ if .Pages }}
+          <h3 class="nav-section">{{ .Title }}</h3>
+          <ul class="nav-list">
+            {{ range .Pages.ByWeight }}
+              <li class="nav-item{{ if eq .RelPermalink $current.RelPermalink }} active{{ end }}">
+                <a href="{{ .RelPermalink }}">{{ .Title }}</a>
+              </li>
+            {{ end }}
+          </ul>
+        {{ end }}
+      {{ end }}
+    </nav>
+  </div>
+</aside>

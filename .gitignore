@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .DS_Store
 .claude/
+site/public/
+site/resources/
+site/.hugo_build.lock
