@@ -14,7 +14,7 @@ class ActorRolesTests(unittest.TestCase):
             self.assertEqual(r.returncode, 0, msg=r.stderr)
             self.assertIn("main", r.stdout)
             # Default description should appear too.
-            self.assertIn("orchestrator", r.stdout.lower())
+            self.assertIn("main actor", r.stdout.lower())
 
     def test_roles_includes_user_defined_role(self):
         with isolated_home() as env:
