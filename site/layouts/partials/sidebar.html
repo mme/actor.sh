@@ -1,10 +1,9 @@
 {{- $current := . -}}
 <aside class="sidebar">
-  <div class="sidebar-inner">
-    <a class="brand" href="{{ "/" | relURL }}">actor.sh</a>
-    <nav class="nav">
-      {{ range site.Sections.ByWeight }}
-        {{ if .Pages }}
+  <nav class="nav">
+    {{ range site.Sections.ByWeight }}
+      {{ if .Pages }}
+        <div class="nav-group">
           <h3 class="nav-section">{{ .Title }}</h3>
           <ul class="nav-list">
             {{ range .Pages.ByWeight }}
@@ -13,8 +12,8 @@
               </li>
             {{ end }}
           </ul>
-        {{ end }}
+        </div>
       {{ end }}
-    </nav>
-  </div>
+    {{ end }}
+  </nav>
 </aside>
