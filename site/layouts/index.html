@@ -1,16 +1,5 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>{{ site.Title }}</title>
-<meta http-equiv="refresh" content="0; url={{ "/getting-started/introduction/" | relURL }}">
-<link rel="canonical" href="{{ "/getting-started/introduction/" | relURL }}">
-<style>
-  body { font: 14px/1.6 ui-monospace, "JetBrains Mono", Menlo, monospace; color: #57534e; padding: 2rem; max-width: 40rem; margin: 0 auto; background: #f5f5f4; }
-  a { color: #0369a1; text-decoration: none; border-bottom: 1px solid currentColor; }
-</style>
-</head>
-<body>
-<p>Loading documentation… <a href="{{ "/getting-started/introduction/" | relURL }}">continue →</a></p>
-</body>
-</html>
+{{ define "main" }}
+<div class="prose landing">
+  {{ .Content }}
+</div>
+{{ end }}

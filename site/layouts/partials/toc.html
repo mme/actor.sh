@@ -1,0 +1,21 @@
+{{- $headings := slice -}}
+{{- with .Page.Fragments -}}
+  {{- range .Headings -}}
+    {{- if eq .Level 2 -}}{{- $headings = $headings | append . -}}{{- end -}}
+    {{- range .Headings -}}
+      {{- if eq .Level 2 -}}{{- $headings = $headings | append . -}}{{- end -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- if $headings -}}
+<nav class="toc" aria-label="On this page">
+  <h3 class="toc-label">In this page</h3>
+  <ul class="toc-list">
+    {{ range $headings }}
+      <li class="toc-item">
+        <a href="#{{ .ID }}" data-toc-link="{{ .ID }}">{{ .Title }}</a>
+      </li>
+    {{ end }}
+  </ul>
+</nav>
+{{- end -}}
