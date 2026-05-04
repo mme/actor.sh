@@ -1,8 +1,7 @@
 {{ define "main" }}
-<header class="page-header">
-  <h1>{{ .Title }}</h1>
-  {{ with .Description }}<p class="lede">{{ . }}</p>{{ end }}
-</header>
+{{ if .Parent }}{{ with .Parent }}{{ if and .Title (ne .Kind "home") }}<span class="eyebrow">{{ .Title }}</span>{{ end }}{{ end }}{{ end }}
+<h1 class="page-title">{{ .Title }}</h1>
+{{ with .Description }}<p class="page-lede">{{ . }}</p>{{ end }}
 {{ with .Content }}
   <div class="prose">{{ . }}</div>
 {{ end }}

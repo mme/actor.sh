@@ -5,9 +5,19 @@
 <title>{{ if eq .Kind "home" }}{{ site.Title }}{{ else }}{{ $title }} — {{ site.Title }}{{ end }}</title>
 {{ with $desc }}<meta name="description" content="{{ . }}">{{ end }}
 
+<script>
+  (function () {
+    try {
+      var t = localStorage.getItem('actor-theme');
+      if (!t) t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      if (t === 'dark') document.documentElement.dataset.theme = 'dark';
+    } catch (e) {}
+  })();
+</script>
+
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=JetBrains+Mono:wght@300;400;500;600&display=swap">
 
 <link rel="stylesheet" href="{{ "css/style.css" | relURL }}">
 <link rel="canonical" href="{{ .Permalink }}">

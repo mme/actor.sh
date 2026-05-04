@@ -4,12 +4,16 @@
   {{ partial "head.html" . }}
 </head>
 <body>
+  {{ partial "topbar.html" . }}
   {{ partial "sidebar.html" . }}
   <main class="main">
     <article class="article">
-      {{ block "main" . }}{{ end }}
+      <div class="article-inner">
+        {{ block "main" . }}{{ end }}
+      </div>
     </article>
     {{ partial "footer.html" . }}
   </main>
+  <script src="{{ "js/theme.js" | relURL }}" defer></script>
 </body>
 </html>
