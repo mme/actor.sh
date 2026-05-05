@@ -6,9 +6,10 @@ import asyncio
 import sys
 import threading
 import traceback
-from typing import Any, List, Literal
+from typing import Any, List, Literal, Optional, Tuple
 
 from . import __version__
+from . import cli_format
 
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.stdio import stdio_server
@@ -19,19 +20,14 @@ from .db import Database
 from .errors import ActorError
 from .git import RealGit
 from .process import RealProcessManager
-from .types import ActorConfig
-from .commands import (
-    _agent_class,
-    cmd_config,
-    cmd_discard,
-    cmd_list,
-    cmd_logs,
-    cmd_new,
-    cmd_roles,
-    cmd_run,
-    cmd_show,
-    cmd_stop,
+from .service import (
+    ActorService,
+    LocalActorService,
+    Notification,
+    agent_class,
+    create_agent,
 )
+from .types import ActorConfig
 from .cli import _build_cli_overrides, _db_path, _create_agent, _resolve_agent_kind_for_cli
 
 
@@ -54,19 +50,15 @@ def _build_instructions(for_host: str | None = None) -> str:
         "Events from the actor channel arrive as <channel source=\"actor\" ...>. "
         "They notify you when an actor finishes. Read the event and report the result to the user."
     )
-    # When running from a source clone without install, we can't know the
-    # version — skip the drift hint since "unknown" would falsely trigger an
-    # `actor update` prompt every session.
+    # When running from a source clone without install, we can't know
+    # the version — skip the drift hint since "unknown" would falsely
+    # trigger an `actor update` prompt every session.
     if __version__ == "unknown":
         return base
-    # The deployed skill's 'Version and updates' section (inside the
-    # <!-- BEGIN AUTO-UPDATED ... --> markers of SKILL.md) declares the
-    # version it was installed from. The skill itself tells the agent how
-    # to compare that against this server announcement.
-    return (
-        base
-        + f"\n\nactor-sh MCP version: {__version__}."
-    )
+    # The deployed skill's 'Version and updates' section declares the
+    # version it was installed from. The skill itself tells the agent
+    # how to compare that against this server announcement.
+    return base + f"\n\nactor-sh MCP version: {__version__}."
 
 
 mcp = ActorMCP("actor.sh", instructions=_build_instructions())
@@ -76,10 +68,10 @@ def _resolve_ask_strings() -> dict[str, str]:
     """Resolve the `ask { }` strings from settings.kdl, falling back to
     hardcoded defaults if the kdl is missing/malformed.
 
-    Computed once at module load — tool descriptions are then static for
-    the server's lifetime. A malformed settings.kdl logs a warning to
-    stderr but doesn't crash the import; defaults take over so MCP still
-    works.
+    Computed once at module load — tool descriptions are then static
+    for the server's lifetime. A malformed settings.kdl logs a warning
+    to stderr but doesn't crash the import; defaults take over so MCP
+    still works.
     """
     from .config import ASK_DEFAULTS, load_config
     try:
@@ -110,8 +102,52 @@ def _ask_tool(ask_key: str):
     return decorator
 
 
+# ---------------------------------------------------------------------------
+# Service construction
+# ---------------------------------------------------------------------------
+
+
 def _db() -> Database:
+    """Open a fresh DB connection. Each tool call gets its own to keep
+    SQLite-WAL-friendly isolation (and to keep test patches working —
+    `actor.server._db` is a common patch target).
+    """
     return Database.open(_db_path())
+
+
+def _service(db: Optional[Database] = None) -> LocalActorService:
+    """Build a LocalActorService against either a caller-supplied DB
+    handle or a fresh one. Tools that already opened a DB pass it in
+    so we don't double-open."""
+    from .config import load_config
+    try:
+        app_config = load_config()
+    except Exception as e:
+        print(
+            f"[actor-mcp] settings.kdl ignored (will use built-in defaults): {e}",
+            file=sys.stderr,
+        )
+        app_config = None
+    return LocalActorService(
+        db=db if db is not None else _db(),
+        git=RealGit(),
+        proc_mgr=RealProcessManager(),
+        agent_factory=_create_agent,
+        app_config=app_config,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Channel notification dispatch
+# ---------------------------------------------------------------------------
+
+
+# Registry of in-flight background runs keyed by actor name. Each
+# entry carries the asyncio session + loop captured at spawn time,
+# plus a one-shot flag so we don't double-emit if both
+# `run_completed` and `actor_discarded` arrive (mid-run discard).
+_active_spawns_lock = threading.Lock()
+_active_spawns: dict[str, Tuple[Any, asyncio.AbstractEventLoop]] = {}
 
 
 async def _send_channel_notification(
@@ -132,7 +168,70 @@ async def _send_channel_notification(
     await session.send_message(message)
 
 
-# -- Tools -----------------------------------------------------------------
+def _dispatch_notification(n: Notification) -> None:
+    """Service-side notification handler subscribed at server startup.
+
+    Looks up the active spawn for `n.actor`; if there's one, formats
+    the event into a `notifications/claude/channel` and dispatches it
+    through the captured loop. The wire format is byte-identical to
+    the pre-refactor implementation: `content = "[<actor>] <body>"`,
+    `meta = {"actor": <actor>, "status": <status>}`.
+
+    Plain `actor_discarded` events without an active spawn (e.g. user
+    runs `actor discard` with no run in flight) get dropped — no
+    parent claude is waiting on them. Mid-run discards arrive with
+    `run_id` set and ARE relayed.
+    """
+    with _active_spawns_lock:
+        registration = _active_spawns.pop(n.actor, None)
+    if registration is None:
+        return
+    session, loop = registration
+
+    if n.event == "run_completed":
+        status_str = n.status.value if n.status is not None else "unknown"
+    elif n.event == "actor_discarded":
+        if n.run_id is None:
+            # Plain discard — not associated with any spawn we should
+            # relay. The pop above already cleaned up.
+            return
+        status_str = "discarded"
+    else:
+        return
+
+    body = n.output or f"Finished with status: {status_str}."
+    content = f"[{n.actor}] {body}"
+    meta = {"actor": n.actor, "status": status_str}
+
+    future = asyncio.run_coroutine_threadsafe(
+        _send_channel_notification(session, content, meta), loop,
+    )
+    try:
+        future.result(timeout=5)
+    except Exception as e:
+        print(
+            f"[actor-mcp] failed to send channel notification: {e}",
+            file=sys.stderr,
+        )
+
+
+# Subscribe a long-lived service to receive notifications. The service
+# itself is constructed per-tool-call (see `_service()`), but
+# notifications need a persistent subscription to survive across
+# spawns. Trick: each `_spawn_background_run` builds its own service
+# (which it uses for `run_actor`) and subscribes `_dispatch_notification`
+# for that one call's lifetime. The handler then pops the active spawn
+# and dispatches.
+#
+# This reads like a pure pub/sub even though every spawn carries its
+# own service — the subscription token lives on the per-spawn service
+# and gets cancelled in finally so handlers don't leak.
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
 
 @mcp.tool()
 def list_actors(status: str | None = None) -> str:
@@ -141,21 +240,24 @@ def list_actors(status: str | None = None) -> str:
     Args:
         status: Optional filter — e.g. "running", "done", "error".
     """
-    return cmd_list(_db(), RealProcessManager(), status_filter=status)
+    svc = _service()
+    actors = svc.list_actors(status_filter=status)
+    statuses = {a.name: svc.actor_status(a.name) for a in actors}
+    latest_runs = {a.name: svc.latest_run(a.name) for a in actors}
+    return cli_format.format_actor_table(actors, statuses, latest_runs)
 
 
 @mcp.tool()
 def list_roles() -> str:
     """List available roles from settings.kdl.
 
-    Roles are named presets users define in `~/.actor/settings.kdl` (user-wide)
-    or `<repo>/.actor/settings.kdl` (project-local). Each role can set the
-    agent, prompt, and any config keys, plus an optional `description` that
-    explains when to use it. Apply a role at actor creation by passing
-    `role="<name>"` to `new_actor`.
+    Roles are named presets users define in `~/.actor/settings.kdl`
+    (user-wide) or `<repo>/.actor/settings.kdl` (project-local). Each
+    role can set the agent, prompt, and any config keys, plus an
+    optional `description` that explains when to use it. Apply a role
+    at actor creation by passing `role="<name>"` to `new_actor`.
     """
-    from .config import load_config
-    return cmd_roles(load_config())
+    return cli_format.format_roles(_service().list_roles())
 
 
 @mcp.tool()
@@ -166,7 +268,8 @@ def show_actor(name: str, runs: int = 5) -> str:
         name: Actor name.
         runs: Number of recent runs to display (default 5, 0 for none).
     """
-    return cmd_show(_db(), RealProcessManager(), name=name, runs_limit=runs)
+    detail = _service().show_actor(name=name, runs_limit=runs)
+    return cli_format.format_actor_detail(detail)
 
 
 @mcp.tool()
@@ -177,10 +280,8 @@ def logs_actor(name: str, verbose: bool = False) -> str:
         name: Actor name.
         verbose: If True, include tool calls, thinking, and timestamps.
     """
-    db = _db()
-    actor = db.get_actor(name)
-    agent = _create_agent(actor.agent)
-    return cmd_logs(db, agent, name=name, verbose=verbose, watch=False)
+    logs = _service().get_logs(name)
+    return cli_format.format_logs(logs, verbose=verbose)
 
 
 @mcp.tool()
@@ -190,10 +291,8 @@ def stop_actor(name: str) -> str:
     Args:
         name: Actor name.
     """
-    db = _db()
-    actor = db.get_actor(name)
-    agent = _create_agent(actor.agent)
-    return cmd_stop(db, agent, RealProcessManager(), name=name)
+    result = _service().stop_actor(name=name)
+    return cli_format.format_stop(result)
 
 
 @_ask_tool("on-discard")
@@ -204,11 +303,8 @@ def discard_actor(name: str, force: bool = False) -> str:
         name: Actor name.
         force: If True, ignore on-discard hook failures and discard anyway.
     """
-    from .config import load_config
-    return cmd_discard(
-        _db(), RealProcessManager(), name=name,
-        app_config=load_config(), force=force,
-    )
+    result = _service().discard_actor(name=name, force=force)
+    return cli_format.format_discard(result)
 
 
 @mcp.tool()
@@ -219,7 +315,12 @@ def config_actor(name: str, pairs: List[str] | None = None) -> str:
         name: Actor name.
         pairs: Config key=value pairs to set. Omit to view current config.
     """
-    return cmd_config(_db(), name=name, config_pairs=pairs or [])
+    svc = _service()
+    if pairs:
+        svc.config_actor(name=name, pairs=pairs)
+        return f"{name} config updated"
+    cfg = svc.config_actor(name=name)
+    return cli_format.format_config_view(cfg)
 
 
 def _spawn_background_run(
@@ -228,60 +329,68 @@ def _spawn_background_run(
     cli_overrides: ActorConfig,
     ctx: Context | None,
 ) -> None:
-    """Kick off a run in a background thread; send a channel notification when it finishes."""
-    pm = RealProcessManager()
-    actor = _db().get_actor(name)
-    agent_impl = _create_agent(actor.agent)
-
+    """Kick off a run in a background thread; the service publishes a
+    completion notification, our subscribed handler relays it as a
+    `notifications/claude/channel` event."""
     session = ctx.session if ctx else None
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
 
+    if session is not None and loop is not None:
+        with _active_spawns_lock:
+            _active_spawns[name] = (session, loop)
+    else:
+        # No session/loop to dispatch on — record nothing, we'll just
+        # run the thread for its DB side effects.
+        pass
+
     def _run() -> None:
-        thread_db = Database.open(_db_path())
-        output = ""
+        # Per-thread service so the DB connection isn't shared with
+        # the main thread (SQLite connections aren't thread-safe).
+        svc = _service()
+        cancel = svc.subscribe_notifications(_dispatch_notification)
         try:
-            from .config import load_config as _lc
-            output = cmd_run(
-                thread_db, agent_impl, pm,
-                name=name,
-                prompt=prompt,
-                cli_overrides=cli_overrides,
-                app_config=_lc(),
-            )
-        except Exception as e:
-            output = str(e)
-            print(f"[actor-mcp] run for '{name}' failed: {e}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-
-        # If the actor row is gone, the run was terminated by a
-        # `discard` (not just a `stop`). Distinguish in the channel
-        # notification meta so the parent Claude can react
-        # accordingly — "discarded" implies the actor + worktree are
-        # gone and can't be re-run, vs "stopped" which leaves the
-        # actor in place. We can't add `Status.DISCARDED` to the enum
-        # because the row doesn't exist to carry it; the literal
-        # string in the meta dict is the canonical signal.
-        if thread_db.actor_exists(name):
-            resolved = thread_db.resolve_actor_status(name, pm)
-            status = resolved.value
-        else:
-            status = "discarded"
-
-        if session and loop:
-            body = output or f"Finished with status: {status}."
-            content = f"[{name}] {body}"
-            meta = {"actor": name, "status": status}
-            future = asyncio.run_coroutine_threadsafe(
-                _send_channel_notification(session, content, meta),
-                loop,
-            )
             try:
-                future.result(timeout=5)
+                svc.run_actor(name=name, prompt=prompt, config=cli_overrides)
             except Exception as e:
-                print(f"[actor-mcp] failed to send channel notification: {e}", file=sys.stderr)
+                print(
+                    f"[actor-mcp] run for '{name}' failed: {e}",
+                    file=sys.stderr,
+                )
+                traceback.print_exc(file=sys.stderr)
+                # Synthesize an actor_discarded notification for the
+                # case where `run_actor` raised because the row was
+                # deleted mid-flight (the FK cascade kills the run
+                # row; `update_run_status` then raises "run not found"
+                # from inside `wait_for_run`). The dispatch handler
+                # relays it as status="discarded" when a spawn is
+                # registered.
+                if not svc.actor_exists(name):
+                    svc.publish_notification(Notification(
+                        actor=name,
+                        event="actor_discarded",
+                        run_id=-1,  # marker so dispatcher relays
+                        output=str(e),
+                    ))
+                else:
+                    # Other failure — still emit a run_completed-ish
+                    # event so the orchestrator gets feedback.
+                    from .types import Status as _S
+                    svc.publish_notification(Notification(
+                        actor=name,
+                        event="run_completed",
+                        run_id=-1,
+                        status=_S.ERROR,
+                        output=str(e),
+                    ))
+        finally:
+            cancel()
+            # Drop any leftover spawn registration (defensive — the
+            # handler usually pops it).
+            with _active_spawns_lock:
+                _active_spawns.pop(name, None)
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -329,31 +438,34 @@ def new_actor(
             When False, pass the API key through. When omitted (None), defer to lower-precedence
             layers (role / settings.kdl / class default).
     """
-    db = _db()
-    git = RealGit()
     from .config import load_config
     app_config = load_config()
     # MCP mirrors the CLI's positional split: `config` pairs go into
-    # agent_args (rejected if they collide with an actor-key); the dedicated
-    # `use_subscription` param populates actor_keys directly. Validation
-    # and bucketing are the same code path as the CLI. Agent resolution also
-    # mirrors the CLI: explicit `agent` wins, otherwise the role's agent,
-    # otherwise "claude".
+    # agent_args (rejected if they collide with an actor-key); the
+    # dedicated `use_subscription` param populates actor_keys
+    # directly. Agent resolution mirrors the CLI: explicit `agent`
+    # wins, otherwise the role's agent, otherwise "claude".
     agent_kind = _resolve_agent_kind_for_cli(agent, role, app_config)
-    agent_cls = _agent_class(agent_kind)
+    agent_cls = agent_class(agent_kind)
     cli_overrides = _build_cli_overrides(
         agent_cls, config or [], use_subscription=use_subscription,
     )
-    actor = cmd_new(
-        db, git,
+
+    svc = LocalActorService(
+        db=_db(),
+        git=RealGit(),
+        proc_mgr=RealProcessManager(),
+        agent_factory=_create_agent,
+        app_config=app_config,
+    )
+    actor = svc.new_actor(
         name=name,
         dir=dir,
         no_worktree=no_worktree,
         base=base,
         agent_name=agent,
-        cli_overrides=cli_overrides,
+        config=cli_overrides,
         role_name=role,
-        app_config=app_config,
     )
 
     if prompt is not None:
@@ -362,9 +474,15 @@ def new_actor(
         try:
             _spawn_background_run(name, prompt, cli_overrides=ActorConfig(), ctx=ctx)
         except Exception as e:
-            print(f"[actor-mcp] new_actor '{name}' run failed to start: {e}", file=sys.stderr)
+            print(
+                f"[actor-mcp] new_actor '{name}' run failed to start: {e}",
+                file=sys.stderr,
+            )
             traceback.print_exc(file=sys.stderr)
-            return f"Actor '{name}' created at {actor.dir}, but run failed to start: {e}"
+            return (
+                f"Actor '{name}' created at {actor.dir}, "
+                f"but run failed to start: {e}"
+            )
         return f"Actor '{name}' created at {actor.dir} and is running."
     return f"Actor '{name}' created at {actor.dir}."
 
@@ -392,11 +510,8 @@ def run_actor(
     prompt = prompt.strip()
     if not prompt:
         raise ActorError("prompt is required")
-    # MCP mirrors the CLI's positional split: `config` pairs go into
-    # agent_args (rejected if they collide with an actor-key); the dedicated
-    # `use_subscription` param populates actor_keys directly.
     actor = _db().get_actor(name)
-    agent_cls = _agent_class(actor.agent)
+    agent_cls = agent_class(actor.agent)
     cli_overrides = _build_cli_overrides(
         agent_cls, config or [], use_subscription=use_subscription,
     )
@@ -405,10 +520,11 @@ def run_actor(
 
 
 def main(for_host: str | None = None) -> None:
-    # for_host is accepted for forward compat but not yet used — FastMCP's
-    # instructions are set once at construction (the property is read-only),
-    # so host-specific variation will require restructuring when it lands.
-    # Warn loudly if the caller passed something we're silently ignoring.
+    # for_host is accepted for forward compat but not yet used —
+    # FastMCP's instructions are set once at construction (the
+    # property is read-only), so host-specific variation will require
+    # restructuring when it lands. Warn loudly if the caller passed
+    # something we're silently ignoring.
     if for_host is not None and for_host != "claude-code":
         print(
             f"[actor-mcp] note: --for {for_host!r} is accepted but host-specific "

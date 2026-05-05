@@ -1,8 +1,9 @@
 """Tests for the CLI dispatch and MCP tool wrappers.
 
-These test the thin glue layer on top of cmd_* — argument translation,
-prompt resolution (arg vs. stdin), error handling, and the MCP tool
-signatures. The cmd_* layer itself is covered by test_actor.py.
+These test the thin glue layer on top of `LocalActorService` —
+argument translation, prompt resolution (arg vs. stdin), error
+handling, and the MCP tool signatures. The service layer itself is
+covered by test_actor.py.
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
-from actor import ActorConfig, __version__
+from actor import ActorConfig, RunResult, Status, __version__
 from actor.cli import main
 from actor.errors import ActorError, ConfigError
 
@@ -40,165 +41,145 @@ class VersionFlagTests(unittest.TestCase):
         self.assertIn(f"actor-sh {__version__}", out)
 
 
+def _fake_run_result(actor_name="foo", output="done", exit_code=0):
+    return RunResult(
+        run_id=1, actor=actor_name,
+        status=Status.DONE if exit_code == 0 else Status.ERROR,
+        exit_code=exit_code, output=output,
+    )
+
+
 class NewCommandTests(unittest.TestCase):
     """`actor new` CLI dispatch."""
 
-    def _run(self, argv, stdin_text=None, stdin_is_tty=True):
-        """Invoke cli.main with argv, patching cmd_new/cmd_run/stdin/Database."""
+    def _run(self, argv, stdin_text=None, stdin_is_tty=True, app_config=None):
+        """Invoke cli.main with argv, patching service methods. Returns
+        (new_actor_mock, run_actor_mock, exit_code) so tests can probe
+        the args the CLI translated argv into."""
         from actor import AppConfig
-        fake_db = MagicMock()
+        cfg = app_config if app_config is not None else AppConfig()
+
         fake_actor = MagicMock()
         fake_actor.name = argv[1] if len(argv) > 1 else "a"
         fake_actor.dir = "/tmp/actor"
-        fake_agent = MagicMock()
 
-        cmd_new = MagicMock(return_value=fake_actor)
-        cmd_run = MagicMock(return_value="done")
-        agent_for = MagicMock(return_value=fake_agent)
+        new_actor = MagicMock(return_value=fake_actor)
+        run_actor = MagicMock(return_value=_fake_run_result())
 
         stdin = io.StringIO(stdin_text or "")
         stdin.isatty = lambda: stdin_is_tty  # type: ignore[assignment]
 
-        with patch("actor.cli.cmd_new", cmd_new), \
-             patch("actor.cli.cmd_run", cmd_run), \
-             patch("actor.config.load_config", return_value=AppConfig()), \
+        # `_propagate_run_exit` looks up the latest run from the
+        # service after run_actor returns; mock that to a benign run.
+        latest_run = MagicMock(exit_code=0)
+
+        with patch("actor.service.LocalActorService.new_actor", new_actor), \
+             patch("actor.service.LocalActorService.run_actor", run_actor), \
+             patch("actor.service.LocalActorService.latest_run", return_value=latest_run), \
+             patch("actor.config.load_config", return_value=cfg), \
              patch("actor.cli.Database") as db_cls, \
              patch("sys.stdin", stdin):
-            db_cls.open.return_value = fake_db
-            # Patch agent_for inline — it's a closure in cli.main, but the
-            # database+_create_agent path is replaced by mocking cmd_run, so
-            # agent_for is only reached via _create_agent(actor.agent).
-            with patch("actor.cli._create_agent", return_value=fake_agent):
-                try:
-                    main(argv)
-                    exit_code = 0
-                except SystemExit as e:
-                    exit_code = e.code if isinstance(e.code, int) else 1
-        return cmd_new, cmd_run, exit_code
+            db_cls.open.return_value = MagicMock()
+            try:
+                main(argv)
+                exit_code = 0
+            except SystemExit as e:
+                exit_code = e.code if isinstance(e.code, int) else 1
+        return new_actor, run_actor, exit_code
 
     def test_new_without_prompt_creates_only(self):
-        cmd_new, cmd_run, code = self._run(["new", "foo"])
-        cmd_new.assert_called_once()
-        cmd_run.assert_not_called()
+        new_actor, run_actor, code = self._run(["new", "foo"])
+        new_actor.assert_called_once()
+        run_actor.assert_not_called()
         self.assertEqual(code, 0)
 
     def test_new_with_prompt_arg_creates_and_runs(self):
-        cmd_new, cmd_run, code = self._run(["new", "foo", "do x"])
-        cmd_new.assert_called_once()
-        cmd_run.assert_called_once()
-        kwargs = cmd_run.call_args.kwargs
+        new_actor, run_actor, code = self._run(["new", "foo", "do x"])
+        new_actor.assert_called_once()
+        run_actor.assert_called_once()
+        kwargs = run_actor.call_args.kwargs
         self.assertEqual(kwargs["name"], "foo")
         self.assertEqual(kwargs["prompt"], "do x")
-        self.assertEqual(kwargs["cli_overrides"], ActorConfig())  # saved as defaults already
+        self.assertEqual(kwargs["config"], ActorConfig())
         self.assertEqual(code, 0)
 
     def test_new_with_stdin_prompt_creates_and_runs(self):
-        cmd_new, cmd_run, code = self._run(["new", "foo"], stdin_text="fix it\n", stdin_is_tty=False)
-        cmd_new.assert_called_once()
-        cmd_run.assert_called_once()
-        self.assertEqual(cmd_run.call_args.kwargs["prompt"], "fix it")
+        new_actor, run_actor, code = self._run(
+            ["new", "foo"], stdin_text="fix it\n", stdin_is_tty=False,
+        )
+        new_actor.assert_called_once()
+        run_actor.assert_called_once()
+        self.assertEqual(run_actor.call_args.kwargs["prompt"], "fix it")
         self.assertEqual(code, 0)
 
     def test_new_with_empty_stdin_errors(self):
-        cmd_new, cmd_run, code = self._run(["new", "foo"], stdin_text="", stdin_is_tty=False)
-        cmd_new.assert_called_once()
-        cmd_run.assert_not_called()
+        new_actor, run_actor, code = self._run(
+            ["new", "foo"], stdin_text="", stdin_is_tty=False,
+        )
+        new_actor.assert_called_once()
+        run_actor.assert_not_called()
         self.assertEqual(code, 1)
 
-    def test_new_translates_model_and_use_subscription_to_cli_overrides(self):
-        cmd_new, _cmd_run, _code = self._run([
+    def test_new_translates_model_and_use_subscription_to_config(self):
+        new_actor, _run, _code = self._run([
             "new", "foo", "--model", "sonnet", "--no-use-subscription",
         ])
-        overrides = cmd_new.call_args.kwargs["cli_overrides"]
-        self.assertEqual(overrides.agent_args.get("model"), "sonnet")
-        self.assertEqual(overrides.actor_keys.get("use-subscription"), "false")
+        config = new_actor.call_args.kwargs["config"]
+        self.assertEqual(config.agent_args.get("model"), "sonnet")
+        self.assertEqual(config.actor_keys.get("use-subscription"), "false")
 
     def test_new_without_use_subscription_flag_does_not_emit_override(self):
-        """Tri-state check: omitting both --use-subscription and --no-use-subscription
-        must NOT push a use-subscription value, so a role's value wins."""
-        cmd_new, _cmd_run, _code = self._run(["new", "foo"])
-        overrides = cmd_new.call_args.kwargs["cli_overrides"]
+        """Tri-state check: omitting both --use-subscription and
+        --no-use-subscription must NOT push a use-subscription value,
+        so a role's value wins."""
+        new_actor, _run, _code = self._run(["new", "foo"])
+        config = new_actor.call_args.kwargs["config"]
         self.assertNotIn(
-            "use-subscription", overrides.actor_keys,
-            f"expected no use-subscription override, got {overrides.actor_keys}",
+            "use-subscription", config.actor_keys,
+            f"expected no use-subscription override, got {config.actor_keys}",
         )
 
     def test_new_explicit_use_subscription_flag_emits_true_override(self):
-        """Explicit --use-subscription must push use-subscription=true so it
-        can override a role's use-subscription "false"."""
-        cmd_new, _cmd_run, _code = self._run(["new", "foo", "--use-subscription"])
-        overrides = cmd_new.call_args.kwargs["cli_overrides"]
-        self.assertEqual(overrides.actor_keys.get("use-subscription"), "true")
+        """Explicit --use-subscription must push use-subscription=true
+        so it can override a role's use-subscription "false"."""
+        new_actor, _run, _code = self._run(["new", "foo", "--use-subscription"])
+        config = new_actor.call_args.kwargs["config"]
+        self.assertEqual(config.actor_keys.get("use-subscription"), "true")
 
-    def test_new_passes_role_arg_to_cmd_new(self):
-        # `actor new foo --role qa` (no prompt) creates the actor with the
-        # role applied but does not auto-run — the role's `prompt` is the
-        # actor's system prompt, not a fallback task.
-        fake_db = MagicMock()
-        fake_actor = MagicMock()
-        fake_actor.name = "foo"
-        fake_actor.dir = "/tmp/actor"
-        cmd_new = MagicMock(return_value=fake_actor)
-        cmd_run = MagicMock(return_value="done")
-
+    def test_new_passes_role_arg_to_new_actor(self):
+        # `actor new foo --role qa` (no prompt) creates the actor with
+        # the role applied but does not auto-run — the role's `prompt`
+        # is the actor's system prompt, not a fallback task.
         from actor import AppConfig, Role
-        fake_app_cfg = AppConfig(roles={
+        cfg = AppConfig(roles={
             "qa": Role(name="qa", agent="claude", prompt="You are a QA engineer."),
         })
-
-        stdin = io.StringIO("")
-        stdin.isatty = lambda: True  # type: ignore[assignment]
-
-        with patch("actor.cli.cmd_new", cmd_new), \
-             patch("actor.cli.cmd_run", cmd_run), \
-             patch("actor.config.load_config", return_value=fake_app_cfg), \
-             patch("actor.cli.Database") as db_cls, \
-             patch("actor.cli._create_agent", return_value=MagicMock()), \
-             patch("sys.stdin", stdin):
-            db_cls.open.return_value = fake_db
-            try:
-                main(["new", "foo", "--role", "qa"])
-                code = 0
-            except SystemExit as e:
-                code = e.code if isinstance(e.code, int) else 1
-        cmd_new.assert_called_once()
-        kwargs = cmd_new.call_args.kwargs
+        new_actor, run_actor, code = self._run(
+            ["new", "foo", "--role", "qa"], app_config=cfg,
+        )
+        new_actor.assert_called_once()
+        kwargs = new_actor.call_args.kwargs
         self.assertEqual(kwargs["role_name"], "qa")
-        self.assertIsNotNone(kwargs["app_config"])
         self.assertEqual(code, 0)
-        # No auto-run: a role's prompt is its identity, not a default task.
-        cmd_run.assert_not_called()
+        run_actor.assert_not_called()
 
     def test_new_with_role_and_explicit_prompt_runs_with_explicit_prompt(self):
-        fake_db = MagicMock()
-        fake_actor = MagicMock()
-        fake_actor.name = "foo"
-        fake_actor.dir = "/tmp/actor"
-        cmd_new = MagicMock(return_value=fake_actor)
-        cmd_run = MagicMock(return_value="done")
-
         from actor import AppConfig, Role
-        fake_app_cfg = AppConfig(roles={
+        cfg = AppConfig(roles={
             "qa": Role(name="qa", agent="claude", prompt="You are a QA engineer."),
         })
-
-        stdin = io.StringIO("")
-        stdin.isatty = lambda: True  # type: ignore[assignment]
-
-        with patch("actor.cli.cmd_new", cmd_new), \
-             patch("actor.cli.cmd_run", cmd_run), \
-             patch("actor.config.load_config", return_value=fake_app_cfg), \
-             patch("actor.cli.Database") as db_cls, \
-             patch("actor.cli._create_agent", return_value=MagicMock()), \
-             patch("sys.stdin", stdin):
-            db_cls.open.return_value = fake_db
-            main(["new", "foo", "review the auth module", "--role", "qa"])
-        self.assertEqual(cmd_run.call_args.kwargs["prompt"], "review the auth module")
+        _new, run_actor, _code = self._run(
+            ["new", "foo", "review the auth module", "--role", "qa"],
+            app_config=cfg,
+        )
+        self.assertEqual(
+            run_actor.call_args.kwargs["prompt"], "review the auth module",
+        )
 
     def test_new_without_role_does_not_pass_role_kwargs(self):
         """Regression check: normal `actor new foo` must still work end-to-end."""
-        cmd_new, cmd_run, code = self._run(["new", "foo"])
-        kwargs = cmd_new.call_args.kwargs
+        new_actor, _run, code = self._run(["new", "foo"])
+        kwargs = new_actor.call_args.kwargs
         self.assertIsNone(kwargs["role_name"])
         self.assertEqual(code, 0)
 
@@ -206,43 +187,25 @@ class NewCommandTests(unittest.TestCase):
         """`echo "" | actor new foo --role qa` creates the actor without
         auto-running — empty stdin no longer falls back to the role's
         prompt (which is now a system prompt, not a task)."""
-        fake_db = MagicMock()
-        fake_actor = MagicMock()
-        fake_actor.name = "foo"
-        fake_actor.dir = "/tmp/actor"
-        cmd_new = MagicMock(return_value=fake_actor)
-        cmd_run = MagicMock(return_value="done")
-
         from actor import AppConfig, Role
-        fake_app_cfg = AppConfig(roles={
+        cfg = AppConfig(roles={
             "qa": Role(name="qa", agent="claude", prompt="You are a QA engineer."),
         })
-
-        stdin = io.StringIO("")
-        stdin.isatty = lambda: False  # type: ignore[assignment]
-
-        with patch("actor.cli.cmd_new", cmd_new), \
-             patch("actor.cli.cmd_run", cmd_run), \
-             patch("actor.config.load_config", return_value=fake_app_cfg), \
-             patch("actor.cli.Database") as db_cls, \
-             patch("actor.cli._create_agent", return_value=MagicMock()), \
-             patch("sys.stdin", stdin), \
-             patch("sys.stderr", io.StringIO()):
-            db_cls.open.return_value = fake_db
-            with self.assertRaises(SystemExit) as ctx:
-                main(["new", "foo", "--role", "qa"])
-            self.assertEqual(ctx.exception.code, 1)
-        cmd_run.assert_not_called()
+        with patch("sys.stderr", io.StringIO()):
+            _new, run_actor, code = self._run(
+                ["new", "foo", "--role", "qa"],
+                stdin_text="", stdin_is_tty=False, app_config=cfg,
+            )
+        self.assertEqual(code, 1)
+        run_actor.assert_not_called()
 
     def test_new_surfaces_config_error_from_load_config(self):
-        """A malformed settings.kdl must exit non-zero with the error text
-        on stderr, not crash with an uncaught ConfigError."""
-        from actor.errors import ConfigError
-        fake_db = MagicMock()
-        with patch("actor.config.load_config",
-                   side_effect=ConfigError("parse error in /x/settings.kdl: boom")), \
-             patch("actor.cli.Database") as db_cls:
-            db_cls.open.return_value = fake_db
+        """A malformed settings.kdl must exit non-zero with the error
+        text on stderr, not crash with an uncaught ConfigError."""
+        with patch(
+            "actor.config.load_config",
+            side_effect=ConfigError("parse error in /x/settings.kdl: boom"),
+        ):
             stderr = io.StringIO()
             with patch("sys.stderr", stderr):
                 try:
@@ -255,20 +218,18 @@ class NewCommandTests(unittest.TestCase):
 
     def test_new_with_prompt_run_failure_surfaces_partial_success(self):
         from actor import AppConfig
-        fake_db = MagicMock()
         fake_actor = MagicMock()
         fake_actor.name = "foo"
         fake_actor.dir = "/tmp/foo"
 
-        cmd_new = MagicMock(return_value=fake_actor)
-        cmd_run = MagicMock(side_effect=ActorError("agent binary missing"))
+        new_actor = MagicMock(return_value=fake_actor)
+        run_actor = MagicMock(side_effect=ActorError("agent binary missing"))
 
-        with patch("actor.cli.cmd_new", cmd_new), \
-             patch("actor.cli.cmd_run", cmd_run), \
+        with patch("actor.service.LocalActorService.new_actor", new_actor), \
+             patch("actor.service.LocalActorService.run_actor", run_actor), \
              patch("actor.config.load_config", return_value=AppConfig()), \
-             patch("actor.cli.Database") as db_cls, \
-             patch("actor.cli._create_agent", return_value=MagicMock()):
-            db_cls.open.return_value = fake_db
+             patch("actor.cli.Database") as db_cls:
+            db_cls.open.return_value = MagicMock()
             stderr = io.StringIO()
             with patch("sys.stderr", stderr):
                 try:
@@ -282,61 +243,64 @@ class NewCommandTests(unittest.TestCase):
 
 class RunCommandTests(unittest.TestCase):
     def test_run_passes_config_overrides(self):
+        from actor import AppConfig
         from actor.types import AgentKind
-        cmd_run = MagicMock(return_value="ok")
-        fake_db = MagicMock()
-        # cli.main resolves the actor's agent kind before building cli_overrides;
-        # pin it so _agent_class sees a valid kind (not a MagicMock attribute).
-        fake_db.get_actor.return_value.agent = AgentKind.CLAUDE
-        with patch("actor.cli.cmd_run", cmd_run), \
-             patch("actor.cli.Database") as db_cls, \
-             patch("actor.cli._create_agent", return_value=MagicMock()):
-            db_cls.open.return_value = fake_db
+        run_actor = MagicMock(return_value=_fake_run_result())
+        get_actor = MagicMock()
+        get_actor.return_value.agent = AgentKind.CLAUDE
+        latest_run = MagicMock(exit_code=0)
+        with patch("actor.service.LocalActorService.run_actor", run_actor), \
+             patch("actor.service.LocalActorService.get_actor", get_actor), \
+             patch("actor.service.LocalActorService.latest_run", return_value=latest_run), \
+             patch("actor.config.load_config", return_value=AppConfig()), \
+             patch("actor.cli.Database") as db_cls:
+            db_cls.open.return_value = MagicMock()
             stdin = io.StringIO("")
             stdin.isatty = lambda: True  # type: ignore[assignment]
             with patch("sys.stdin", stdin):
                 main(["run", "foo", "--config", "model=opus", "do x"])
-        cmd_run.assert_called_once()
-        overrides = cmd_run.call_args.kwargs["cli_overrides"]
-        self.assertEqual(overrides.agent_args.get("model"), "opus")
-        self.assertEqual(overrides.actor_keys, {})
+        run_actor.assert_called_once()
+        config = run_actor.call_args.kwargs["config"]
+        self.assertEqual(config.agent_args.get("model"), "opus")
+        self.assertEqual(config.actor_keys, {})
 
-    def test_run_dash_i_dispatches_to_cmd_interactive(self):
-        """`actor run foo -i` must route through cmd_interactive, not cmd_run."""
-        cmd_interactive = MagicMock(return_value=(0, "ok"))
-        cmd_run = MagicMock(return_value="should-not-run")
-        fake_db = MagicMock()
-        with patch("actor.cli.cmd_interactive", cmd_interactive), \
-             patch("actor.cli.cmd_run", cmd_run), \
-             patch("actor.cli.Database") as db_cls, \
-             patch("actor.cli._create_agent", return_value=MagicMock()):
-            db_cls.open.return_value = fake_db
+    def test_run_dash_i_dispatches_to_interactive_actor(self):
+        """`actor run foo -i` must route through interactive_actor, not run_actor."""
+        from actor import AppConfig
+        interactive_actor = MagicMock(return_value=(0, "ok"))
+        run_actor = MagicMock(return_value=_fake_run_result(output="should-not-run"))
+        with patch("actor.service.LocalActorService.interactive_actor", interactive_actor), \
+             patch("actor.service.LocalActorService.run_actor", run_actor), \
+             patch("actor.config.load_config", return_value=AppConfig()), \
+             patch("actor.cli.Database") as db_cls:
+            db_cls.open.return_value = MagicMock()
             with patch("sys.stderr", io.StringIO()):
                 with self.assertRaises(SystemExit) as ctx:
                     main(["run", "foo", "-i"])
         self.assertEqual(ctx.exception.code, 0)
-        cmd_interactive.assert_called_once()
-        self.assertEqual(cmd_interactive.call_args.kwargs.get("name"), "foo")
-        cmd_run.assert_not_called()
+        interactive_actor.assert_called_once()
+        self.assertEqual(interactive_actor.call_args.kwargs.get("name"), "foo")
+        run_actor.assert_not_called()
 
     def test_run_dash_i_maps_signal_to_posix_exit(self):
-        """Negative exit code from cmd_interactive (signal) → 128 + signum."""
+        """Negative exit code from interactive_actor (signal) → 128 + signum."""
         import signal as _sig
-        cmd_interactive = MagicMock(return_value=(-_sig.SIGTERM, "stopped"))
-        fake_db = MagicMock()
-        with patch("actor.cli.cmd_interactive", cmd_interactive), \
-             patch("actor.cli.Database") as db_cls, \
-             patch("actor.cli._create_agent", return_value=MagicMock()):
-            db_cls.open.return_value = fake_db
+        from actor import AppConfig
+        interactive_actor = MagicMock(return_value=(-_sig.SIGTERM, "stopped"))
+        with patch("actor.service.LocalActorService.interactive_actor", interactive_actor), \
+             patch("actor.config.load_config", return_value=AppConfig()), \
+             patch("actor.cli.Database") as db_cls:
+            db_cls.open.return_value = MagicMock()
             with patch("sys.stderr", io.StringIO()):
                 with self.assertRaises(SystemExit) as ctx:
                     main(["run", "foo", "-i"])
         self.assertEqual(ctx.exception.code, 128 + _sig.SIGTERM)
 
     def test_run_without_prompt_and_tty_exits_nonzero(self):
-        fake_db = MagicMock()
-        with patch("actor.cli.Database") as db_cls:
-            db_cls.open.return_value = fake_db
+        from actor import AppConfig
+        with patch("actor.config.load_config", return_value=AppConfig()), \
+             patch("actor.cli.Database") as db_cls:
+            db_cls.open.return_value = MagicMock()
             stdin = io.StringIO("")
             stdin.isatty = lambda: True  # type: ignore[assignment]
             with patch("sys.stdin", stdin), patch("sys.stderr", io.StringIO()):
@@ -360,8 +324,9 @@ class MainCommandTests(unittest.TestCase):
         self.assertEqual(argv[0], "claude")
         self.assertIn("--dangerously-load-development-channels", argv)
         self.assertIn("server:actor", argv)
-        # System prompt is appended via the --append-system-prompt flag so it
-        # layers on top of Claude Code's defaults instead of replacing them.
+        # System prompt is appended via the --append-system-prompt flag
+        # so it layers on top of Claude Code's defaults instead of
+        # replacing them.
         self.assertIn("--append-system-prompt", argv)
         idx = argv.index("--append-system-prompt")
         self.assertEqual(argv[idx + 1], "ROLE PROMPT")
@@ -383,8 +348,9 @@ class MainCommandTests(unittest.TestCase):
         self.assertIn("claude", err.getvalue().lower())
 
     def test_role_with_non_claude_agent_rejected(self):
-        # `actor main` is claude-only today; if the user overrode main to
-        # use codex, fail loudly rather than silently doing the wrong thing.
+        # `actor main` is claude-only today; if the user overrode main
+        # to use codex, fail loudly rather than silently doing the
+        # wrong thing.
         with self._patch_main_role(agent="codex"), \
              patch("os.execvp") as execvp, \
              patch("sys.stderr", io.StringIO()) as err:
@@ -395,18 +361,18 @@ class MainCommandTests(unittest.TestCase):
         self.assertIn("codex", err.getvalue())
 
     def test_role_without_prompt_omits_append_flag(self):
-        # A `main` role with no prompt set still launches the orchestrator
-        # session — just without the system-prompt append.
+        # A `main` role with no prompt set still launches the
+        # orchestrator session — just without the system-prompt append.
         with self._patch_main_role(prompt=None), patch("os.execvp") as execvp:
             main(["main"])
         argv = execvp.call_args.args[1]
         self.assertNotIn("--append-system-prompt", argv)
 
     def test_prompt_passed_verbatim_no_shell_escaping(self):
-        # execvp passes argv entries directly to the child process — no shell,
-        # no quoting, no interpolation. Tricky characters that would need
-        # escaping in a shell command (newlines, quotes, $, backticks,
-        # backslashes) must reach the child verbatim as one argv entry.
+        # execvp passes argv entries directly to the child process —
+        # no shell, no quoting, no interpolation. Tricky characters
+        # that would need escaping in a shell command must reach the
+        # child verbatim as one argv entry.
         tricky = (
             "Line one\n"
             "Line two with \"double\" and 'single' quotes\n"
@@ -423,8 +389,9 @@ class MainCommandTests(unittest.TestCase):
 
 
 class SubClaudeChannelTests(unittest.TestCase):
-    """ClaudeAgent must launch sub-claudes with the channel flag so nested actors
-    receive completion notifications identically to the top-level session."""
+    """ClaudeAgent must launch sub-claudes with the channel flag so
+    nested actors receive completion notifications identically to the
+    top-level session."""
 
     def test_start_includes_channel_flag(self):
         from actor.agents.claude import ClaudeAgent
@@ -471,11 +438,10 @@ class McpToolTests(unittest.TestCase):
 
     def test_new_actor_without_prompt_does_not_spawn(self):
         from actor import server
-        with patch("actor.server.cmd_new") as cmd_new, \
+        fake_actor = MagicMock()
+        fake_actor.dir = "/tmp/foo"
+        with patch("actor.service.LocalActorService.new_actor", return_value=fake_actor), \
              patch("actor.server._spawn_background_run") as spawn:
-            fake_actor = MagicMock()
-            fake_actor.dir = "/tmp/foo"
-            cmd_new.return_value = fake_actor
             msg = server.new_actor(name="foo")
         spawn.assert_not_called()
         self.assertIn("created", msg)
@@ -483,11 +449,10 @@ class McpToolTests(unittest.TestCase):
 
     def test_new_actor_with_whitespace_prompt_does_not_spawn(self):
         from actor import server
-        with patch("actor.server.cmd_new") as cmd_new, \
+        fake_actor = MagicMock()
+        fake_actor.dir = "/tmp/foo"
+        with patch("actor.service.LocalActorService.new_actor", return_value=fake_actor), \
              patch("actor.server._spawn_background_run") as spawn:
-            fake_actor = MagicMock()
-            fake_actor.dir = "/tmp/foo"
-            cmd_new.return_value = fake_actor
             msg = server.new_actor(name="foo", prompt="   ")
         spawn.assert_not_called()
         self.assertIn("created", msg)
@@ -495,43 +460,41 @@ class McpToolTests(unittest.TestCase):
 
     def test_new_actor_with_prompt_spawns_and_reports(self):
         from actor import server
-        with patch("actor.server.cmd_new") as cmd_new, \
+        fake_actor = MagicMock()
+        fake_actor.dir = "/tmp/foo"
+        with patch("actor.service.LocalActorService.new_actor", return_value=fake_actor), \
              patch("actor.server._spawn_background_run") as spawn:
-            fake_actor = MagicMock()
-            fake_actor.dir = "/tmp/foo"
-            cmd_new.return_value = fake_actor
             msg = server.new_actor(name="foo", prompt="do x")
         spawn.assert_called_once()
         self.assertIn("running", msg)
 
     def test_new_actor_spawn_failure_reports_partial_success(self):
         from actor import server
-        with patch("actor.server.cmd_new") as cmd_new, \
+        fake_actor = MagicMock()
+        fake_actor.dir = "/tmp/foo"
+        with patch("actor.service.LocalActorService.new_actor", return_value=fake_actor), \
              patch("actor.server._spawn_background_run", side_effect=RuntimeError("boom")):
-            fake_actor = MagicMock()
-            fake_actor.dir = "/tmp/foo"
-            cmd_new.return_value = fake_actor
             with patch("sys.stderr", io.StringIO()):
                 msg = server.new_actor(name="foo", prompt="do x")
         self.assertIn("created", msg)
         self.assertIn("run failed to start", msg)
 
-    def test_new_actor_passes_role_to_cmd_new_no_auto_run(self):
-        # `new_actor(role="qa")` with no prompt creates an idle actor —
-        # the role's `prompt` is its system prompt, not a fallback task,
-        # so nothing to run.
+    def test_new_actor_passes_role_to_new_actor_no_auto_run(self):
+        # `new_actor(role="qa")` with no prompt creates an idle actor
+        # — the role's `prompt` is its system prompt, not a fallback
+        # task, so nothing to run.
         from actor import server, AppConfig, Role
         cfg = AppConfig(roles={
             "qa": Role(name="qa", agent="claude", prompt="You are a QA engineer."),
         })
-        with patch("actor.server.cmd_new") as cmd_new, \
+        fake_actor = MagicMock()
+        fake_actor.dir = "/tmp/foo"
+        new_actor_call = MagicMock(return_value=fake_actor)
+        with patch("actor.service.LocalActorService.new_actor", new_actor_call), \
              patch("actor.server._spawn_background_run") as spawn, \
              patch("actor.config.load_config", return_value=cfg):
-            fake_actor = MagicMock()
-            fake_actor.dir = "/tmp/foo"
-            cmd_new.return_value = fake_actor
             server.new_actor(name="foo", role="qa")
-        kwargs = cmd_new.call_args.kwargs
+        kwargs = new_actor_call.call_args.kwargs
         self.assertEqual(kwargs["role_name"], "qa")
         spawn.assert_not_called()
 
@@ -540,17 +503,19 @@ class McpToolTests(unittest.TestCase):
         cfg = AppConfig(roles={
             "qa": Role(name="qa", agent="claude", prompt="You are a QA engineer."),
         })
-        with patch("actor.server.cmd_new") as cmd_new, \
+        fake_actor = MagicMock()
+        fake_actor.dir = "/tmp/foo"
+        with patch("actor.service.LocalActorService.new_actor", return_value=fake_actor), \
              patch("actor.server._spawn_background_run") as spawn, \
              patch("actor.config.load_config", return_value=cfg):
-            fake_actor = MagicMock()
-            fake_actor.dir = "/tmp/foo"
-            cmd_new.return_value = fake_actor
             server.new_actor(name="foo", role="qa", prompt="review the auth module")
         # spawn receives the explicit task prompt, not the role's prompt.
         spawn.assert_called_once()
         spawn_args = spawn.call_args
-        prompt_arg = spawn_args.args[1] if len(spawn_args.args) > 1 else spawn_args.kwargs["prompt"]
+        prompt_arg = (
+            spawn_args.args[1] if len(spawn_args.args) > 1
+            else spawn_args.kwargs["prompt"]
+        )
         self.assertEqual(prompt_arg, "review the auth module")
 
     def test_new_actor_role_agent_used_when_agent_param_omitted(self):
@@ -558,23 +523,24 @@ class McpToolTests(unittest.TestCase):
         cfg = AppConfig(roles={
             "code": Role(name="code", agent="codex"),
         })
-        with patch("actor.server.cmd_new") as cmd_new, \
-             patch("actor.server._spawn_background_run") as spawn, \
+        fake_actor = MagicMock()
+        fake_actor.dir = "/tmp/foo"
+        new_actor_call = MagicMock(return_value=fake_actor)
+        with patch("actor.service.LocalActorService.new_actor", new_actor_call), \
+             patch("actor.server._spawn_background_run"), \
              patch("actor.config.load_config", return_value=cfg):
-            fake_actor = MagicMock()
-            fake_actor.dir = "/tmp/foo"
-            cmd_new.return_value = fake_actor
             server.new_actor(name="foo", role="code")
-        kwargs = cmd_new.call_args.kwargs
-        # `agent` arg from MCP is None; cmd_new will resolve via role.
+        kwargs = new_actor_call.call_args.kwargs
+        # `agent` arg from MCP is None; service.new_actor will resolve via role.
         self.assertIsNone(kwargs["agent_name"])
         self.assertEqual(kwargs["role_name"], "code")
 
     def test_run_actor_forwards_config(self):
         from actor import server
         from actor.types import AgentKind
-        # server.run_actor reads the actor's agent kind to validate --config;
-        # pin it to a real kind so _agent_class doesn't reject a MagicMock.
+        # server.run_actor reads the actor's agent kind to validate
+        # --config; pin it to a real kind so agent_class doesn't reject
+        # a MagicMock.
         with patch("actor.server._db") as db_fn, \
              patch("actor.server._spawn_background_run") as spawn:
             db_fn.return_value.get_actor.return_value.agent = AgentKind.CLAUDE
@@ -584,44 +550,47 @@ class McpToolTests(unittest.TestCase):
         self.assertEqual(overrides.agent_args.get("model"), "opus")
         self.assertEqual(overrides.actor_keys, {})
 
-    # -- use_subscription param on new_actor ----------------------------------
+    # -- use_subscription param on new_actor --------------------------------
 
     def _capture_new_actor_overrides(self, **kwargs) -> ActorConfig:
-        """Invoke server.new_actor with no prompt, return cli_overrides cmd_new saw."""
+        """Invoke server.new_actor with no prompt, return the
+        `config` kwarg the service saw."""
         from actor import server
-        with patch("actor.server.cmd_new") as cmd_new, \
+        new_actor_call = MagicMock()
+        fake_actor = MagicMock()
+        fake_actor.dir = "/tmp/foo"
+        new_actor_call.return_value = fake_actor
+        with patch("actor.service.LocalActorService.new_actor", new_actor_call), \
              patch("actor.server._spawn_background_run") as spawn:
-            fake_actor = MagicMock()
-            fake_actor.dir = "/tmp/foo"
-            cmd_new.return_value = fake_actor
             server.new_actor(name="foo", **kwargs)
         spawn.assert_not_called()
-        return cmd_new.call_args.kwargs["cli_overrides"]
+        return new_actor_call.call_args.kwargs["config"]
 
     def test_new_actor_use_subscription_true_sets_actor_key(self):
-        overrides = self._capture_new_actor_overrides(use_subscription=True)
-        self.assertEqual(overrides.actor_keys, {"use-subscription": "true"})
-        self.assertEqual(overrides.agent_args, {})
+        config = self._capture_new_actor_overrides(use_subscription=True)
+        self.assertEqual(config.actor_keys, {"use-subscription": "true"})
+        self.assertEqual(config.agent_args, {})
 
     def test_new_actor_use_subscription_false_sets_actor_key(self):
-        overrides = self._capture_new_actor_overrides(use_subscription=False)
-        self.assertEqual(overrides.actor_keys, {"use-subscription": "false"})
-        self.assertEqual(overrides.agent_args, {})
+        config = self._capture_new_actor_overrides(use_subscription=False)
+        self.assertEqual(config.actor_keys, {"use-subscription": "false"})
+        self.assertEqual(config.agent_args, {})
 
     def test_new_actor_use_subscription_default_none_emits_nothing(self):
-        """Tri-state: omitting the param leaves actor_keys empty so lower
-        layers (role / kdl / class default) supply the value."""
-        overrides = self._capture_new_actor_overrides()
-        self.assertEqual(overrides.actor_keys, {})
+        """Tri-state: omitting the param leaves actor_keys empty so
+        lower layers (role / kdl / class default) supply the value."""
+        config = self._capture_new_actor_overrides()
+        self.assertEqual(config.actor_keys, {})
 
     def test_new_actor_rejects_use_subscription_via_config(self):
         from actor import server
-        with patch("actor.server.cmd_new") as cmd_new:
+        new_actor_call = MagicMock()
+        with patch("actor.service.LocalActorService.new_actor", new_actor_call):
             with self.assertRaises(ConfigError):
                 server.new_actor(name="foo", config=["use-subscription=true"])
-        cmd_new.assert_not_called()
+        new_actor_call.assert_not_called()
 
-    # -- use_subscription param on run_actor ----------------------------------
+    # -- use_subscription param on run_actor --------------------------------
 
     def _capture_run_actor_overrides(self, **kwargs) -> ActorConfig:
         from actor import server
@@ -660,37 +629,38 @@ class McpToolTests(unittest.TestCase):
 
 
 class AskBlockIntegrationTests(unittest.TestCase):
-    """`ask { }` strings are appended to the affected MCP tool descriptions
-    at server-startup time. Verified by inspecting the registered tool's
-    description via FastMCP's tool list."""
+    """`ask { }` strings are appended to the affected MCP tool
+    descriptions at server-startup time. Verified by inspecting the
+    registered tool's description via FastMCP's tool list."""
 
     def _tool_descriptions(self):
-        # Run the async list against an isolated event loop so the test
-        # works in any host context.
+        # Run the async list against an isolated event loop so the
+        # test works in any host context.
         import asyncio
         from actor import server
         return {t.name: t.description for t in asyncio.run(server.mcp.list_tools())}
 
     def test_default_ask_strings_present_in_tool_descriptions(self):
-        # The hardcoded defaults should already be appended (no settings.kdl
-        # in the test cwd, so resolved() returns the defaults — _ASK_RESOLVED
-        # captured them at module import).
+        # The hardcoded defaults should already be appended (no
+        # settings.kdl in the test cwd, so resolved() returns the
+        # defaults — _ASK_RESOLVED captured them at module import).
         from actor.config import ASK_DEFAULTS
         descs = self._tool_descriptions()
-        # Each affected tool should contain the FIRST line of its default
-        # — not full equality, since the docstring base is also there.
+        # Each affected tool should contain the FIRST line of its
+        # default — not full equality, since the docstring base is
+        # also there.
         first_line = lambda s: s.splitlines()[0]
         self.assertIn(first_line(ASK_DEFAULTS["on-start"]), descs["new_actor"])
         self.assertIn(first_line(ASK_DEFAULTS["before-run"]), descs["run_actor"])
         self.assertIn(first_line(ASK_DEFAULTS["on-discard"]), descs["discard_actor"])
 
     def test_unaffected_tools_have_no_ask_appendix(self):
-        # `list_actors`, `show_actor`, etc. don't take ask annotations —
-        # their descriptions stay as the original docstring.
-        from actor.config import ASK_DEFAULTS
+        # `list_actors`, `show_actor`, etc. don't take ask annotations
+        # — their descriptions stay as the original docstring.
         descs = self._tool_descriptions()
-        # The on-start default mentions "AskUserQuestion" — make sure it
-        # didn't accidentally land in tools that aren't supposed to carry it.
+        # The on-start default mentions "AskUserQuestion" — make sure
+        # it didn't accidentally land in tools that aren't supposed to
+        # carry it.
         self.assertNotIn("AskUserQuestion", descs["list_actors"])
         self.assertNotIn("AskUserQuestion", descs["show_actor"])
         self.assertNotIn("AskUserQuestion", descs["stop_actor"])
@@ -700,9 +670,6 @@ class AskBlockIntegrationTests(unittest.TestCase):
         # Direct unit test of the helper — given an empty appendix, no
         # blank line gets tacked onto the docstring.
         from actor import server
-        # Build a fresh decorator with a synthetic ask key/value mapping
-        # that's silenced. Use a temporary FastMCP so we don't mutate the
-        # module-level `mcp`.
         from mcp.server.fastmcp import FastMCP
         local_mcp = FastMCP("test")
         original_mcp = server.mcp

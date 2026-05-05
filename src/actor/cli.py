@@ -6,32 +6,20 @@ import sys
 from typing import List, Optional
 
 from . import __version__
+from . import cli_format
 from .errors import ActorError, ConfigError
 from .interfaces import Agent
-from .types import ActorConfig, AgentKind, Status, parse_config
+from .service import LocalActorService, agent_class, create_agent
+from .types import ActorConfig, AgentKind, parse_config
 from .db import Database
 from .git import RealGit
 from .process import RealProcessManager
-from .commands import (
-    _agent_class,
-    _create_agent as _create_agent_impl,
-    cmd_config,
-    cmd_discard,
-    cmd_interactive,
-    cmd_list,
-    cmd_logs,
-    cmd_new,
-    cmd_roles,
-    cmd_run,
-    cmd_show,
-    cmd_stop,
-)
 
 
 def _create_agent(kind: AgentKind) -> Agent:
-    # Thin re-export of commands._create_agent so existing test patches and
-    # sibling modules (server.py, watch.app) can keep importing from `cli`.
-    return _create_agent_impl(kind)
+    """Re-export of `service.create_agent` so existing test patches and
+    sibling modules (server.py, watch.app) keep importing from `cli`."""
+    return create_agent(kind)
 
 
 def _resolve_agent_kind_for_cli(
@@ -39,11 +27,11 @@ def _resolve_agent_kind_for_cli(
     role_name: Optional[str],
     app_config,
 ) -> AgentKind:
-    """Replicate cmd_new's agent resolution for CLI-side validation.
+    """Replicate `new_actor`'s agent resolution for CLI-side validation.
 
-    CLI validation of `--config` needs the target agent class to know which
-    keys are actor-keys. Agent precedence mirrors cmd_new: explicit flag →
-    role's `agent` → "claude"."""
+    CLI validation of `--config` needs the target agent class to know
+    which keys are actor-keys. Agent precedence mirrors `new_actor`:
+    explicit flag → role's `agent` → "claude"."""
     if cli_agent is not None:
         return AgentKind.from_str(cli_agent)
     if role_name is not None and app_config is not None:
@@ -60,17 +48,15 @@ def _build_cli_overrides(
 ) -> ActorConfig:
     """Translate raw CLI inputs into a structured ActorConfig.
 
-    `--config KEY=VALUE` always targets agent_args; if KEY collides with an
-    actor-key name (i.e. appears in the agent class's ACTOR_DEFAULTS), we
-    reject here with a helpful error pointing users at the dedicated flag.
-    Dedicated actor-key flags (currently just `--use-subscription` /
-    `--no-use-subscription`) populate actor_keys directly."""
+    `--config KEY=VALUE` always targets agent_args; if KEY collides
+    with an actor-key name (i.e. appears in the agent class's
+    ACTOR_DEFAULTS), reject here with a helpful error pointing users
+    at the dedicated flag. Dedicated actor-key flags (currently just
+    `--use-subscription` / `--no-use-subscription`) populate
+    actor_keys directly."""
     agent_args = parse_config(config_pairs)
     for key in agent_args:
         if key in agent_cls.ACTOR_DEFAULTS:
-            # Channel-agnostic: same validation runs for CLI `--config` and
-            # MCP `config=[...]`. Name both dedicated entrypoints so the
-            # message is useful regardless of caller.
             param = key.replace("-", "_")
             raise ConfigError(
                 f"{key} is an actor-key and cannot be set via --config / config=[...]; "
@@ -127,10 +113,10 @@ Examples:
     p_new.add_argument("--agent", default=None, help="Coding agent to use (defaults to role's agent or 'claude')")
     p_new.add_argument("--role", default=None, help="Apply a role from settings.kdl (see `actor roles` for available names)")
     p_new.add_argument("--model", default=None, help="Model for the agent to use")
-    # Tri-state: default None = "no CLI override" so lower precedence layers
-    # (role, kdl defaults block, class default) supply the value. Explicit
-    # --use-subscription / --no-use-subscription force True/False as the
-    # highest-precedence (CLI) layer.
+    # Tri-state: default None = "no CLI override" so lower precedence
+    # layers (role, kdl defaults block, class default) supply the
+    # value. Explicit --use-subscription / --no-use-subscription force
+    # True/False as the highest-precedence (CLI) layer.
     p_new.add_argument("--use-subscription", action="store_const", const=True, default=None, dest="use_subscription", help="Use the subscription by stripping API keys from the environment (overrides lower layers)")
     p_new.add_argument("--no-use-subscription", action="store_const", const=False, dest="use_subscription", help="Pass API keys through to the agent (overrides lower layers)")
     p_new.add_argument("--config", dest="config", action="append", default=[], metavar="KEY=VALUE", help="Config key=value pair (repeat for multiple)")
@@ -322,12 +308,52 @@ Examples:
     return parser
 
 
+def _build_service(app_config=None) -> LocalActorService:
+    """Construct a `LocalActorService` for the CLI process.
+
+    Opens a fresh `Database` connection. Caller is responsible for
+    closing it (most CLI invocations are one-shot processes that exit
+    after the call).
+    """
+    try:
+        db = Database.open(_db_path())
+    except Exception as e:
+        print(f"error: failed to open database: {e}", file=sys.stderr)
+        sys.exit(1)
+    return LocalActorService(
+        db=db,
+        git=RealGit(),
+        proc_mgr=RealProcessManager(),
+        agent_factory=_create_agent,
+        app_config=app_config,
+    )
+
+
+def _propagate_run_exit(service: LocalActorService, name: str) -> None:
+    """If the latest run exited non-zero, print an error to stderr and
+    exit 2. Mirrors the previous behavior where `actor run` / `actor
+    new <name> <prompt>` propagated the agent's exit code.
+
+    Guard against MagicMock returns in tests by checking the type."""
+    run_row = service.latest_run(name)
+    if (
+        run_row is not None
+        and isinstance(getattr(run_row, "exit_code", None), int)
+        and run_row.exit_code != 0
+    ):
+        print(
+            f"error: run for '{name}' exited {run_row.exit_code}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     effective_argv = sys.argv[1:] if argv is None else argv
     # `actor main ...` execs the agent CLI with the main role's prompt
-    # appended as a system prompt and the actor channel enabled. Short-
-    # circuit before argparse so unknown agent flags (--model, -p, etc.)
-    # forwarded after `main` don't trip the top-level parser.
+    # appended as a system prompt and the actor channel enabled.
+    # Short-circuit before argparse so unknown agent flags forwarded
+    # after `main` don't trip the top-level parser.
     if effective_argv and effective_argv[0] == "main":
         from .config import load_config
         cfg = load_config()
@@ -362,8 +388,8 @@ def main(argv: Optional[List[str]] = None) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        # execvp replaces the process on success, so control only reaches here
-        # if the call was mocked (in tests). Don't fall through to argparse.
+        # execvp replaces the process on success; control only reaches
+        # here if the call was mocked (in tests). Don't fall through.
         return
 
     parser = _build_parser()
@@ -412,30 +438,21 @@ def main(argv: Optional[List[str]] = None) -> None:
             sys.exit(1)
         return
 
-    # 'main' subcommand is short-circuited above before argparse runs;
-    # this block is unreachable but kept for clarity if anything routes
-    # back into argparse with command == "main".
-
+    # Eager-load AppConfig so a malformed settings.kdl surfaces as a
+    # ConfigError exiting non-zero rather than blowing up midway.
+    # Subcommands that need it just read from `app_config`; others
+    # ignore it.
     try:
-        db = Database.open(_db_path())
-    except Exception as e:
-        print(f"error: failed to open database: {e}", file=sys.stderr)
+        from .config import load_config
+        app_config = load_config()
+    except ConfigError as e:
+        print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    git = RealGit()
-    proc_mgr = RealProcessManager()
-
-    def agent_for(name: str) -> Agent:
-        actor = db.get_actor(name)
-        return _create_agent(actor.agent)
+    service = _build_service(app_config=app_config)
 
     try:
         if args.command == "new":
-            from .config import load_config
-            app_config = load_config()
-
-            # --config goes into agent_args; --model is an agent_arg too.
-            # --use-subscription is an actor-key, so it routes separately.
             config_pairs = list(args.config)
             if args.model is not None:
                 config_pairs.append(f"model={args.model}")
@@ -443,24 +460,21 @@ def main(argv: Optional[List[str]] = None) -> None:
             agent_kind = _resolve_agent_kind_for_cli(
                 args.agent, args.role, app_config,
             )
-            agent_cls = _agent_class(agent_kind)
+            agent_cls = agent_class(agent_kind)
             cli_overrides = _build_cli_overrides(
                 agent_cls,
                 config_pairs,
                 use_subscription=args.use_subscription,
             )
 
-            actor = cmd_new(
-                db, git,
+            actor = service.new_actor(
                 name=args.name,
                 dir=args.dir,
                 no_worktree=args.no_worktree,
                 base=args.base,
                 agent_name=args.agent,
-                cli_overrides=cli_overrides,
+                config=cli_overrides,
                 role_name=args.role,
-                app_config=app_config,
-                hook_runner=None,
             )
             print(f"{actor.name} created ({actor.dir})")
 
@@ -474,128 +488,100 @@ def main(argv: Optional[List[str]] = None) -> None:
                 sys.exit(1)
             if prompt:
                 try:
-                    agent = agent_for(args.name)
-                    run_output = cmd_run(
-                        db, agent, proc_mgr,
+                    result = service.run_actor(
                         name=args.name,
                         prompt=prompt,
-                        cli_overrides=ActorConfig(),  # creation flags already saved as defaults
-                        app_config=app_config,
+                        config=ActorConfig(),  # creation flags already saved as defaults
                     )
-                    if run_output:
-                        print(run_output, end="" if run_output.endswith("\n") else "\n")
+                    if result.output:
+                        print(
+                            result.output,
+                            end="" if result.output.endswith("\n") else "\n",
+                        )
                 except Exception as e:
-                    print(f"error: actor created but run failed: {e}", file=sys.stderr)
-                    sys.exit(2)
-                # Propagate the agent's exit code if the run failed —
-                # otherwise `actor new foo "task"` would mask broken
-                # agents behind a 0 exit. `isinstance` guard so mocked
-                # tests that return MagicMocks don't trip it.
-                run_row = db.latest_run(args.name)
-                if (run_row is not None
-                        and isinstance(getattr(run_row, "exit_code", None), int)
-                        and run_row.exit_code != 0):
                     print(
-                        f"error: run for '{args.name}' exited {run_row.exit_code}",
+                        f"error: actor created but run failed: {e}",
                         file=sys.stderr,
                     )
                     sys.exit(2)
+                _propagate_run_exit(service, args.name)
 
         elif args.command == "run":
-            from .config import load_config as _load_config_run
-            app_config_run = _load_config_run()
-            # Interactive mode
             if args.interactive:
-                agent = agent_for(args.name)
-                exit_code, msg = cmd_interactive(
-                    db, agent, proc_mgr, name=args.name,
-                    app_config=app_config_run,
-                )
+                exit_code, msg = service.interactive_actor(name=args.name)
                 print(msg, file=sys.stderr)
                 # POSIX convention for signal termination: 128 + signum.
-                # cmd_interactive returns -signum in that case.
+                # interactive_actor returns -signum in that case.
                 if exit_code < 0:
                     sys.exit(128 - exit_code)
                 sys.exit(exit_code)
 
-            # Resolve prompt: argument, stdin, or error
             prompt = args.prompt
             if prompt is None and not sys.stdin.isatty():
                 prompt = sys.stdin.read().strip()
             if not prompt:
-                print("error: prompt is required (pass as argument or pipe via stdin, or use -i)", file=sys.stderr)
-                sys.exit(1)
-
-            actor_row = db.get_actor(args.name)
-            agent_cls = _agent_class(actor_row.agent)
-            cli_overrides = _build_cli_overrides(agent_cls, list(args.config))
-            agent = _create_agent(actor_row.agent)
-            run_output = cmd_run(
-                db, agent, proc_mgr,
-                name=args.name,
-                prompt=prompt,
-                cli_overrides=cli_overrides,
-                app_config=app_config_run,
-            )
-            # Show the agent's response so the user gets feedback
-            # without having to run `actor logs` after.
-            if run_output:
-                print(run_output, end="" if run_output.endswith("\n") else "\n")
-            # Propagate run exit code — silent success on a failed run
-            # was confusing. `isinstance` guard so mocked tests that
-            # return MagicMocks don't trip it.
-            run_row = db.latest_run(args.name)
-            if (run_row is not None
-                    and isinstance(getattr(run_row, "exit_code", None), int)
-                    and run_row.exit_code != 0):
                 print(
-                    f"error: run for '{args.name}' exited {run_row.exit_code}",
+                    "error: prompt is required (pass as argument or pipe via stdin, or use -i)",
                     file=sys.stderr,
                 )
-                sys.exit(2)
+                sys.exit(1)
+
+            actor_row = service.get_actor(args.name)
+            agent_cls = agent_class(actor_row.agent)
+            cli_overrides = _build_cli_overrides(agent_cls, list(args.config))
+            result = service.run_actor(
+                name=args.name,
+                prompt=prompt,
+                config=cli_overrides,
+            )
+            if result.output:
+                print(
+                    result.output,
+                    end="" if result.output.endswith("\n") else "\n",
+                )
+            _propagate_run_exit(service, args.name)
 
         elif args.command == "list":
-            output = cmd_list(db, proc_mgr, status_filter=args.status)
-            print(output, end="")
+            actors = service.list_actors(status_filter=args.status)
+            statuses = {a.name: service.actor_status(a.name) for a in actors}
+            latest_runs = {a.name: service.latest_run(a.name) for a in actors}
+            print(
+                cli_format.format_actor_table(actors, statuses, latest_runs),
+                end="",
+            )
 
         elif args.command == "roles":
-            from .config import load_config
-            output = cmd_roles(load_config())
-            print(output, end="")
+            print(cli_format.format_roles(service.list_roles()), end="")
 
         elif args.command == "show":
-            output = cmd_show(db, proc_mgr, name=args.name, runs_limit=args.runs)
-            print(output, end="")
+            detail = service.show_actor(name=args.name, runs_limit=args.runs)
+            print(cli_format.format_actor_detail(detail), end="")
 
         elif args.command == "logs":
-            agent = agent_for(args.name)
-            output = cmd_logs(
-                db, agent,
-                name=args.name,
-                verbose=args.verbose,
-                watch=args.watch,
-            )
+            logs = service.get_logs(args.name)
+            output = cli_format.format_logs(logs, verbose=args.verbose)
             if output:
                 print(output)
 
         elif args.command == "stop":
-            agent = agent_for(args.name)
-            msg = cmd_stop(db, agent, proc_mgr, name=args.name)
-            print(msg)
+            result = service.stop_actor(name=args.name)
+            print(cli_format.format_stop(result))
 
         elif args.command == "config":
-            output = cmd_config(db, name=args.name, config_pairs=args.pairs)
-            if output:
-                print(output, end="")
+            if args.pairs:
+                service.config_actor(name=args.name, pairs=list(args.pairs))
+                # Match the original "no trailing newline" output —
+                # prior tests/users may rely on the exact byte form.
+                print(f"{args.name} config updated", end="")
+            else:
+                cfg = service.config_actor(name=args.name)
+                output = cli_format.format_config_view(cfg)
+                if output:
+                    print(output, end="")
 
         elif args.command == "discard":
-            from .config import load_config as _load_config_discard
-            msg = cmd_discard(
-                db, proc_mgr, name=args.name,
-                app_config=_load_config_discard(),
-                force=args.force,
-            )
-            print(msg)
+            result = service.discard_actor(name=args.name, force=args.force)
+            print(cli_format.format_discard(result))
 
     except ActorError as e:
         print(f"error: {e}", file=sys.stderr)

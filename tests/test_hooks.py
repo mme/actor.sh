@@ -13,21 +13,22 @@ from typing import List, Tuple
 from actor import (
     Database,
     Status,
-    cmd_discard,
-    cmd_new,
-    cmd_run,
-    cmd_interactive,
 )
 from actor.config import AppConfig, Hooks, load_config
 from actor.errors import ConfigError, HookFailedError
 from actor.hooks import HookResult, hook_env, merge_env_extra, run_hook
 
-# Reuse the fakes from test_actor.py so we don't duplicate a test harness.
+# Reuse the fakes + cmd_* shims from test_actor.py so we don't
+# duplicate a test harness.
 from tests.test_actor import (
     FakeAgent,
     FakeGit,
     FakeProcessManager,
     _cli,
+    cmd_discard,
+    cmd_interactive,
+    cmd_new,
+    cmd_run,
     create_actor,
 )
 
