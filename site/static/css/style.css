@@ -112,19 +112,21 @@ body {
   text-transform: uppercase;
 }
 
+/* Brand mark — ASCII art rendered in monospace.
+   The logo is 15 cols × 9 rows. JetBrains Mono has a 0.6em char width,
+   so 15 × 0.6em = 9.0em wide and 9 rows × 1em line-height = 9.0em tall
+   → naturally square at line-height: 1. No vertical squish, no distortion. */
 .topbar-brand .brand-mark {
-  width: 18px;
-  height: 18px;
-  border: 1.5px solid currentColor;
-  position: relative;
+  font-family: var(--font-mono);
+  font-size: 3.5px;
+  line-height: 1;
+  letter-spacing: 0;
+  white-space: pre;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  color: currentColor;
   flex-shrink: 0;
-}
-
-.topbar-brand .brand-mark::after {
-  content: "";
-  position: absolute;
-  inset: 3px;
-  border: 1px solid currentColor;
 }
 
 .topbar-brand .sep {
