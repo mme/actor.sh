@@ -17,8 +17,10 @@ from pathlib import Path
 if sys.platform == "win32":
     raise unittest.SkipTest("PTY not available on Windows")
 
-from actor import INTERACTIVE_PROMPT
+from actor import INTERACTIVE_PROMPT, LocalActorService
 from actor.db import Database
+from actor.git import RealGit
+from actor.process import RealProcessManager
 from actor.types import ActorConfig, Status
 from actor.watch.interactive.manager import InteractiveSessionManager
 from actor.watch.interactive.diagnostics import DiagnosticRecorder, EventKind
@@ -62,16 +64,35 @@ class _FakeAgent:
 
 
 def _ensure_actor(db: Database, name: str, session: str = "sess-1") -> None:
-    """Insert an actor via the public cmd_new so we don't hardcode schema."""
-    from actor import cmd_new
+    """Insert an actor via LocalActorService.new_actor so we don't
+    hardcode schema."""
     from tests.test_actor import FakeGit
-    git = FakeGit()
-    cmd_new(
-        db, git,
+    svc = LocalActorService(
+        db=db,
+        git=FakeGit(),
+        proc_mgr=None,
+        agent_factory=lambda _k: None,
+    )
+    svc.new_actor(
         name=name, dir="/tmp", no_worktree=True, base=None,
-        agent_name="claude", cli_overrides=ActorConfig(),
+        agent_name="claude", config=ActorConfig(),
     )
     db.update_actor_session(name, session)
+
+
+def _service_factory(db_path: str):
+    """Build a fresh `LocalActorService` per call — the manager opens a
+    new DB connection on every mutation. Real watch app uses
+    `RealGit` / `RealProcessManager`; manager tests don't exercise
+    those paths so any value works."""
+    def _factory():
+        return LocalActorService(
+            db=Database.open(db_path),
+            git=RealGit(),
+            proc_mgr=RealProcessManager(),
+            agent_factory=lambda _k: None,
+        )
+    return _factory
 
 
 class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
@@ -90,7 +111,7 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.db = Database.open(self._db_path)  # reader for assertions
         self.recorder = DiagnosticRecorder(capacity=100)
         self.manager = InteractiveSessionManager(
-            db_opener=lambda: Database.open(self._db_path),
+            service_factory=_service_factory(self._db_path),
             recorder=self.recorder,
         )
 
@@ -276,7 +297,7 @@ class ManagerDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         with Database.open(db_path) as seed:
             _ensure_actor(seed, "alice")
         mgr = InteractiveSessionManager(
-            db_opener=lambda: Database.open(db_path), recorder=recorder,
+            service_factory=_service_factory(db_path), recorder=recorder,
         )
         # Plant a fake session directly so close_all exercises the except path.
         fake = InteractiveSession(

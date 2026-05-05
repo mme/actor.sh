@@ -31,7 +31,8 @@ from mcp.types import (
 )
 
 from actor import server as srv
-from actor.types import AgentKind
+from actor.service import Notification
+from actor.types import AgentKind, Status
 
 
 class ChannelNotificationReproTest(unittest.IsolatedAsyncioTestCase):
@@ -47,9 +48,26 @@ class ChannelNotificationReproTest(unittest.IsolatedAsyncioTestCase):
 
         run_done = threading.Event()
 
-        def fake_cmd_run(*_args, **_kwargs):
+        def fake_run_actor(self, name, prompt, config):
+            """Stand in for the real `LocalActorService.run_actor`.
+
+            Publishes a `run_completed` notification through the
+            service's pub/sub so the server's subscribed handler
+            relays it to the channel — same wire path the production
+            code drives, just without spawning a real agent."""
             try:
-                return "finished"
+                self.publish_notification(Notification(
+                    actor=name,
+                    event="run_completed",
+                    run_id=1,
+                    status=Status.DONE,
+                    output="finished",
+                ))
+                from actor import RunResult
+                return RunResult(
+                    run_id=1, actor=name,
+                    status=Status.DONE, exit_code=0, output="finished",
+                )
             finally:
                 run_done.set()
 
@@ -59,7 +77,7 @@ class ChannelNotificationReproTest(unittest.IsolatedAsyncioTestCase):
         with patch("actor.server._db", return_value=fake_db), \
              patch("actor.server.Database", fake_db_cls), \
              patch("actor.server._create_agent", return_value=MagicMock()), \
-             patch("actor.server.cmd_run", side_effect=fake_cmd_run), \
+             patch("actor.service.LocalActorService.run_actor", fake_run_actor), \
              patch("actor.server.RealProcessManager"):
             async with create_client_server_memory_streams() as (client_streams, server_streams):
                 client_read, client_write = client_streams

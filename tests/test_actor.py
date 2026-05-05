@@ -19,12 +19,109 @@ from actor import (
     Agent, GitOps, ProcessManager,
     # Database
     Database,
-    # Commands
-    cmd_new, cmd_run, cmd_list, cmd_roles, cmd_show, cmd_stop, cmd_config, cmd_logs, cmd_discard,
-    cmd_interactive, INTERACTIVE_PROMPT,
+    # Service
+    LocalActorService, INTERACTIVE_PROMPT,
     # Helpers
     truncate, format_duration,
 )
+from actor import cli_format as _fmt
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  Test shims that preserve the cmd_* signatures used throughout this
+#  file. Each builds a `LocalActorService` per call and delegates,
+#  wrapping the structured result with the equivalent display string
+#  so the assertions on `output` still hold.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _service(db, agent=None, proc_mgr=None, *, git=None,
+             app_config=None, hook_runner=None) -> LocalActorService:
+    return LocalActorService(
+        db=db,
+        git=git,
+        proc_mgr=proc_mgr,
+        agent_factory=(lambda _k: agent) if agent is not None else None,
+        app_config=app_config,
+        hook_runner=hook_runner,
+    )
+
+
+def cmd_new(db, git, *, name, dir, no_worktree, base, agent_name,
+            cli_overrides, role_name=None, app_config=None,
+            hook_runner=None):
+    svc = _service(
+        db=db, git=git, proc_mgr=None,
+        app_config=app_config, hook_runner=hook_runner,
+    )
+    return svc.new_actor(
+        name=name, dir=dir, no_worktree=no_worktree, base=base,
+        agent_name=agent_name, config=cli_overrides, role_name=role_name,
+    )
+
+
+def cmd_run(db, agent, proc_mgr, *, name, prompt, cli_overrides,
+            app_config=None, hook_runner=None):
+    svc = _service(
+        db=db, agent=agent, proc_mgr=proc_mgr,
+        app_config=app_config, hook_runner=hook_runner,
+    )
+    return svc.run_actor(name=name, prompt=prompt, config=cli_overrides).output
+
+
+def cmd_interactive(db, agent, proc_mgr, *, name, runner=None,
+                    app_config=None, hook_runner=None):
+    svc = _service(
+        db=db, agent=agent, proc_mgr=proc_mgr,
+        app_config=app_config, hook_runner=hook_runner,
+    )
+    return svc.interactive_actor(name=name, runner=runner)
+
+
+def cmd_list(db, pm, *, status_filter):
+    svc = _service(db=db, proc_mgr=pm)
+    actors = svc.list_actors(status_filter=status_filter)
+    statuses = {a.name: svc.actor_status(a.name) for a in actors}
+    latest_runs = {a.name: svc.latest_run(a.name) for a in actors}
+    return _fmt.format_actor_table(actors, statuses, latest_runs)
+
+
+def cmd_show(db, pm, *, name, runs_limit):
+    svc = _service(db=db, proc_mgr=pm)
+    return _fmt.format_actor_detail(
+        svc.show_actor(name=name, runs_limit=runs_limit),
+    )
+
+
+def cmd_stop(db, agent, proc_mgr, *, name):
+    svc = _service(db=db, agent=agent, proc_mgr=proc_mgr)
+    return _fmt.format_stop(svc.stop_actor(name=name))
+
+
+def cmd_config(db, *, name, config_pairs):
+    svc = _service(db=db)
+    if not config_pairs:
+        return _fmt.format_config_view(svc.config_actor(name=name))
+    svc.config_actor(name=name, pairs=config_pairs)
+    return f"{name} config updated"
+
+
+def cmd_logs(db, agent, *, name, verbose, watch):
+    svc = _service(db=db, agent=agent)
+    return _fmt.format_logs(svc.get_logs(name), verbose=verbose)
+
+
+def cmd_roles(app_config):
+    return _fmt.format_roles(app_config.roles)
+
+
+def cmd_discard(db, proc_mgr, *, name, git=None,
+                app_config=None, hook_runner=None, force=False):
+    svc = _service(
+        db=db, proc_mgr=proc_mgr, git=git,
+        app_config=app_config, hook_runner=hook_runner,
+    )
+    return _fmt.format_discard(svc.discard_actor(name=name, force=force))
 
 
 def _cli(*pairs: str, actor_keys: dict | None = None) -> ActorConfig:

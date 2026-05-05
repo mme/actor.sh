@@ -64,19 +64,25 @@ from .git import RealGit, _run_git
 # Process
 from .process import RealProcessManager
 
-# Commands & helpers
-from .commands import (
-    cmd_new,
-    cmd_run,
-    cmd_interactive,
+# Service
+from .service import (
+    ActorService,
+    LocalActorService,
+    Notification,
     INTERACTIVE_PROMPT,
-    cmd_list,
-    cmd_roles,
-    cmd_show,
-    cmd_stop,
-    cmd_config,
-    cmd_logs,
-    cmd_discard,
+    RunStartResult,
+    RunResult,
+    StopResult,
+    DiscardResult,
+    ActorDetail,
+    InteractiveRunHandle,
+    LogsResult,
+    agent_class,
+    create_agent,
+)
+
+# Display helpers (also available for tests)
+from .cli_format import (
     truncate,
     format_duration,
     worktree_path,
@@ -137,18 +143,20 @@ __all__ = [
     "RealGit",
     # Process
     "RealProcessManager",
-    # Commands
-    "cmd_new",
-    "cmd_run",
-    "cmd_interactive",
+    # Service
+    "ActorService",
+    "LocalActorService",
+    "Notification",
     "INTERACTIVE_PROMPT",
-    "cmd_list",
-    "cmd_roles",
-    "cmd_show",
-    "cmd_stop",
-    "cmd_config",
-    "cmd_logs",
-    "cmd_discard",
+    "RunStartResult",
+    "RunResult",
+    "StopResult",
+    "DiscardResult",
+    "ActorDetail",
+    "InteractiveRunHandle",
+    "LogsResult",
+    "agent_class",
+    "create_agent",
     # Helpers
     "truncate",
     "format_duration",

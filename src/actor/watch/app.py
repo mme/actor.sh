@@ -24,8 +24,10 @@ from textual.widgets import (
 )
 
 from ..db import Database
+from ..git import RealGit
 from ..interfaces import LogEntryKind, binary_exists
 from ..process import RealProcessManager
+from ..service import LocalActorService, agent_class
 from ..types import Actor, AgentKind, Status
 from ..cli import _db_path, _create_agent
 from .confirm_dialog import ConfirmDialog
@@ -331,7 +333,12 @@ class ActorWatchApp(App):
         self._animate = animate
         self._diagnostics = DiagnosticRecorder(capacity=2048)
         self._interactive = InteractiveSessionManager(
-            db_opener=lambda: Database.open(_db_path()),
+            service_factory=lambda: LocalActorService(
+                db=Database.open(_db_path()),
+                git=RealGit(),
+                proc_mgr=RealProcessManager(),
+                agent_factory=_create_agent,
+            ),
             recorder=self._diagnostics,
         )
         # Actor whose terminal widget is currently mounted, if any.
@@ -1065,8 +1072,7 @@ class ActorWatchApp(App):
         explicitly to something non-default)."""
         from rich.text import Text
 
-        from ..commands import _agent_class
-        agent_cls = _agent_class(actor.agent)
+        agent_cls = agent_class(actor.agent)
         defaults: dict[str, str] = {}
         defaults.update(getattr(agent_cls, "AGENT_DEFAULTS", {}) or {})
         defaults.update(getattr(agent_cls, "ACTOR_DEFAULTS", {}) or {})
@@ -3292,15 +3298,12 @@ class ActorWatchApp(App):
         )
 
     def _do_stop(self, name: str) -> None:
-        """Actual stop logic — runs `cmd_stop` and refreshes the
-        tree. The MCP server's per-run thread-watcher picks up the
+        """Actual stop logic — runs `service.stop_actor` and refreshes
+        the tree. The MCP server's per-run thread-watcher picks up the
         resulting state transition automatically (it's blocked on
         `agent.wait(pid)`)."""
-        from ..commands import cmd_stop
         try:
-            actor = self._db_handle().get_actor(name)
-            agent = _create_agent(actor.agent)
-            cmd_stop(self._db_handle(), agent, RealProcessManager(), name=name)
+            self._service().stop_actor(name=name)
             self.notify(f"Stopped {name}")
         except Exception as e:
             self.notify(f"failed to stop {name}: {e}", severity="error")
@@ -3336,32 +3339,36 @@ class ActorWatchApp(App):
         )
 
     def _do_discard(self, name: str) -> None:
-        """Actual discard logic — runs `cmd_discard` with
+        """Actual discard logic — runs `service.discard_actor` with
         `force=True` so a failing on-discard hook doesn't block the
         palette-driven cleanup. The MCP server sees the actor row
         disappear and emits a `status="discarded"` channel
         notification automatically."""
-        from ..commands import cmd_discard
-        from ..config import load_config as _lc
         try:
-            cmd_discard(
-                self._db_handle(),
-                RealProcessManager(),
-                name=name,
-                app_config=_lc(),
-                force=True,
-            )
+            self._service().discard_actor(name=name, force=True)
             self.notify(f"Discarded {name}")
         except Exception as e:
             self.notify(f"failed to discard {name}: {e}", severity="error")
             return
         self._poll_actors_async()
 
-    def _db_handle(self) -> Database:
-        """Single Database instance per palette command — opens fresh
-        rather than caching, since palette commands are one-shot and
-        we don't want a long-lived connection here."""
-        return Database.open(_db_path())
+    def _service(self) -> LocalActorService:
+        """Construct a fresh service per palette command — palette
+        commands are one-shot, we don't want a long-lived DB
+        connection here. AppConfig is loaded each time so the
+        on-discard hook reflects whatever the user has set."""
+        from ..config import load_config
+        try:
+            cfg = load_config()
+        except Exception:
+            cfg = None
+        return LocalActorService(
+            db=Database.open(_db_path()),
+            git=RealGit(),
+            proc_mgr=RealProcessManager(),
+            agent_factory=_create_agent,
+            app_config=cfg,
+        )
 
     def action_dump_diagnostics(self) -> None:
         import sys
