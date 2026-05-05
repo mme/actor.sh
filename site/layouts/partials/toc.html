@@ -13,7 +13,7 @@
   <ul class="toc-list">
     {{ range $headings }}
       <li class="toc-item">
-        <a href="#{{ .ID }}" data-toc-link="{{ .ID }}">{{ .Title }}</a>
+        <a href="#{{ .ID }}" data-toc-link="{{ .ID }}">{{ .Title | safeHTML }}</a>
       </li>
     {{ end }}
   </ul>
