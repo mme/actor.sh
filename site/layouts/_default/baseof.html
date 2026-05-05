@@ -14,7 +14,7 @@
     </article>
     {{ partial "footer.html" . }}
   </main>
-  {{ if or (eq .Kind "page") (eq .Kind "home") }}{{ partial "toc.html" . }}{{ end }}
+  {{ if eq .Kind "page" }}{{ partial "toc.html" . }}{{ end }}
   <script src="{{ "js/theme.js" | relURL }}" defer></script>
 </body>
 </html>
