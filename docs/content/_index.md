@@ -1,32 +1,49 @@
 ---
 title: "actor.sh"
-description: "One prompt. Total power. Parallel AI coding from your main Claude Code session — peer-level actors with their own context, in isolated git worktrees."
+description: "What actor.sh is and why it exists."
 weight: 0
+aliases:
+  - /getting-started/introduction/
+  - /getting-started/
 ---
 
-# One prompt. Total power.
+actor.sh manages multiple Claude/Codex coding agents running in parallel, each in its own isolated git worktree. You talk to one main actor — the session you launch with `actor main` — and it spawns specialized peer actors to handle the actual work, verifies their output, and reports back.
 
-**One of you vs ten terminals demanding attention. Let's fix that.**
+## The problem
 
-Parallel AI coding should give you leverage — not more tabs to manage. Most multi-agent setups quietly turn you into the middle manager: opening terminals, spinning up branches, copying prompts around, checking on progress, gathering results, deciding what's next.
+Running several coding agents in parallel sounds like leverage right up until you're the one routing it. Without a coordinator, you end up as the middle manager: opening terminals, branching, copy-pasting prompts and outputs between them, remembering which one is doing what, checking back on each, and stitching the results together yourself. The throughput goes up; the cognitive overhead goes up faster. There's no overview, no completion signal, and switching contexts costs more than the parallel work saved.
 
-actor.sh flips that. **The conversation is the control room.**
+actor.sh moves the coordination layer into the conversation you're already having with your main coding agent.
 
-From your main Claude Code session, your agent can spin up actors, hand them focused work, let them run, and pull their results back when they finish. Because everything lands in the same conversation, your main agent can read the findings, launch follow-ups, weigh different approaches, or help you decide what to ship.
+## What's an actor
 
-## Pick up the thread.
+An actor is a coding agent — `claude` or `codex` — running a task on its own git branch, inside its own working tree under `~/.actor/worktrees/<actor-name>/`. The branch and worktree are created when the actor is spawned and stay around across runs, so the actor's edits never collide with your main checkout or with another actor's work.
 
-Subagents are for one-off tasks. Actors are for the conversation.
+Each actor keeps its own conversational context. Calling `run_actor` again on an existing actor resumes its session — it remembers what you discussed last time, what it tried, and what the user asked for. That's the difference between handing work off and starting over: you can come back to an actor an hour later or a week later and continue the same thread.
 
-An actor has its own working tree, its own context, and a thread you can keep talking to. Send a follow-up an hour later — or a week later — and it picks up where you both left off. Course-correct mid-stride. Ask for a revision. Hand it the next milestone.
+See [Actors and worktrees](concepts/actors-and-worktrees/) for the full model.
 
-Subagents are short-lived helpers a single actor dispatches for parallel throughput. Actors are peer collaborators you can return to.
+## How parallel runs stay coordinated
 
-You focus on what you want. The agent handles the wrangling.
+Each actor's run executes in the background. When it finishes, the actor MCP server pushes a `<channel source="actor" ...>` event to the main actor's session — a structured notification carrying the actor's name, final status, and output. The main actor sees the event mid-conversation and reacts: verify the work, summarize, launch a follow-up, or report back to you.
 
-## Where to next
+That channel is what turns parallel runs from a cluster of orphaned terminals into one coherent thread of work. See [Channel notifications](concepts/channel-notifications/) for the event shape.
 
-- **[Getting started](getting-started/)** — install actor.sh, register the skill, spawn your first actor.
-- **[Concepts](concepts/)** — actors, worktrees, roles, hooks, channel notifications.
-- **[Guides](guides/)** — task-shaped configuration, agent setup, settings.kdl.
-- **[Reference](reference/)** — every CLI subcommand, MCP tool, and config key.
+## Actors vs subagents
+
+Subagents and actors look superficially similar — both are background helpers an agent dispatches — but they solve different problems.
+
+A subagent is a short-lived helper a single actor spins up for parallel throughput inside one job: drafting four documentation pages at once, fanning out four search queries, fact-checking three claims in parallel. It runs its task and dissolves; its output flows back into the parent actor's reasoning.
+
+An actor is a peer-level collaborator with its own working tree, its own context, and its own conversational thread. You can come back to it later and pick up where you left off, hand it the next milestone, ask for a revision. Actors are how distinct workstreams divide labor at the peer level; subagents are how a single actor parallelises within its own scope.
+
+## What this site covers
+
+The pages here split into four groups, in roughly the order most readers want them:
+
+- **[Getting started](getting-started/)** — install actor.sh, register the skill and MCP, and walk through your first actor end-to-end.
+- **[Concepts](concepts/)** — the model: actors and worktrees, roles, hooks, ask blocks, channel notifications.
+- **[Guides](guides/)** — task-shaped configuration topics: Claude and Codex agent setup, the full settings.kdl tour, theming the watch dashboard.
+- **[Reference](reference/)** — flat lookup for every CLI subcommand, MCP tool, and config key.
+
+If you're new, [Installation](getting-started/installation/) is the next step.

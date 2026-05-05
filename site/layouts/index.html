@@ -1,5 +1,7 @@
 {{ define "main" }}
-<div class="prose landing">
+<h1 class="page-title">{{ .Title }}</h1>
+{{ with .Description }}<p class="page-lede">{{ . }}</p>{{ end }}
+<div class="prose">
   {{ .Content }}
 </div>
 {{ end }}
