@@ -1,5 +1,11 @@
+{{- $page := .Page -}}
+{{- if $page.IsHome -}}
+  {{- with site.GetPage "/getting-started/01-introduction" -}}
+    {{- $page = . -}}
+  {{- end -}}
+{{- end -}}
 {{- $headings := slice -}}
-{{- with .Page.Fragments -}}
+{{- with $page.Fragments -}}
   {{- range .Headings -}}
     {{- if eq .Level 2 -}}{{- $headings = $headings | append . -}}{{- end -}}
     {{- range .Headings -}}
