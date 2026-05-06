@@ -70,58 +70,107 @@ class Database:
     @classmethod
     def open(cls, path: str) -> Database:
         if path == ":memory:":
-            conn = sqlite3.connect(":memory:", timeout=10.0, check_same_thread=False)
+            conn = sqlite3.connect(":memory:", timeout=30.0, check_same_thread=False)
         else:
             parent = os.path.dirname(path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-            # `timeout=10` waits up to 10 seconds for the file lock
+            # `timeout=30` waits up to 30 seconds for the file lock
             # before raising. PRAGMA statements below also need to
-            # acquire the lock — without this, two concurrent CLI
-            # creates can race during schema-init and one fails with
-            # "database is locked" before busy_timeout below kicks in.
+            # acquire the lock — without this, concurrent CLI creates
+            # racing against a fresh DB can fail with "database is
+            # locked" before busy_timeout below kicks in. 30s is
+            # deliberately generous for slower CI runners; in normal
+            # use the lock is held for milliseconds.
             #
             # `check_same_thread=False` lets us hand the connection
             # off to executor threads via `asyncio.to_thread` from the
             # async service layer. SQLite itself is fine with this in
             # WAL mode (concurrent readers, serialized writers); we
             # already serialise writes through the single asyncio loop.
-            conn = sqlite3.connect(path, timeout=10.0, check_same_thread=False)
+            conn = sqlite3.connect(path, timeout=30.0, check_same_thread=False)
 
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout=10000;")
+        # Set busy_timeout FIRST so it covers the PRAGMA statements
+        # below, including the journal_mode read.
+        conn.execute("PRAGMA busy_timeout=30000;")
+        # Only set journal_mode=WAL if the DB isn't already in WAL.
+        # Switching journal mode requires an exclusive lock, which
+        # serialises behind any in-flight writers. Once a DB has been
+        # initialised in WAL once, every subsequent open is just
+        # reading the current mode — no lock contention. This is the
+        # difference between every `actor` invocation contesting for
+        # the WAL lock vs. only the first one ever doing so.
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        if (mode or "").lower() != "wal":
+            # `PRAGMA journal_mode=WAL` does NOT honor `busy_timeout` —
+            # it returns SQLITE_BUSY immediately when any other
+            # connection is mid-transaction. With concurrent CLI
+            # invocations on a fresh DB, this races and one process
+            # wins the switch; the loser raises "database is locked"
+            # without retrying. Retry manually with a short backoff —
+            # the steady state (after first WAL setup ever) sees WAL
+            # on the read above and skips this branch entirely.
+            import time as _time
+            import random as _random
+            for _attempt in range(50):  # ~50 × ~30ms ≈ 1.5s upper bound
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL;")
+                    break
+                except sqlite3.OperationalError as e:
+                    if "locked" not in str(e):
+                        raise
+                    # Re-check: another connection may have flipped it
+                    # under us; if so, we're done.
+                    current = conn.execute("PRAGMA journal_mode").fetchone()[0]
+                    if (current or "").lower() == "wal":
+                        break
+                    _time.sleep(0.02 + _random.random() * 0.04)
         conn.execute("PRAGMA foreign_keys=ON;")
 
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS actors (
-                name            TEXT PRIMARY KEY,
-                agent           TEXT NOT NULL DEFAULT 'claude',
-                agent_session   TEXT,
-                dir             TEXT NOT NULL,
-                source_repo     TEXT,
-                base_branch     TEXT,
-                worktree        BOOLEAN NOT NULL DEFAULT FALSE,
-                parent          TEXT,
-                config          TEXT NOT NULL DEFAULT '{}',
-                created_at      TEXT NOT NULL,
-                updated_at      TEXT NOT NULL
-            );
+        # Schema init is idempotent (CREATE TABLE IF NOT EXISTS) but
+        # `executescript` opens an implicit write transaction even when
+        # nothing changes — that was contesting locks with concurrent
+        # writers under load. Skip the script when the schema is
+        # already complete; only run it on a fresh DB.
+        existing = {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name IN ('actors', 'runs')"
+            )
+        }
+        if {"actors", "runs"} - existing:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS actors (
+                    name            TEXT PRIMARY KEY,
+                    agent           TEXT NOT NULL DEFAULT 'claude',
+                    agent_session   TEXT,
+                    dir             TEXT NOT NULL,
+                    source_repo     TEXT,
+                    base_branch     TEXT,
+                    worktree        BOOLEAN NOT NULL DEFAULT FALSE,
+                    parent          TEXT,
+                    config          TEXT NOT NULL DEFAULT '{}',
+                    created_at      TEXT NOT NULL,
+                    updated_at      TEXT NOT NULL
+                );
 
-            CREATE TABLE IF NOT EXISTS runs (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                actor_name      TEXT NOT NULL REFERENCES actors(name) ON DELETE CASCADE,
-                prompt          TEXT NOT NULL,
-                status          TEXT NOT NULL DEFAULT 'running',
-                exit_code       INTEGER,
-                pid             INTEGER,
-                config          TEXT NOT NULL DEFAULT '{}',
-                started_at      TEXT NOT NULL,
-                finished_at     TEXT
-            );
-        """)
-        conn.commit()
+                CREATE TABLE IF NOT EXISTS runs (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    actor_name      TEXT NOT NULL REFERENCES actors(name) ON DELETE CASCADE,
+                    prompt          TEXT NOT NULL,
+                    status          TEXT NOT NULL DEFAULT 'running',
+                    exit_code       INTEGER,
+                    pid             INTEGER,
+                    config          TEXT NOT NULL DEFAULT '{}',
+                    started_at      TEXT NOT NULL,
+                    finished_at     TEXT
+                );
+            """)
+            conn.commit()
 
-        # Migrations
+        # Migrations: PRAGMA table_info is read-only; ALTER only fires
+        # when the column is genuinely missing (legacy DBs predating
+        # the `parent` column in the schema script above).
         cur = conn.execute("PRAGMA table_info(actors)")
         columns = {row[1] for row in cur.fetchall()}
         if "parent" not in columns:
