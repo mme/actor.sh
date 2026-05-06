@@ -1730,6 +1730,30 @@ def _parse_transport_uri(uri: str) -> Tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class ServerFrameView:
+    """Decoded view of a `ServerFrame` from `InteractiveSession.recv()`.
+
+    `kind` is one of `"stdout"`, `"stderr"`, `"exit"`, or `""` (empty
+    frame; treated like end-of-stream by callers). `value` is the
+    matching payload (`bytes` for stdout/stderr, `pb.ExitInfo` for
+    exit, `None` for empty)."""
+    kind: str
+    value: object
+
+    @property
+    def stdout(self) -> Optional[bytes]:
+        return self.value if self.kind == "stdout" else None  # type: ignore[return-value]
+
+    @property
+    def stderr(self) -> Optional[bytes]:
+        return self.value if self.kind == "stderr" else None  # type: ignore[return-value]
+
+    @property
+    def exit(self):
+        return self.value if self.kind == "exit" else None
+
+
 class InteractiveSession:
     """Client-side handle for the bidirectional `InteractiveSession`
     RPC. Hides the gRPC stream plumbing behind four send methods +
@@ -1768,10 +1792,11 @@ class InteractiveSession:
 
     async def __aenter__(self) -> "InteractiveSession":
         from grpclib.client import Channel
+        from grpclib.const import Cardinality
         from ._proto.actor.v1 import (
-            ActorServiceStub,
             ClientFrame,
             OpenSession,
+            ServerFrame,
         )
 
         try:
@@ -1779,9 +1804,22 @@ class InteractiveSession:
         except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
             raise DaemonUnreachableError(self._socket_path, e) from e
 
-        stub = ActorServiceStub(self._chan)
-        self._stream_cm = stub.interactive_session.open(metadata=self._metadata)
+        # Bidi streaming: open a low-level gRPC stream. The
+        # betterproto-generated `interactive_session` stub is an async
+        # generator that wants the client message iterator up front;
+        # for our use case we need to send + receive interleaved, so
+        # we drive the stream directly.
+        self._stream_cm = self._chan.request(
+            "/actor.v1.ActorService/InteractiveSession",
+            Cardinality.STREAM_STREAM,
+            ClientFrame,
+            ServerFrame,
+            metadata=self._metadata,
+        )
         self._stream = await self._stream_cm.__aenter__()
+        # Send headers eagerly so the daemon's handler starts running
+        # before the first ClientFrame arrives.
+        await self._stream.send_request()
         await self._stream.send_message(ClientFrame(open=OpenSession(
             actor_name=self._actor_name,
             cols=self._cols, rows=self._rows,
@@ -1832,25 +1870,27 @@ class InteractiveSession:
             except Exception:
                 pass
 
-    async def recv(self):
-        """Yield the next ServerFrame, or None when the stream ends.
-        Captures ExitInfo internally so callers can rely on
-        `exit_code()` after the iterator finishes."""
-        from ._proto.actor.v1 import ServerFrame
+    async def recv(self) -> "Optional[ServerFrameView]":
+        """Yield the next ServerFrame as a `ServerFrameView`, or None
+        when the stream ends. Captures ExitInfo internally so callers
+        can rely on `exit_code()` after the iterator finishes."""
+        import betterproto
         if not self._stream:
             return None
         msg = await self._stream.recv_message()
         if msg is None:
             return None
-        if msg.exit is not None:
-            self._exit_code = msg.exit.exit_code
+        kind, value = betterproto.which_one_of(msg, "kind")
+        view = ServerFrameView(kind=kind, value=value)
+        if kind == "exit" and value is not None:
+            self._exit_code = value.exit_code
             from . import wire
             try:
-                self._final_status = wire.status_from_pb(msg.exit.final_status)
+                self._final_status = wire.status_from_pb(value.final_status)
             except Exception:
                 self._final_status = None
             self._exit_event.set()
-        return msg
+        return view
 
     async def exit_code(self) -> int:
         await self._exit_event.wait()

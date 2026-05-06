@@ -523,14 +523,9 @@ async def _amain(argv: Optional[List[str]] = None) -> None:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # `actor run -i` opens a PTY locally — no daemon round-trip. Every
-    # other command goes through the remote service.
-    is_interactive = (args.command == "run" and getattr(args, "interactive", False))
-    service: ActorService = (
-        _build_local_service(app_config=app_config)
-        if is_interactive
-        else _build_remote_service()
-    )
+    # All commands route through the daemon — including `actor run -i`,
+    # which opens an `InteractiveSession` bidi stream against actord.
+    service: ActorService = _build_remote_service()
 
     try:
         if args.command == "new":
@@ -602,10 +597,13 @@ async def _amain(argv: Optional[List[str]] = None) -> None:
 
         elif args.command == "run":
             if args.interactive:
-                exit_code, msg = await service.interactive_actor(name=args.name)
+                from .interactive import run_interactive_cli
+                exit_code, msg = await run_interactive_cli(
+                    service, name=args.name,
+                )
                 print(msg, file=sys.stderr)
                 # POSIX convention for signal termination: 128 + signum.
-                # interactive_actor returns -signum in that case.
+                # The driver returns -signum in that case.
                 if exit_code < 0:
                     sys.exit(128 - exit_code)
                 sys.exit(exit_code)

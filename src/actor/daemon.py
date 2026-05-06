@@ -494,13 +494,20 @@ async def _run_interactive(
     child, close the PTY, mark the run STOPPED.
     """
     # 1. Open
+    import betterproto
     first = await stream.recv_message()
-    if first is None or first.open is None:
+    if first is None:
+        raise GRPCError(
+            GrpcStatus.INVALID_ARGUMENT,
+            "client closed before sending OpenSession",
+        )
+    kind, value = betterproto.which_one_of(first, "kind")
+    if kind != "open":
         raise GRPCError(
             GrpcStatus.INVALID_ARGUMENT,
             "first ClientFrame must carry an OpenSession",
         )
-    open_msg: pb.OpenSession = first.open
+    open_msg: pb.OpenSession = value
     actor_name = open_msg.actor_name
     cols = open_msg.cols or 80
     rows = open_msg.rows or 24
@@ -564,6 +571,7 @@ async def _run_interactive(
         """Read ClientFrames; forward stdin / resize / signal to the
         child until the client closes the stream or sends a signal
         that ends the session."""
+        import betterproto
         while True:
             try:
                 frame: Optional[pb.ClientFrame] = await stream.recv_message()
@@ -571,16 +579,17 @@ async def _run_interactive(
                 return
             if frame is None:
                 return  # client closed its half
-            if frame.stdin:
+            kind, value = betterproto.which_one_of(frame, "kind")
+            if kind == "stdin":
                 try:
-                    os.write(master_fd, frame.stdin)
+                    os.write(master_fd, value)
                 except OSError:
                     return
-            elif frame.resize is not None:
-                _set_winsize(master_fd, frame.resize.rows, frame.resize.cols)
-            elif frame.signal is not None:
+            elif kind == "resize":
+                _set_winsize(master_fd, value.rows, value.cols)
+            elif kind == "signal":
                 try:
-                    os.kill(pid, frame.signal.signal_number)
+                    os.kill(pid, value.signal_number)
                 except ProcessLookupError:
                     pass
 

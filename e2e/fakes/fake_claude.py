@@ -270,6 +270,36 @@ def _maybe_crash() -> None:
     os.kill(os.getpid(), sig)
 
 
+def _maybe_run_interactive() -> None:
+    """If FAKE_CLAUDE_INTERACTIVE=1 is set, behave like a tiny echo
+    shell: read bytes off stdin and echo them on stdout, exit on
+    EOF or on the byte sequence FAKE_CLAUDE_INTERACTIVE_QUIT (default
+    'q\\n'). Used by Phase 2.5 InteractiveSession tests to exercise
+    the daemon-side PTY without needing a real claude binary.
+    """
+    if not os.environ.get("FAKE_CLAUDE_INTERACTIVE"):
+        return
+    quit_marker = os.environ.get(
+        "FAKE_CLAUDE_INTERACTIVE_QUIT", "q\n",
+    ).encode("utf-8", errors="replace")
+    sys.stdout.write("[fake claude interactive] ready\n")
+    sys.stdout.flush()
+    buf = b""
+    while True:
+        try:
+            chunk = os.read(0, 1024)
+        except OSError:
+            break
+        if not chunk:
+            break
+        sys.stdout.buffer.write(chunk)
+        sys.stdout.buffer.flush()
+        buf += chunk
+        if quit_marker and quit_marker in buf:
+            break
+    sys.exit(int(os.environ.get("FAKE_CLAUDE_EXIT", "0") or 0))
+
+
 def main() -> None:
     argv = sys.argv[1:]
     parsed = _parse(argv)
@@ -280,6 +310,7 @@ def main() -> None:
         time.sleep(sleep_for)
 
     _maybe_crash()
+    _maybe_run_interactive()
 
     _write_session_log(parsed)
     _maybe_spawn_child()
