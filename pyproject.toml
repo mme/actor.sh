@@ -17,6 +17,7 @@ dependencies = [
     "mcp>=1.0",
     "pyte>=0.8.1",
     "textual>=1.0",
+    "websockets>=13.0",
 ]
 keywords = ["cli", "agents", "coding", "parallel", "worktree"]
 classifiers = [

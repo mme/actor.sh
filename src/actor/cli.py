@@ -284,6 +284,32 @@ Examples:
     p_update.add_argument("--scope", default="user", choices=["user", "project", "local"], help="Which install to refresh (default: user)")
     p_update.add_argument("--name", default="actor", help="MCP name used at setup time (default: actor)")
 
+    # -- daemon --
+    p_daemon = sub.add_parser(
+        "daemon",
+        help="Manage the actord daemon (issue #35)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Examples:
+  actor daemon start                                Run the daemon in the foreground
+  actor daemon start --listen unix:/tmp/sock        Listen on a custom unix socket""",
+    )
+    p_daemon_sub = p_daemon.add_subparsers(dest="daemon_command")
+    p_daemon_start = p_daemon_sub.add_parser(
+        "start",
+        help="Start the daemon in the foreground (Ctrl-C to exit)",
+    )
+    p_daemon_start.add_argument(
+        "--listen",
+        default="unix:~/.actor/daemon.sock",
+        help="Transport URI (default: unix:~/.actor/daemon.sock)",
+    )
+    p_daemon_start.add_argument(
+        "--log-file",
+        default="~/.actor/daemon.log",
+        help="Log file path (default: ~/.actor/daemon.log; pass empty to disable)",
+    )
+
     # -- main --
     p_main = sub.add_parser(
         "main",
@@ -424,6 +450,27 @@ async def _amain(argv: Optional[List[str]] = None) -> None:
             )
             print(msg)
         except ActorError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.command == "daemon":
+        if args.daemon_command != "start":
+            parser.parse_args(["daemon", "--help"])
+            return
+        from pathlib import Path
+        from . import daemon
+        log_file = (
+            Path(os.path.expanduser(args.log_file))
+            if args.log_file else None
+        )
+        try:
+            await daemon.main(
+                transport_uri=args.listen,
+                db_path=_db_path(),
+                log_file=log_file,
+            )
+        except RuntimeError as e:
             print(f"error: {e}", file=sys.stderr)
             sys.exit(1)
         return
