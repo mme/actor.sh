@@ -1,4 +1,10 @@
 {{- $current := . -}}
+{{- $currentLink := $current.RelPermalink -}}
+{{- if $current.IsHome -}}
+  {{- with site.GetPage "/getting-started/01-introduction" -}}
+    {{- $currentLink = .RelPermalink -}}
+  {{- end -}}
+{{- end -}}
 <aside class="sidebar" id="site-sidebar">
   <nav class="nav">
     {{ range site.Sections.ByWeight }}
@@ -7,7 +13,7 @@
           <h3 class="nav-section">{{ .Title }}</h3>
           <ul class="nav-list">
             {{ range .Pages.ByWeight }}
-              <li class="nav-item{{ if eq .RelPermalink $current.RelPermalink }} active{{ end }}">
+              <li class="nav-item{{ if eq .RelPermalink $currentLink }} active{{ end }}">
                 <a href="{{ .RelPermalink }}">{{ .Title }}</a>
               </li>
             {{ end }}

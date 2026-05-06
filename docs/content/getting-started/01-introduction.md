@@ -39,4 +39,4 @@ Actors are different. Each actor is a peer-level coding agent with its own worki
 
 ## What's next
 
-[Installation](../installation/) gets actor.sh on your machine and registered with Claude Code. Then [Your first actor](../first-actor/) walks you through spawning one end-to-end and inspecting the work it did.
+[Installation](/getting-started/installation/) gets actor.sh on your machine and registered with Claude Code. Then [Your first actor](/getting-started/first-actor/) walks you through spawning one end-to-end and inspecting the work it did.
