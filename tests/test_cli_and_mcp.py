@@ -274,33 +274,30 @@ class RunCommandTests(unittest.TestCase):
         self.assertEqual(config.agent_args.get("model"), "opus")
         self.assertEqual(config.actor_keys, {})
 
-    def test_run_dash_i_dispatches_to_interactive_actor(self):
-        """`actor run foo -i` must route through interactive_actor, not run_actor."""
+    def test_run_dash_i_dispatches_to_interactive_session(self):
+        """`actor run foo -i` must route through the gRPC bidi
+        InteractiveSession, not run_actor."""
         from actor import AppConfig
-        interactive_actor = AsyncMock(return_value=(0, "ok"))
+        interactive_cli = AsyncMock(return_value=(0, "ok"))
         run_actor = AsyncMock(return_value=_fake_run_result(output="should-not-run"))
-        with patch("actor.service.LocalActorService.interactive_actor", interactive_actor), \
+        with patch("actor.interactive.run_interactive_cli", interactive_cli), \
              patch("actor.service.RemoteActorService.run_actor", run_actor), \
-             patch("actor.config.load_config", return_value=AppConfig()), \
-             patch("actor.cli.Database") as db_cls:
-            db_cls.open.return_value = MagicMock()
+             patch("actor.config.load_config", return_value=AppConfig()):
             with patch("sys.stderr", io.StringIO()):
                 with self.assertRaises(SystemExit) as ctx:
                     main(["run", "foo", "-i"])
         self.assertEqual(ctx.exception.code, 0)
-        interactive_actor.assert_called_once()
-        self.assertEqual(interactive_actor.call_args.kwargs.get("name"), "foo")
+        interactive_cli.assert_called_once()
+        self.assertEqual(interactive_cli.call_args.kwargs.get("name"), "foo")
         run_actor.assert_not_called()
 
     def test_run_dash_i_maps_signal_to_posix_exit(self):
-        """Negative exit code from interactive_actor (signal) → 128 + signum."""
+        """Negative exit code from the interactive driver (signal) → 128 + signum."""
         import signal as _sig
         from actor import AppConfig
-        interactive_actor = AsyncMock(return_value=(-_sig.SIGTERM, "stopped"))
-        with patch("actor.service.LocalActorService.interactive_actor", interactive_actor), \
-             patch("actor.config.load_config", return_value=AppConfig()), \
-             patch("actor.cli.Database") as db_cls:
-            db_cls.open.return_value = MagicMock()
+        interactive_cli = AsyncMock(return_value=(-_sig.SIGTERM, "stopped"))
+        with patch("actor.interactive.run_interactive_cli", interactive_cli), \
+             patch("actor.config.load_config", return_value=AppConfig()):
             with patch("sys.stderr", io.StringIO()):
                 with self.assertRaises(SystemExit) as ctx:
                     main(["run", "foo", "-i"])

@@ -1356,6 +1356,46 @@ class LocalActorService(ActorService):
 
 
 # ---------------------------------------------------------------------------
+# RPC path table — mirrors the proto schema. Keeps the per-method
+# wiring on the client side declarative; one entry per unary method.
+# ---------------------------------------------------------------------------
+
+
+def _build_rpc_paths():
+    from ._proto.actor import v1 as pb
+    return {
+        "new_actor": ("/actor.v1.ActorService/NewActor", pb.NewActorResponse),
+        "discard_actor": ("/actor.v1.ActorService/DiscardActor", pb.DiscardActorResponse),
+        "config_actor": ("/actor.v1.ActorService/ConfigActor", pb.ConfigActorResponse),
+        "start_run": ("/actor.v1.ActorService/StartRun", pb.StartRunResponse),
+        "wait_for_run": ("/actor.v1.ActorService/WaitForRun", pb.WaitForRunResponse),
+        "run_actor": ("/actor.v1.ActorService/RunActor", pb.RunActorResponse),
+        "stop_actor": ("/actor.v1.ActorService/StopActor", pb.StopActorResponse),
+        "get_actor": ("/actor.v1.ActorService/GetActor", pb.GetActorResponse),
+        "actor_exists": ("/actor.v1.ActorService/ActorExists", pb.ActorExistsResponse),
+        "list_actors": ("/actor.v1.ActorService/ListActors", pb.ListActorsResponse),
+        "actor_status": ("/actor.v1.ActorService/ActorStatus", pb.ActorStatusResponse),
+        "latest_run": ("/actor.v1.ActorService/LatestRun", pb.LatestRunResponse),
+        "show_actor": ("/actor.v1.ActorService/ShowActor", pb.ShowActorResponse),
+        "list_runs": ("/actor.v1.ActorService/ListRuns", pb.ListRunsResponse),
+        "get_run": ("/actor.v1.ActorService/GetRun", pb.GetRunResponse),
+        "get_logs": ("/actor.v1.ActorService/GetLogs", pb.GetLogsResponse),
+        "list_roles": ("/actor.v1.ActorService/ListRoles", pb.ListRolesResponse),
+        "publish_notification": ("/actor.v1.ActorService/PublishNotification", pb.PublishNotificationResponse),
+    }
+
+
+_RPC_PATHS: dict[str, tuple[str, type]] = {}
+
+
+def _ensure_rpc_paths():
+    global _RPC_PATHS
+    if not _RPC_PATHS:
+        _RPC_PATHS = _build_rpc_paths()
+    return _RPC_PATHS
+
+
+# ---------------------------------------------------------------------------
 # RemoteActorService
 # ---------------------------------------------------------------------------
 
@@ -1407,30 +1447,58 @@ class RemoteActorService(ActorService):
         finally:
             chan.close()
 
-    async def _stub_call(self, method_name: str, *args, **kwargs):
-        """Run a unary RPC against a fresh channel; translate
-        connection errors and `GRPCError`s back to their typed
-        ActorError counterparts."""
+    async def _unary_call(
+        self,
+        rpc_path: str,
+        request,
+        request_type: type,
+        response_type: type,
+    ):
+        """Run a unary RPC against a fresh channel using the
+        lower-level grpclib API. We bypass the betterproto stub here
+        so we can read trailing metadata after the call — the stub
+        wraps the stream and only exposes the response message,
+        which loses our typed-error class name."""
+        from grpclib.const import Cardinality
         from grpclib.exceptions import GRPCError, StreamTerminatedError
         from . import wire
-        from ._proto.actor.v1 import ActorServiceStub
 
         async with self._channel() as chan:
-            stub = ActorServiceStub(chan)
             try:
-                return await getattr(stub, method_name)(
-                    *args, metadata=self._metadata(), **kwargs,
-                )
+                async with chan.request(
+                    rpc_path,
+                    Cardinality.UNARY_UNARY,
+                    request_type,
+                    response_type,
+                    metadata=self._metadata(),
+                ) as stream:
+                    await stream.send_message(request, end=True)
+                    response = await stream.recv_message()
+                    await stream.recv_trailing_metadata()
+                    return response
             except GRPCError as exc:
                 type_name = None
-                if exc.details and isinstance(exc.details, dict):
-                    type_name = exc.details.get(wire.META_ERROR_TYPE)
+                # `stream.trailing_metadata` is set even when the
+                # server sends a non-OK status. Pull our typed-error
+                # marker from there.
+                trailers = getattr(stream, "trailing_metadata", None)
+                if trailers is not None:
+                    type_name = trailers.get(wire.META_ERROR_TYPE)
                 wire.raise_from_grpc(exc, type_name)
                 raise  # unreachable; raise_from_grpc always raises
             except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
                 raise DaemonUnreachableError(self._socket_path, e) from e
             except StreamTerminatedError as e:
                 raise DaemonUnreachableError(self._socket_path, e) from e
+
+    async def _stub_call(self, method_name: str, request):
+        """Map a service method name + request to the unary call
+        that exercises the corresponding gRPC method."""
+        paths = _ensure_rpc_paths()
+        rpc_path, response_type = paths[method_name]
+        return await self._unary_call(
+            rpc_path, request, type(request), response_type,
+        )
 
     # -- Lifecycle ---------------------------------------------------------
 
@@ -1602,10 +1670,11 @@ class RemoteActorService(ActorService):
         Cancel is sync to match the existing contract; teardown
         happens on the running loop as a fire-and-forget task."""
         from grpclib.client import Channel
+        from grpclib.const import Cardinality
         from grpclib.exceptions import GRPCError, StreamTerminatedError
         from . import wire
         from ._proto.actor.v1 import (
-            ActorServiceStub,
+            Notification as PbNotification,
             SubscribeNotificationsRequest,
         )
 
@@ -1615,36 +1684,58 @@ class RemoteActorService(ActorService):
             raise DaemonUnreachableError(self._socket_path, e) from e
 
         try:
-            stub = ActorServiceStub(chan)
-            # `subscribe_notifications` is a server-streaming RPC; the
-            # generated stub returns an async-iterator. Wrapping the
-            # await-iterator dance lets us probe for a connection
-            # failure right away.
-            stream_cm = stub.subscribe_notifications.open(metadata=self._metadata())
+            stream_cm = chan.request(
+                "/actor.v1.ActorService/SubscribeNotifications",
+                Cardinality.UNARY_STREAM,
+                SubscribeNotificationsRequest,
+                PbNotification,
+                metadata=self._metadata(),
+            )
         except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
+            chan.close()
+            raise DaemonUnreachableError(self._socket_path, e) from e
+
+        # Send the subscribe request synchronously so connection
+        # errors surface here rather than on the first published event.
+        # We don't await initial metadata because the daemon only
+        # flushes initial metadata when it has its first Notification
+        # to send — that would deadlock idle subscribers.
+        try:
+            stream = await stream_cm.__aenter__()
+            await stream.send_message(
+                SubscribeNotificationsRequest(), end=True,
+            )
+        except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
+            try:
+                await stream_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            chan.close()
+            raise DaemonUnreachableError(self._socket_path, e) from e
+        except StreamTerminatedError as e:
+            try:
+                await stream_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
             chan.close()
             raise DaemonUnreachableError(self._socket_path, e) from e
 
         async def _reader() -> None:
             try:
-                async with stream_cm as stream:
-                    await stream.send_message(
-                        SubscribeNotificationsRequest(), end=True,
-                    )
-                    async for pb_n in stream:
-                        n = wire.notification_from_pb(pb_n)
-                        try:
-                            if inspect.iscoroutinefunction(handler):
-                                await handler(n)
-                            else:
-                                result = handler(n)
-                                if asyncio.iscoroutine(result):
-                                    await result
-                        except Exception as e:
-                            print(
-                                f"[actor] subscriber handler raised: {e}",
-                                file=sys.stderr,
-                            )
+                async for pb_n in stream:
+                    n = wire.notification_from_pb(pb_n)
+                    try:
+                        if inspect.iscoroutinefunction(handler):
+                            await handler(n)
+                        else:
+                            result = handler(n)
+                            if asyncio.iscoroutine(result):
+                                await result
+                    except Exception as e:
+                        print(
+                            f"[actor] subscriber handler raised: {e}",
+                            file=sys.stderr,
+                        )
             except (asyncio.CancelledError, GRPCError, StreamTerminatedError):
                 pass
             except Exception as e:
@@ -1653,6 +1744,10 @@ class RemoteActorService(ActorService):
                     file=sys.stderr,
                 )
             finally:
+                try:
+                    await stream_cm.__aexit__(None, None, None)
+                except Exception:
+                    pass
                 chan.close()
 
         task = asyncio.create_task(_reader())
@@ -1873,20 +1968,35 @@ class InteractiveSession:
     async def recv(self) -> "Optional[ServerFrameView]":
         """Yield the next ServerFrame as a `ServerFrameView`, or None
         when the stream ends. Captures ExitInfo internally so callers
-        can rely on `exit_code()` after the iterator finishes."""
+        can rely on `exit_code()` after the iterator finishes.
+
+        If the daemon ended the stream with a non-OK status (e.g. the
+        actor doesn't exist), translates the gRPC error back into the
+        original `ActorError` subclass."""
         import betterproto
+        from grpclib.exceptions import GRPCError, StreamTerminatedError
+        from . import wire as _wire
+
         if not self._stream:
             return None
-        msg = await self._stream.recv_message()
+        try:
+            msg = await self._stream.recv_message()
+        except GRPCError as exc:
+            type_name = None
+            trailers = getattr(self._stream, "trailing_metadata", None)
+            if trailers is not None:
+                type_name = trailers.get(_wire.META_ERROR_TYPE)
+            _wire.raise_from_grpc(exc, type_name)
+        except StreamTerminatedError as exc:
+            raise DaemonUnreachableError(self._socket_path, exc) from exc
         if msg is None:
             return None
         kind, value = betterproto.which_one_of(msg, "kind")
         view = ServerFrameView(kind=kind, value=value)
         if kind == "exit" and value is not None:
             self._exit_code = value.exit_code
-            from . import wire
             try:
-                self._final_status = wire.status_from_pb(value.final_status)
+                self._final_status = _wire.status_from_pb(value.final_status)
             except Exception:
                 self._final_status = None
             self._exit_event.set()

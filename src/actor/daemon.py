@@ -347,10 +347,20 @@ class ActorServiceServicer(pb.ActorServiceBase):
             except GRPCError:
                 raise
             except ActorError as exc:
-                raise wire.actor_error_to_grpc(exc)
+                err = wire.actor_error_to_grpc(exc)
+                await stream.send_trailing_metadata(
+                    status=err.status,
+                    status_message=err.message or "",
+                    metadata=_trailing_error_metadata(exc),
+                )
             except Exception as exc:
                 log.exception("interactive_session failed")
-                raise wire.actor_error_to_grpc(exc)
+                err = wire.actor_error_to_grpc(exc)
+                await stream.send_trailing_metadata(
+                    status=err.status,
+                    status_message=err.message or "",
+                    metadata=_trailing_error_metadata(exc),
+                )
 
     # -- mapping override ---------------------------------------------
 
@@ -448,8 +458,9 @@ async def _unary(
     body: Callable[[Any], Awaitable[Any]],
 ) -> None:
     """Common boilerplate for the 18 unary methods: read the
-    request, bind context, dispatch, translate exceptions to
-    `GRPCError` + trailing metadata."""
+    request, bind context, dispatch, translate exceptions to a gRPC
+    status + a trailing-metadata header naming the original
+    `ActorError` subclass."""
     request = await stream.recv_message()
     assert request is not None
     with _CallContext(stream.metadata):
@@ -460,13 +471,24 @@ async def _unary(
             raise
         except ActorError as exc:
             err = wire.actor_error_to_grpc(exc)
-            raise GRPCError(err.status, err.message, _trailing_error_metadata(exc))
+            await stream.send_trailing_metadata(
+                status=err.status,
+                status_message=err.message or "",
+                metadata=_trailing_error_metadata(exc),
+            )
         except TypeError as exc:
-            raise GRPCError(GrpcStatus.INVALID_ARGUMENT, str(exc))
+            await stream.send_trailing_metadata(
+                status=GrpcStatus.INVALID_ARGUMENT,
+                status_message=str(exc),
+            )
         except Exception as exc:
             log.exception("unary handler raised")
             err = wire.actor_error_to_grpc(exc)
-            raise GRPCError(err.status, err.message, _trailing_error_metadata(exc))
+            await stream.send_trailing_metadata(
+                status=err.status,
+                status_message=err.message or "",
+                metadata=_trailing_error_metadata(exc),
+            )
 
 
 # ---------------------------------------------------------------------------

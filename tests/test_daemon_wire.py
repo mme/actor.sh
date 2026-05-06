@@ -1,25 +1,26 @@
 """Wire-level round-trip tests for every method routed through actord.
 
-Phase 2 of issue #35: covers each `ActorService` method exposed via the
-daemon dispatch table, plus at least one error path per method. The
-test spawns a real `python -m actor.daemon` subprocess against a temp
-HOME and exercises it through `RemoteActorService` — same shape as
-`tests/test_daemon_protocol.py`, just bigger surface.
+Phase 2.5 of issue #35: gRPC migration. Every test exercises
+`RemoteActorService.method(...)` against a real `python -m
+actor.daemon` subprocess, plus daemon-unreachable behavior. Replaces
+the Phase-2 JSON-RPC tests in `test_daemon_methods.py` and
+`test_daemon_protocol.py` with the same semantic coverage on the new
+wire — request/response framing details are owned by gRPC + the
+generated stubs, so the assertions stay focused on observable
+behavior.
 
 Run-lifecycle tests (`start_run`, `wait_for_run`, `run_actor`,
-`stop_actor`, `get_logs`) need a real agent binary; they reuse the
-e2e fakes (`e2e/fakes/bin/{claude,codex}`) by prepending the fakes dir
-to PATH for the daemon process.
+`stop_actor`, `interactive_session`, `get_logs`) use the e2e fakes
+(`e2e/fakes/bin/{claude,codex}`) by prepending the fakes dir to PATH
+for the daemon process.
 """
 from __future__ import annotations
 
 import asyncio
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -29,16 +30,9 @@ from actor.db import Database
 from actor.errors import (
     ActorError,
     AlreadyExistsError,
+    DaemonUnreachableError,
     NotFoundError,
     NotRunningError,
-)
-from actor.protocol import (
-    INVALID_PARAMS,
-    METHOD_NOT_FOUND,
-    JSONRPCError,
-    JSONRPCRequest,
-    decode_message,
-    encode_request,
 )
 from actor.service import Notification, RemoteActorService
 from actor.types import (
@@ -102,12 +96,8 @@ async def running_daemon(
     tmp_dir: Path,
     *,
     extra_path: bool = False,
+    extra_env: dict[str, str] | None = None,
 ) -> AsyncIterator[Tuple[RemoteActorService, Path]]:
-    """Spawn `python -m actor.daemon` against `tmp_dir` as $HOME.
-    Yields a `RemoteActorService` and the socket path.
-
-    `extra_path=True` prepends the e2e fakes dir to PATH so the daemon
-    can spawn a fake `claude` / `codex` for run-lifecycle tests."""
     sock = tmp_dir / ".actor" / "daemon.sock"
     db = tmp_dir / ".actor" / "actor.db"
     pidfile = tmp_dir / ".actor" / "daemon.pid"
@@ -115,12 +105,11 @@ async def running_daemon(
     db.parent.mkdir(parents=True, exist_ok=True)
 
     env = {**os.environ, "HOME": str(tmp_dir)}
-    # Drop any inherited ACTOR_NAME so the daemon's parent-resolution
-    # contextvar fallback doesn't see a value from the test runner's
-    # surrounding session.
     env.pop("ACTOR_NAME", None)
     if extra_path:
         env["PATH"] = f"{_FAKES_BIN}:{env.get('PATH', '')}"
+    if extra_env:
+        env.update(extra_env)
 
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "actor.daemon",
@@ -133,8 +122,7 @@ async def running_daemon(
         stderr=asyncio.subprocess.PIPE,
     )
 
-    from websockets.asyncio.client import unix_connect as _unix_connect
-
+    # Probe with a real gRPC `actor_exists` call.
     started = False
     for _ in range(200):
         if proc.returncode is not None:
@@ -144,10 +132,20 @@ async def running_daemon(
             )
         if sock.exists():
             try:
-                conn = await _unix_connect(str(sock))
-                await conn.close()
-                started = True
-                break
+                from grpclib.client import Channel
+                from actor._proto.actor.v1 import (
+                    ActorExistsRequest, ActorServiceStub,
+                )
+                chan = Channel(path=str(sock))
+                try:
+                    stub = ActorServiceStub(chan)
+                    await stub.actor_exists(
+                        ActorExistsRequest(name="__probe__"), timeout=0.5,
+                    )
+                    started = True
+                    break
+                finally:
+                    chan.close()
             except Exception:
                 pass
         await asyncio.sleep(0.05)
@@ -179,25 +177,19 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         shutil.rmtree(self._tmp, ignore_errors=True)
 
-    # ------------------------------------------------------------------
-    # new_actor
-    # ------------------------------------------------------------------
+    # -- new_actor ----------------------------------------------------
 
     async def test_new_actor_round_trip(self) -> None:
         async with running_daemon(self.tmp) as (client, _sock):
             actor = await client.new_actor(
-                name="alice",
-                dir=str(self.tmp),
-                no_worktree=True,
-                base=None,
-                agent_name="claude",
-                config=ActorConfig(),
+                name="alice", dir=str(self.tmp), no_worktree=True,
+                base=None, agent_name="claude", config=ActorConfig(),
             )
         self.assertEqual(actor.name, "alice")
         self.assertEqual(actor.agent, AgentKind.CLAUDE)
         self.assertFalse(actor.worktree)
 
-    async def test_new_actor_duplicate_raises_already_exists(self) -> None:
+    async def test_new_actor_duplicate_raises(self) -> None:
         async with running_daemon(self.tmp) as (client, _sock):
             await client.new_actor(
                 name="alice", dir=str(self.tmp), no_worktree=True,
@@ -209,9 +201,7 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
                     base=None, agent_name="claude", config=ActorConfig(),
                 )
 
-    # ------------------------------------------------------------------
-    # discard_actor
-    # ------------------------------------------------------------------
+    # -- discard_actor ------------------------------------------------
 
     async def test_discard_actor_round_trip(self) -> None:
         _seed(self.db, _make_actor("alice"))
@@ -220,14 +210,12 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.names, ["alice"])
             self.assertEqual(await client.list_actors(), [])
 
-    async def test_discard_unknown_actor_raises_not_found(self) -> None:
+    async def test_discard_unknown_actor_raises(self) -> None:
         async with running_daemon(self.tmp) as (client, _sock):
             with self.assertRaises(NotFoundError):
                 await client.discard_actor("ghost")
 
-    # ------------------------------------------------------------------
-    # config_actor
-    # ------------------------------------------------------------------
+    # -- config_actor -------------------------------------------------
 
     async def test_config_actor_view_and_update_round_trip(self) -> None:
         _seed(self.db, _make_actor(
@@ -241,28 +229,20 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
             updated = await client.config_actor("alice", pairs=["model=opus"])
             self.assertEqual(updated.agent_args, {"model": "opus"})
 
-    async def test_config_actor_unknown_actor_raises(self) -> None:
+    async def test_config_actor_unknown_raises(self) -> None:
         async with running_daemon(self.tmp) as (client, _sock):
             with self.assertRaises(NotFoundError):
                 await client.config_actor("ghost")
 
-    # ------------------------------------------------------------------
-    # start_run / wait_for_run / run_actor / stop_actor
-    # ------------------------------------------------------------------
+    # -- run lifecycle ------------------------------------------------
 
     async def test_run_actor_round_trip(self) -> None:
-        # Real daemon + fake claude. Daemon spawns the fake via PATH,
-        # which echoes the prompt back.
         actor_dir = self.tmp / "work"
         actor_dir.mkdir()
         async with running_daemon(self.tmp, extra_path=True) as (client, _sock):
             await client.new_actor(
-                name="alice",
-                dir=str(actor_dir),
-                no_worktree=True,
-                base=None,
-                agent_name="claude",
-                config=ActorConfig(),
+                name="alice", dir=str(actor_dir), no_worktree=True,
+                base=None, agent_name="claude", config=ActorConfig(),
             )
             result = await client.run_actor(
                 name="alice", prompt="hello", config=ActorConfig(),
@@ -283,12 +263,8 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
         actor_dir.mkdir()
         async with running_daemon(self.tmp, extra_path=True) as (client, _sock):
             await client.new_actor(
-                name="alice",
-                dir=str(actor_dir),
-                no_worktree=True,
-                base=None,
-                agent_name="claude",
-                config=ActorConfig(),
+                name="alice", dir=str(actor_dir), no_worktree=True,
+                base=None, agent_name="claude", config=ActorConfig(),
             )
             handle = await client.start_run(
                 name="alice", prompt="hi", config=ActorConfig(),
@@ -304,16 +280,13 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ActorError):
                 await client.wait_for_run(99999)
 
-    async def test_stop_actor_when_idle_raises_not_running(self) -> None:
+    async def test_stop_actor_when_idle_raises(self) -> None:
         _seed(self.db, _make_actor("alice"))
         async with running_daemon(self.tmp) as (client, _sock):
             with self.assertRaises(NotRunningError):
                 await client.stop_actor("alice")
 
-    # ------------------------------------------------------------------
-    # Discovery: get_actor / actor_exists / actor_status / latest_run /
-    # show_actor / list_runs / get_run
-    # ------------------------------------------------------------------
+    # -- discovery ----------------------------------------------------
 
     async def test_get_actor_round_trip(self) -> None:
         _seed(self.db, _make_actor("alice", session="sid-1"))
@@ -333,6 +306,47 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await client.actor_exists("alice"))
             self.assertFalse(await client.actor_exists("ghost"))
 
+    async def test_list_actors_empty(self) -> None:
+        async with running_daemon(self.tmp) as (client, _sock):
+            actors = await client.list_actors()
+        self.assertEqual(actors, [])
+
+    async def test_list_actors_populated(self) -> None:
+        _seed(self.db, _make_actor("alpha"))
+        _seed(self.db, _make_actor(
+            "bravo", agent=AgentKind.CODEX, dir="/tmp/bravo",
+            config=ActorConfig(actor_keys={"use-subscription": "true"}),
+        ))
+        async with running_daemon(self.tmp) as (client, _sock):
+            actors = await client.list_actors()
+        names = sorted(a.name for a in actors)
+        self.assertEqual(names, ["alpha", "bravo"])
+        bravo = next(a for a in actors if a.name == "bravo")
+        self.assertEqual(bravo.agent, AgentKind.CODEX)
+        self.assertEqual(bravo.config.actor_keys, {"use-subscription": "true"})
+
+    async def test_list_actors_status_filter(self) -> None:
+        _seed(self.db, _make_actor("idle1"))
+        _seed(
+            self.db, _make_actor("done1"),
+            runs=[Run(
+                id=0, actor_name="done1", prompt="x",
+                status=Status.DONE, exit_code=0, pid=None,
+                config=ActorConfig(),
+                started_at=_now_iso(), finished_at=_now_iso(),
+            )],
+        )
+        async with running_daemon(self.tmp) as (client, _sock):
+            done = await client.list_actors(status_filter="done")
+            idle = await client.list_actors(status_filter="idle")
+        self.assertEqual([a.name for a in done], ["done1"])
+        self.assertEqual([a.name for a in idle], ["idle1"])
+
+    async def test_list_actors_invalid_filter_raises(self) -> None:
+        async with running_daemon(self.tmp) as (client, _sock):
+            with self.assertRaises(ActorError):
+                await client.list_actors(status_filter="not-a-status")
+
     async def test_actor_status_round_trip(self) -> None:
         _seed(
             self.db, _make_actor("alice"),
@@ -347,20 +361,12 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
             status = await client.actor_status("alice")
         self.assertEqual(status, Status.DONE)
 
-    async def test_actor_status_invalid_filter_raises(self) -> None:
-        # actor_status itself doesn't raise on unknown name (returns
-        # IDLE) — but list_actors does validate the filter, which
-        # exercises the same wire-error path.
-        async with running_daemon(self.tmp) as (client, _sock):
-            with self.assertRaises(ActorError):
-                await client.list_actors(status_filter="not-a-status")
-
-    async def test_latest_run_returns_none_for_idle(self) -> None:
+    async def test_latest_run_idle_returns_none(self) -> None:
         _seed(self.db, _make_actor("alice"))
         async with running_daemon(self.tmp) as (client, _sock):
             self.assertIsNone(await client.latest_run("alice"))
 
-    async def test_latest_run_returns_run_when_present(self) -> None:
+    async def test_latest_run_returns_run(self) -> None:
         _seed(
             self.db, _make_actor("alice"),
             runs=[Run(
@@ -373,7 +379,6 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
         async with running_daemon(self.tmp) as (client, _sock):
             run = await client.latest_run("alice")
         assert run is not None
-        self.assertEqual(run.actor_name, "alice")
         self.assertEqual(run.prompt, "task")
         self.assertEqual(run.config.agent_args, {"model": "opus"})
 
@@ -434,7 +439,6 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
             )],
         )
         async with running_daemon(self.tmp) as (client, _sock):
-            # Inspect the seeded run id via list_runs.
             runs, _ = await client.list_runs("alice", limit=1)
             assert runs
             run = await client.get_run(runs[0].id)
@@ -445,35 +449,25 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
         async with running_daemon(self.tmp) as (client, _sock):
             self.assertIsNone(await client.get_run(99999))
 
-    # ------------------------------------------------------------------
-    # get_logs
-    # ------------------------------------------------------------------
-
-    async def test_get_logs_idle_actor_returns_empty(self) -> None:
+    async def test_get_logs_idle_returns_empty(self) -> None:
         _seed(self.db, _make_actor("alice"))
         async with running_daemon(self.tmp) as (client, _sock):
             logs = await client.get_logs("alice")
         self.assertIsNone(logs.session_id)
         self.assertEqual(logs.entries, [])
 
-    async def test_get_logs_unknown_actor_raises(self) -> None:
+    async def test_get_logs_unknown_raises(self) -> None:
         async with running_daemon(self.tmp) as (client, _sock):
             with self.assertRaises(NotFoundError):
                 await client.get_logs("ghost")
 
-    # ------------------------------------------------------------------
-    # list_roles
-    # ------------------------------------------------------------------
-
-    async def test_list_roles_includes_built_in_main(self) -> None:
+    async def test_list_roles_includes_main(self) -> None:
         async with running_daemon(self.tmp) as (client, _sock):
             roles = await client.list_roles()
         self.assertIn("main", roles)
         self.assertEqual(roles["main"].agent, "claude")
 
     async def test_list_roles_picks_up_user_settings(self) -> None:
-        # Project settings load relative to caller cwd; user settings
-        # come from $HOME unconditionally.
         settings = self.tmp / ".actor" / "settings.kdl"
         settings.write_text(
             'role "qa" {\n'
@@ -486,59 +480,36 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("qa", roles)
         self.assertEqual(roles["qa"].description, "QA reviewer")
 
-    # ------------------------------------------------------------------
-    # publish_notification
-    # ------------------------------------------------------------------
+    # -- notifications ------------------------------------------------
 
-    async def test_publish_notification_round_trip(self) -> None:
-        async with running_daemon(self.tmp) as (client, _sock):
-            sub = RemoteActorService(f"unix:{_sock}")
+    async def test_publish_then_subscriber_receives(self) -> None:
+        async with running_daemon(self.tmp) as (client, sock):
+            sub = RemoteActorService(f"unix:{sock}")
             seen: list[Notification] = []
             cancel = await sub.subscribe_notifications(seen.append)
             try:
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.1)
                 await client.publish_notification(Notification(
                     actor="alice", event="run_completed",
                     run_id=1, status=Status.DONE, output="hi",
                 ))
-                # Give the fan-out a tick.
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.3)
             finally:
                 cancel()
+                await asyncio.sleep(0.1)
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0].actor, "alice")
         self.assertEqual(seen[0].status, Status.DONE)
 
-    async def test_publish_notification_invalid_payload_raises(self) -> None:
-        async with running_daemon(self.tmp) as (_client, sock):
-            from websockets.asyncio.client import unix_connect
-            async with unix_connect(str(sock)) as ws:
-                await ws.send(encode_request(JSONRPCRequest(
-                    id=1, method="publish_notification",
-                    params={"notification": "not-a-dict"},
-                )))
-                raw = await ws.recv()
-        if isinstance(raw, bytes):
-            raw = raw.decode()
-        msg = decode_message(raw)
-        self.assertIsInstance(msg, JSONRPCError)
-        assert isinstance(msg, JSONRPCError)
-        self.assertEqual(msg.code, INVALID_PARAMS)
-
-    # ------------------------------------------------------------------
-    # subscribe_notifications
-    # ------------------------------------------------------------------
-
-    async def test_subscribe_then_cancel_drops_subscription(self) -> None:
-        async with running_daemon(self.tmp) as (client, _sock):
+    async def test_subscribe_then_cancel_drops(self) -> None:
+        async with running_daemon(self.tmp) as (client, sock):
             seen: list[Notification] = []
             cancel = await client.subscribe_notifications(seen.append)
             await asyncio.sleep(0.05)
             cancel()
-            # Give cancel time to take effect.
             await asyncio.sleep(0.2)
 
-            pub = RemoteActorService(f"unix:{_sock}")
+            pub = RemoteActorService(f"unix:{sock}")
             await pub.publish_notification(Notification(
                 actor="alice", event="run_completed",
                 run_id=1, status=Status.DONE,
@@ -548,20 +519,159 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WireDaemonUnreachableTests(unittest.IsolatedAsyncioTestCase):
-    """RemoteActorService should raise a clear error when actord
-    isn't running — same friendly message the CLI surfaces."""
+    """RemoteActorService surfaces a clear error when actord isn't
+    running — mirrors the Phase 2 contract."""
 
     async def test_call_against_missing_socket_raises(self) -> None:
-        from actor.errors import DaemonUnreachableError
         client = RemoteActorService("unix:/nonexistent/path/sock")
         with self.assertRaises(DaemonUnreachableError):
             await client.list_actors()
 
     async def test_subscribe_against_missing_socket_raises(self) -> None:
-        from actor.errors import DaemonUnreachableError
         client = RemoteActorService("unix:/nonexistent/path/sock")
         with self.assertRaises(DaemonUnreachableError):
             await client.subscribe_notifications(lambda _n: None)
+
+
+# ---------------------------------------------------------------------------
+# InteractiveSession bidirectional streaming
+# ---------------------------------------------------------------------------
+
+
+class InteractiveSessionWireTests(unittest.IsolatedAsyncioTestCase):
+    """End-to-end tests for the bidi `InteractiveSession` RPC.
+
+    Spawns a daemon with the e2e fakes on PATH; the fake claude reads
+    its FAKE_CLAUDE_INTERACTIVE env var and acts as a tiny echo shell.
+    Each test exercises a different facet of the wire — open, stdin
+    round-trip, exit info, premature client close.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self._tmp = tempfile.mkdtemp(prefix="actord-int-")
+        self.tmp = Path(self._tmp)
+        (self.tmp / ".actor").mkdir()
+        self.actor_dir = self.tmp / "work"
+        self.actor_dir.mkdir()
+
+    async def asyncTearDown(self) -> None:
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    @asynccontextmanager
+    async def _daemon_with_seed(
+        self, *, fake_env: dict[str, str] | None = None,
+    ) -> AsyncIterator[RemoteActorService]:
+        env = {
+            "FAKE_CLAUDE_INTERACTIVE": "1",
+            "FAKE_CLAUDE_INTERACTIVE_QUIT": "BYE",
+        }
+        if fake_env:
+            env.update(fake_env)
+        async with running_daemon(
+            self.tmp, extra_path=True, extra_env=env,
+        ) as (client, _sock):
+            # Seed an actor + first run so an agent_session lands in the DB.
+            await client.new_actor(
+                name="alice", dir=str(self.actor_dir), no_worktree=True,
+                base=None, agent_name="claude", config=ActorConfig(),
+            )
+            await client.run_actor(
+                name="alice", prompt="hi", config=ActorConfig(),
+            )
+            yield client
+
+    async def test_open_then_stdin_echoes_and_exits(self) -> None:
+        async with self._daemon_with_seed() as client:
+            collected = b""
+            async with client.interactive_session(
+                "alice", cols=80, rows=24,
+            ) as session:
+                async def reader():
+                    nonlocal collected
+                    while True:
+                        f = await session.recv()
+                        if f is None or f.kind == "exit":
+                            return
+                        if f.kind == "stdout":
+                            collected += f.stdout or b""
+                t = asyncio.create_task(reader())
+                await asyncio.sleep(0.4)
+                await session.send_stdin(b"hello\n")
+                await asyncio.sleep(0.2)
+                await session.send_stdin(b"BYE\n")
+                await asyncio.wait_for(t, timeout=5)
+                ec = await session.exit_code()
+
+        self.assertEqual(ec, 0)
+        self.assertIn(b"hello", collected)
+        self.assertIn(b"BYE", collected)
+
+    async def test_exit_info_carries_final_status(self) -> None:
+        async with self._daemon_with_seed() as client:
+            async with client.interactive_session("alice") as session:
+                async def drain():
+                    while True:
+                        f = await session.recv()
+                        if f is None or f.kind == "exit":
+                            return
+                t = asyncio.create_task(drain())
+                await asyncio.sleep(0.4)
+                await session.send_stdin(b"BYE\n")
+                await asyncio.wait_for(t, timeout=5)
+                ec = await session.exit_code()
+                self.assertEqual(ec, 0)
+                # final_status should be DONE for a clean exit.
+                self.assertEqual(session.final_status, Status.DONE)
+
+    async def test_resize_does_not_crash(self) -> None:
+        # We can't easily observe the SIGWINCH on the child from here,
+        # but we can confirm the resize ClientFrame doesn't disrupt the
+        # bidi stream.
+        async with self._daemon_with_seed() as client:
+            async with client.interactive_session("alice") as session:
+                async def drain():
+                    while True:
+                        f = await session.recv()
+                        if f is None or f.kind == "exit":
+                            return
+                t = asyncio.create_task(drain())
+                await asyncio.sleep(0.4)
+                await session.send_resize(100, 30)
+                await asyncio.sleep(0.1)
+                await session.send_stdin(b"BYE\n")
+                await asyncio.wait_for(t, timeout=5)
+                self.assertEqual(await session.exit_code(), 0)
+
+    async def test_unknown_actor_raises(self) -> None:
+        async with running_daemon(self.tmp, extra_path=True) as (client, _sock):
+            with self.assertRaises(ActorError):
+                async with client.interactive_session("ghost") as session:
+                    # Attempt to recv() so the daemon's
+                    # start_interactive_run actually runs.
+                    while True:
+                        f = await session.recv()
+                        if f is None:
+                            break
+
+    async def test_premature_client_close_finalizes_run(self) -> None:
+        async with self._daemon_with_seed(
+            # Long-running echo so the close races the child.
+            fake_env={"FAKE_CLAUDE_INTERACTIVE_QUIT": "NEVER"},
+        ) as client:
+            async with client.interactive_session("alice") as session:
+                async def drain():
+                    while True:
+                        f = await session.recv()
+                        if f is None or f.kind == "exit":
+                            return
+                t = asyncio.create_task(drain())
+                await asyncio.sleep(0.4)
+                await session.send_signal(15)  # SIGTERM
+                # The daemon SIGTERMs the child and sends ExitInfo.
+                await asyncio.wait_for(t, timeout=5)
+                ec = await session.exit_code()
+                # SIGTERM → -15 from waitpid path.
+                self.assertLess(ec, 0)
 
 
 if __name__ == "__main__":

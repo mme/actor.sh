@@ -1,27 +1,33 @@
-"""Per-actor PtySession + TerminalWidget registry.
+"""Per-actor RemotePtySession + TerminalWidget registry.
 
 The watch app owns one InteractiveSessionManager. It tracks live
 sessions keyed by actor name, hands out widgets for the selected
 actor, and kills everything on app shutdown.
 
-State mutation goes through `ActorService` — the manager doesn't open
-its own DB connections. PTY handling stays here (forking, raw I/O);
-DB ledger updates are delegated to
-`service.start_interactive_run` / `update_interactive_run_pid` /
-`finalize_interactive_run`.
+Phase 2.5: every interactive session runs through actord. The manager
+opens an `InteractiveSession` gRPC bidi stream against the
+`RemoteActorService`, wraps it in a `RemotePtySession` adapter that
+mirrors the local-PTY interface the widget expects, and keeps the
+gRPC channel alive for the session's lifetime. The daemon owns the
+PTY and writes the run-row state — the manager never inserts /
+updates / finalizes Run rows itself; closing the gRPC stream is what
+triggers the daemon's finalize.
 """
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from ...interfaces import Agent
-from ...service import ActorService
+from ...service import (
+    ActorService,
+    InteractiveSession as RemoteInteractive,
+    RemoteActorService,
+)
 from ...types import ActorConfig
 from .diagnostics import DiagnosticRecorder, EventKind
-from .pty_session import PtySession
+from .remote_session import RemotePtySession
 from .screen import TerminalScreen
 from .widget import TerminalWidget
 
@@ -29,10 +35,10 @@ from .widget import TerminalWidget
 @dataclass(frozen=True)
 class InteractiveSession:
     actor_name: str
-    session: PtySession
+    session: RemotePtySession
     screen: TerminalScreen
     widget: TerminalWidget
-    run_id: int
+    remote: RemoteInteractive
 
 
 # `service_factory` returns an `ActorService` per call so the manager
@@ -83,14 +89,15 @@ class InteractiveSessionManager:
         cwd: Path,
         config: ActorConfig,
     ) -> InteractiveSession:
-        """Spawn a new interactive session for the given actor.
+        """Open a new interactive session through actord.
 
         Raises if one is already live for this actor (caller should
         close first, or call `get()` to reuse).
 
-        Note: `agent` and `session_id` are accepted for backwards
-        compatibility with the watch-app caller, but `argv` and the
-        run-row insert come from `service.start_interactive_run`.
+        `agent`, `session_id`, `cwd`, and `config` are accepted for
+        compatibility with the watch-app caller but no longer drive
+        the spawn — the daemon picks the agent argv based on the
+        actor's stored agent_session and does the PTY work itself.
         """
         if actor_name in self._sessions:
             raise RuntimeError(
@@ -98,64 +105,53 @@ class InteractiveSessionManager:
             )
 
         svc = self._service_factory()
-        handle = await svc.start_interactive_run(actor_name, agent=agent)
+        if not isinstance(svc, RemoteActorService):
+            raise RuntimeError(
+                "InteractiveSessionManager requires a RemoteActorService "
+                "in Phase 2.5; the daemon owns the PTY"
+            )
 
-        pty_session = PtySession(
-            argv=handle.argv,
-            cwd=cwd,
-            rows=self.DEFAULT_ROWS,
-            cols=self.DEFAULT_COLS,
-            recorder=self._recorder,
+        remote = svc.interactive_session(
+            actor_name, cols=self.DEFAULT_COLS, rows=self.DEFAULT_ROWS,
         )
+        # Open the bidi stream eagerly so we surface "actor has no
+        # session" / "actor not found" errors here rather than on
+        # the first widget keystroke.
+        await remote.__aenter__()
+
+        adapter = RemotePtySession(remote, recorder=self._recorder)
         screen = TerminalScreen(rows=self.DEFAULT_ROWS, cols=self.DEFAULT_COLS)
-        widget = TerminalWidget(pty_session, screen, recorder=self._recorder)
+        widget = TerminalWidget(adapter, screen, recorder=self._recorder)
 
         info = InteractiveSession(
             actor_name=actor_name,
-            session=pty_session,
+            session=adapter,
             screen=screen,
             widget=widget,
-            run_id=handle.run_id,
+            remote=remote,
         )
         self._sessions[actor_name] = info
 
-        # Chain on_exit: preserve the widget's handler (which posts
-        # the SessionExited message for UI recovery) AND add DB
-        # finalization through the service. PtySession invokes the
-        # callback synchronously from the asyncio loop, so we
-        # schedule the async finalize as a task.
-        widget_on_exit = pty_session._on_exit  # set by widget constructor
+        # The widget's __init__ wires its own on_output / on_exit
+        # callbacks via set_callbacks. Re-read the widget-installed
+        # on_exit so we can chain a "drop the session out of the
+        # registry" finishing step on top.
+        widget_on_exit = adapter._on_exit  # type: ignore[attr-defined]
 
         def _chained_on_exit(code: int) -> None:
             try:
-                asyncio.create_task(
-                    self._finalize_run(actor_name, info.run_id, code),
-                )
+                self._sessions.pop(actor_name, None)
             finally:
                 if widget_on_exit is not None:
                     widget_on_exit(code)
-        pty_session.set_callbacks(on_exit=_chained_on_exit)
+        adapter.set_callbacks(on_exit=_chained_on_exit)
 
-        pty_session.spawn()
-        # Record the pid so resolve_actor_status sees the child as
-        # alive — without this the Run is classified ERROR by the
-        # liveness probe. The session is already live; a DB hiccup
-        # here shouldn't kill the spawn.
-        if pty_session.pid is not None:
-            try:
-                await self._service_factory().update_interactive_run_pid(
-                    handle.run_id, pty_session.pid,
-                )
-            except Exception as e:
-                self._record_error(
-                    f"create({actor_name!r}) update_run_pid failed: {e!r}",
-                )
+        adapter.spawn()
         return info
 
     async def close(self, actor_name: str) -> None:
-        """App-initiated teardown. Run is marked STOPPED (not ERROR)
-        so the status distinguishes `quit watch` from the child
-        exiting."""
+        """App-initiated teardown. Closes the gRPC stream; the daemon
+        reaps the child and finalizes the run row."""
         info = self._sessions.pop(actor_name, None)
         if info is None:
             return
@@ -163,14 +159,11 @@ class InteractiveSessionManager:
         try:
             info.session.close()
         finally:
-            # Always finalize the run, even if session.close() raises
-            # (incl. KeyboardInterrupt during the close poll).
             try:
-                await self._finalize_run(
-                    actor_name, info.run_id, info.session.exit_code or -1,
-                )
-            finally:
-                self._stopping.discard(actor_name)
+                await info.remote.__aexit__(None, None, None)
+            except Exception as e:
+                self._record_error(f"close({actor_name!r}) stream: {e!r}")
+            self._stopping.discard(actor_name)
 
     async def close_all(self) -> None:
         for name in list(self._sessions.keys()):
@@ -180,11 +173,10 @@ class InteractiveSessionManager:
                 self._record_error(f"close_all({name!r}): {e!r}")
 
     async def shutdown(self) -> None:
-        """Non-blocking variant for Textual app teardown. SIGKILLs
-        every live session, finalizes each Run as STOPPED, returns
-        fast. Any child that doesn't reap inside the WNOHANG window
-        is left as a transient zombie and the OS cleans up when
-        actor-sh exits."""
+        """Non-blocking teardown for Textual's on_unmount. Closes
+        every gRPC stream — the daemon reaps the children and
+        finalizes their run rows. Any straggler is left for the
+        daemon's own shutdown to handle."""
         for name in list(self._sessions.keys()):
             info = self._sessions.pop(name, None)
             if info is None:
@@ -196,36 +188,15 @@ class InteractiveSessionManager:
                 except Exception as e:
                     self._record_error(f"shutdown({name!r}): {e!r}")
                 try:
-                    await self._finalize_run(
-                        name, info.run_id, info.session.exit_code or -1,
-                    )
+                    await info.remote.__aexit__(None, None, None)
                 except Exception as e:
-                    self._record_error(f"shutdown finalize({name!r}): {e!r}")
+                    self._record_error(
+                        f"shutdown({name!r}) stream: {e!r}",
+                    )
             finally:
                 self._stopping.discard(name)
 
-    # -- service integration ----------------------------------------------
-
-    async def _finalize_run(
-        self, actor_name: str, run_id: int, exit_code: int,
-    ) -> None:
-        """Idempotent, never raises. Errors are routed to the
-        diagnostic recorder so the nested-finally in `close()` can
-        rely on it.
-
-        When `actor_name` is in `_stopping` we override the service's
-        natural DONE/ERROR derivation to STOPPED — preserves the
-        prior "app-initiated close marks STOPPED" semantics."""
-        from ...types import Status
-        force_status = Status.STOPPED if actor_name in self._stopping else None
-        try:
-            await self._service_factory().finalize_interactive_run(
-                run_id, exit_code, force_status=force_status,
-            )
-        except Exception as e:
-            self._record_error(
-                f"finalize_run({actor_name!r}, {run_id}): {e!r}"
-            )
+    # -- diagnostics ------------------------------------------------------
 
     def _record_error(self, note: str) -> None:
         if self._recorder is not None:

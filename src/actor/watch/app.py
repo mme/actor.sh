@@ -332,13 +332,15 @@ class ActorWatchApp(App):
         super().__init__()
         self._animate = animate
         self._diagnostics = DiagnosticRecorder(capacity=2048)
+        # Phase 2.5: interactive sessions go through actord. The manager
+        # opens a `RemoteActorService.interactive_session` bidi stream;
+        # the daemon owns the PTY and finalizes the run row. The rest
+        # of the watch app still uses LocalActorService for its
+        # palette commands and polling — Phase 5 will switch those.
+        from ..service import RemoteActorService
+        from ..cli import _daemon_socket_uri
         self._interactive = InteractiveSessionManager(
-            service_factory=lambda: LocalActorService(
-                db=Database.open(_db_path()),
-                git=RealGit(),
-                proc_mgr=RealProcessManager(),
-                agent_factory=_create_agent,
-            ),
+            service_factory=lambda: RemoteActorService(_daemon_socket_uri()),
             recorder=self._diagnostics,
         )
         # Actor whose terminal widget is currently mounted, if any.
