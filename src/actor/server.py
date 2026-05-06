@@ -419,6 +419,17 @@ async def new_actor(
         agent_cls, config or [], use_subscription=use_subscription,
     )
 
+    # Resolve `dir` client-side so the daemon doesn't fall back to its
+    # own cwd. When the orchestrator doesn't pass one, default to the
+    # MCP server's cwd (the user's working directory wherever
+    # `actor main` was launched from).
+    if dir is None:
+        from pathlib import Path
+        dir = str(Path.cwd())
+    else:
+        from pathlib import Path
+        dir = str(Path(dir).expanduser().absolute())
+
     svc = _service()
     actor = await svc.new_actor(
         name=name,

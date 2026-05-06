@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import os
 import sys
+from pathlib import Path
 from typing import List, Optional
 
 from . import __version__
@@ -481,7 +482,6 @@ async def _amain(argv: Optional[List[str]] = None) -> None:
         if args.daemon_command != "start":
             parser.parse_args(["daemon", "--help"])
             return
-        from pathlib import Path
         from . import daemon
         log_file = (
             Path(os.path.expanduser(args.log_file))
@@ -548,9 +548,22 @@ async def _amain(argv: Optional[List[str]] = None) -> None:
                 use_subscription=args.use_subscription,
             )
 
+            # Resolve `--dir` to an absolute path on the CLI side so the
+            # daemon doesn't fall back to its own cwd. `Path.cwd()` here
+            # is the user's terminal cwd; the daemon's cwd is wherever
+            # `actor daemon start` was launched from. Use `.absolute()`
+            # rather than `.resolve()` so non-existent paths still reach
+            # the service's strict-resolve check (the canonical place
+            # for "cannot resolve --dir ..." errors).
+            dir_arg = args.dir
+            if dir_arg is None:
+                dir_arg = str(Path.cwd())
+            else:
+                dir_arg = str(Path(dir_arg).expanduser().absolute())
+
             actor = await service.new_actor(
                 name=args.name,
-                dir=args.dir,
+                dir=dir_arg,
                 no_worktree=args.no_worktree,
                 base=args.base,
                 agent_name=args.agent,

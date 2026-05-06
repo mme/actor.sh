@@ -54,6 +54,8 @@ from .service import (
     ActorService,
     LocalActorService,
     Notification,
+    _app_config_override,
+    _caller_actor_name,
     create_agent,
 )
 from .types import ActorConfig
@@ -454,6 +456,17 @@ def _make_handler(
                     )))
                     continue
 
+                # Per-call AppConfig: load from the caller's cwd so
+                # project-level `<cwd>/.actor/settings.kdl` is honored
+                # even though the daemon's own cwd is wherever it was
+                # launched from. Falls back to the daemon-startup
+                # config if the caller didn't pass `_caller_cwd`.
+                cfg_token = _set_caller_config(params.pop("_caller_cwd", None))
+                caller_name = params.pop("_caller_actor_name", None)
+                name_token = (
+                    _caller_actor_name.set(caller_name) if caller_name else None
+                )
+
                 try:
                     result = await fn(service, params)
                     await websocket.send(encode_response(JSONRPCResponse(
@@ -479,10 +492,31 @@ def _make_handler(
                     await websocket.send(encode_error(JSONRPCError(
                         id=msg.id, code=code, message=message, data=data,
                     )))
+                finally:
+                    if cfg_token is not None:
+                        _app_config_override.reset(cfg_token)
+                    if name_token is not None:
+                        _caller_actor_name.reset(name_token)
         finally:
             subscribers.remove(websocket)
 
     return handler
+
+
+def _set_caller_config(cwd: Optional[str]):
+    """Load `AppConfig` from the caller's cwd and bind it as the
+    per-call override. Returns the contextvar token (or None if no
+    cwd was provided / load failed) so the caller can `reset()` after
+    the handler returns."""
+    if not cwd:
+        return None
+    try:
+        from .config import load_config
+        cfg = load_config(cwd=Path(cwd))
+    except Exception as e:
+        log.warning("failed to load AppConfig from cwd=%s: %s", cwd, e)
+        return None
+    return _app_config_override.set(cfg)
 
 
 # ---------------------------------------------------------------------------

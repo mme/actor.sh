@@ -20,6 +20,13 @@ Or as a setUp helper for unittest.TestCase subclasses:
         def setUp(self):
             self.env = isolated_home().__enter__()
             self.addCleanup(self.env.__exit__, None, None, None)
+
+Phase 2 (issue #35): every CLI / MCP invocation requires a running
+`actord`. The harness lazy-starts a per-test daemon on first `env()`
+call (the call site that builds the env dict for any subprocess that
+talks to actor) and SIGTERMs it at `__exit__`. Each test's daemon
+binds a unix socket inside its own HOME, so concurrent test runs
+don't collide.
 """
 from __future__ import annotations
 
@@ -27,7 +34,9 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -45,6 +54,9 @@ class IsolatedHome:
     fakes_log: Path
     _entered: bool = field(default=False)
     _orig_dir: Optional[Path] = field(default=None)
+    _daemon: Optional[subprocess.Popen] = field(default=None)
+    _daemon_log: Optional[Path] = field(default=None)
+    _daemon_fake_env: dict[str, str] = field(default_factory=dict)
 
     # ------- env helpers -------
 
@@ -53,7 +65,29 @@ class IsolatedHome:
 
         Pass overrides to layer additional vars (e.g.
         FAKE_CLAUDE_RESPONSE='...') for a single subprocess call.
+
+        Lazily ensures a per-test `actord` is running before returning
+        so any subprocess this env feeds (CLI, MCP) can reach the
+        daemon at $HOME/.actor/daemon.sock.
+
+        Phase 2 detail: the agent (claude/codex fake) is spawned by
+        the daemon, not the CLI. Per-call FAKE_* overrides therefore
+        need to land in the *daemon's* env, not the CLI's. The
+        harness restarts the daemon whenever the FAKE_* slice of
+        `overrides` changes, so each test sees the responses it set up.
         """
+        # Forward any FAKE_*/AGENT_*/ANTHROPIC_*/OPENAI_*/CLAUDE_*
+        # override into the daemon's env — that's where the spawned
+        # fake binary will pick it up.
+        daemon_extra = {
+            k: str(v) for k, v in overrides.items()
+            if (k.startswith("FAKE_")
+                or k.startswith("AGENT_")
+                or k.startswith("ANTHROPIC_")
+                or k.startswith("OPENAI_")
+                or k.startswith("CLAUDE_"))
+        }
+        self._ensure_daemon(daemon_extra)
         base = {
             **os.environ,
             "HOME": str(self.home),
@@ -63,6 +97,111 @@ class IsolatedHome:
         }
         base.update({k: str(v) for k, v in overrides.items()})
         return base
+
+    # ------- daemon lifecycle -------
+
+    def _ensure_daemon(self, extra_env: Optional[dict[str, str]] = None) -> None:
+        """Start `actord` once per IsolatedHome. Idempotent unless the
+        caller's `extra_env` differs from what the running daemon was
+        started with — in which case we restart so the spawned agent
+        sees the new vars (e.g. FAKE_CLAUDE_RESPONSE).
+
+        Tests share the same fakes PATH the daemon needs to spawn
+        agents (the daemon resolves `claude` / `codex` from PATH).
+        Without `_FAKES_BIN` ahead of the system PATH the daemon would
+        spawn the real binary from CI's environment.
+        """
+        extra_env = extra_env or {}
+        if self._daemon is not None and self._daemon.poll() is None:
+            # Empty overrides → keep the daemon as-is. The first
+            # call that wanted FAKE_* vars set them; subsequent
+            # callers that don't override anything inherit whatever
+            # the daemon was started with. This matches the
+            # pre-Phase-2 semantics where every test's fake-control
+            # env was sticky for the rest of the test.
+            if not extra_env or self._daemon_fake_env == extra_env:
+                return
+            # Different fake env — stop and restart with the new vars.
+            self.stop_daemon()
+        sock = self.home / ".actor" / "daemon.sock"
+        sock.parent.mkdir(parents=True, exist_ok=True)
+        self._daemon_log = self.home / ".actor" / "daemon.log"
+        env = {
+            **os.environ,
+            "HOME": str(self.home),
+            "PATH": f"{_FAKES_BIN}:{os.environ.get('PATH', '')}",
+            "FAKE_CLAUDE_LOG": str(self.fakes_log / "claude.jsonl"),
+            "FAKE_CODEX_LOG": str(self.fakes_log / "codex.jsonl"),
+            **extra_env,
+        }
+        self._daemon_fake_env = dict(extra_env)
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "actor.daemon",
+             "--listen", f"unix:{sock}",
+             "--db-path", str(self.home / ".actor" / "actor.db"),
+             "--pidfile", str(self.home / ".actor" / "daemon.pid"),
+             "--log-file", str(self._daemon_log)],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Wait for the socket to accept connections. 2s ceiling — way
+        # more than the daemon's ~50ms cold start; tests fail loudly
+        # if something's wrong rather than wedging the suite.
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                # Daemon died during startup — surface the log so
+                # CI failures point at the cause.
+                tail = ""
+                try:
+                    tail = self._daemon_log.read_text()[-2000:]
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    f"actord exited (rc={proc.returncode}) during e2e startup; "
+                    f"log tail:\n{tail}"
+                )
+            if sock.exists():
+                # Probe with a real websocket handshake. A raw AF_UNIX
+                # connect is enough for "listener is up" but the daemon
+                # logs an ERROR on the failed handshake — noisy enough
+                # that tests grepping the log get false positives.
+                try:
+                    from websockets.sync.client import unix_connect as _ws_unix
+                    with _ws_unix(str(sock), open_timeout=0.5):
+                        pass
+                    self._daemon = proc
+                    return
+                except Exception:
+                    pass
+            time.sleep(0.02)
+        proc.terminate()
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        raise RuntimeError(f"actord did not bind {sock} within 2s")
+
+    def stop_daemon(self) -> None:
+        """Stop the per-test daemon. Called from __exit__; safe to
+        call directly for tests that want to assert behavior with
+        the daemon down."""
+        proc = self._daemon
+        if proc is None:
+            return
+        self._daemon = None
+        if proc.poll() is not None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
 
     # ------- file helpers -------
 
@@ -136,6 +275,9 @@ class IsolatedHome:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        # Stop the daemon BEFORE wiping the tempdir so the daemon's
+        # final socket / pidfile cleanup doesn't race against us.
+        self.stop_daemon()
         if self._orig_dir is not None:
             try:
                 os.chdir(self._orig_dir)

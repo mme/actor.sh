@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import contextvars
 import inspect
 import os
 import sys
@@ -65,6 +66,31 @@ from .types import (
 # ---------------------------------------------------------------------------
 
 INTERACTIVE_PROMPT = "*interactive*"
+
+
+# Per-call AppConfig override. The daemon-side dispatcher loads
+# settings.kdl from the *caller's* cwd (so project settings under
+# `<cwd>/.actor/settings.kdl` are visible) and sets this contextvar
+# for the duration of the RPC handler. `LocalActorService` reads it
+# via `_resolve_app_config` and falls back to the constructor-supplied
+# `app_config` if the var is unset (e.g. local CLI usage).
+#
+# `ContextVar` gives us per-Task isolation, so concurrent RPC clients
+# with different cwds don't trample each other's config — each
+# websocket connection runs in its own asyncio Task.
+_app_config_override: "contextvars.ContextVar[Optional[AppConfig]]" = (
+    contextvars.ContextVar("_app_config_override", default=None)
+)
+
+# Per-call parent-actor override. Pre-Phase-2 the parent was read from
+# `os.environ["ACTOR_NAME"]`, which still works for in-process callers
+# (the local interactive path) but breaks for the daemon — its env is
+# the daemon process's, not the CLI's. The remote dispatcher binds
+# this contextvar from `_caller_actor_name`; LocalActorService reads
+# the contextvar first, then falls back to os.environ.
+_caller_actor_name: "contextvars.ContextVar[Optional[str]]" = (
+    contextvars.ContextVar("_caller_actor_name", default=None)
+)
 
 _DEFAULT_ON_DISCARD = "git diff --quiet"
 """Default on-discard hook command. Fires only when an `app_config`
@@ -386,11 +412,17 @@ class LocalActorService(ActorService):
 
     # -- Internal helpers --------------------------------------------------
 
+    def _resolved_config(self) -> Optional[AppConfig]:
+        override = _app_config_override.get()
+        return override if override is not None else self._app_config
+
     def _hooks(self) -> Hooks:
-        return self._app_config.hooks if self._app_config is not None else Hooks()
+        cfg = self._resolved_config()
+        return cfg.hooks if cfg is not None else Hooks()
 
     def _roles_dict(self) -> Dict[str, Role]:
-        return dict(self._app_config.roles) if self._app_config is not None else {}
+        cfg = self._resolved_config()
+        return dict(cfg.roles) if cfg is not None else {}
 
     def _agent(self, kind: AgentKind) -> Agent:
         inst = self._agent_cache.get(kind)
@@ -460,8 +492,9 @@ class LocalActorService(ActorService):
         merged_actor_keys: Dict[str, Optional[str]] = dict(agent_cls.ACTOR_DEFAULTS)
         merged_agent_args: Dict[str, Optional[str]] = dict(agent_cls.AGENT_DEFAULTS)
 
-        if self._app_config is not None:
-            kdl_defaults = self._app_config.agent_defaults.get(agent_kind.value)
+        cfg = self._resolved_config()
+        if cfg is not None:
+            kdl_defaults = cfg.agent_defaults.get(agent_kind.value)
             if kdl_defaults is not None:
                 for k, v in kdl_defaults.actor_keys.items():
                     if v is None:
@@ -539,7 +572,7 @@ class LocalActorService(ActorService):
             base_branch = branch_base
             worktree = True
 
-        parent = os.environ.get("ACTOR_NAME")
+        parent = _caller_actor_name.get() or os.environ.get("ACTOR_NAME")
 
         now = _now_iso()
         actor = Actor(
@@ -653,7 +686,7 @@ class LocalActorService(ActorService):
         # Default `git diff --quiet` ONLY when an `app_config` was
         # wired in — service constructed without a config (some tests)
         # gets no default hook so a stray `git diff` doesn't bite.
-        if self._app_config is not None:
+        if self._resolved_config() is not None:
             on_discard = self._hooks().on_discard or _DEFAULT_ON_DISCARD
         else:
             on_discard = None
@@ -1399,6 +1432,18 @@ class RemoteActorService(ActorService):
             encode_request,
             raise_from_wire,
         )
+
+        # Forward the caller's cwd so the daemon can load
+        # `<cwd>/.actor/settings.kdl` for this RPC. Reserved key —
+        # the dispatcher pops it before passing params to handlers.
+        # `_caller_actor_name` carries the CLI / MCP-bridge process's
+        # ACTOR_NAME so the daemon can record sub-actor parent
+        # relationships without reading its own env.
+        params = dict(params)
+        params.setdefault("_caller_cwd", str(Path.cwd()))
+        caller_name = os.environ.get("ACTOR_NAME")
+        if caller_name:
+            params.setdefault("_caller_actor_name", caller_name)
 
         req_id = self._alloc_id()
         try:
