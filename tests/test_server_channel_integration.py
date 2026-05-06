@@ -12,6 +12,15 @@ Guards against regressions such as:
   - Future refactors of `_spawn_background_run` dropping the
     notification subscription.
   - The wire format of channel events changing accidentally.
+
+Phase 2 swap: `actor.server._service()` returns a `RemoteActorService`
+in production, but the in-process pub/sub semantics are byte-identical
+between Local and Remote. This test points `_service()` at a single
+shared `LocalActorService` so the fake `run_actor` and the spawn's
+`subscribe_notifications` see the same event bus — covering the
+server-side relay logic without dragging a real `actord` subprocess
+in. End-to-end wire coverage for subscription fan-out lives in
+`tests/test_daemon_protocol.py`.
 """
 from __future__ import annotations
 
@@ -29,7 +38,7 @@ from mcp.types import (
 )
 
 from actor import server as srv
-from actor.service import Notification
+from actor.service import LocalActorService, Notification
 from actor.types import AgentKind, Status
 
 
@@ -38,16 +47,10 @@ class ChannelNotificationReproTest(unittest.IsolatedAsyncioTestCase):
         fake_actor = MagicMock()
         fake_actor.agent = AgentKind.CLAUDE
 
-        fake_db = MagicMock()
-        fake_db.get_actor.return_value = fake_actor
-        resolved = MagicMock()
-        resolved.value = "done"
-        fake_db.resolve_actor_status.return_value = resolved
-
         run_done = asyncio.Event()
 
         async def fake_run_actor(self, name, prompt, config):
-            """Stand in for the real `LocalActorService.run_actor`.
+            """Stand in for the real `run_actor`.
 
             Publishes a `run_completed` notification through the
             service's pub/sub so the server's subscribed handler
@@ -69,14 +72,18 @@ class ChannelNotificationReproTest(unittest.IsolatedAsyncioTestCase):
             finally:
                 run_done.set()
 
-        fake_db_cls = MagicMock()
-        fake_db_cls.open.return_value = fake_db
+        async def fake_get_actor(self, name):
+            return fake_actor
 
-        with patch("actor.server._db", return_value=fake_db), \
-             patch("actor.server.Database", fake_db_cls), \
-             patch("actor.server._create_agent", return_value=MagicMock()), \
+        # One in-process service shared across `_spawn_background_run`'s
+        # subscribe + run calls so the pub/sub bus they touch is the same.
+        shared = LocalActorService(
+            db=MagicMock(), git=MagicMock(), proc_mgr=MagicMock(),
+        )
+
+        with patch("actor.server._service", return_value=shared), \
              patch("actor.service.LocalActorService.run_actor", fake_run_actor), \
-             patch("actor.server.RealProcessManager"):
+             patch("actor.service.LocalActorService.get_actor", fake_get_actor):
             async with create_client_server_memory_streams() as (client_streams, server_streams):
                 client_read, client_write = client_streams
                 server_read, server_write = server_streams

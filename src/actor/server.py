@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import traceback
-from typing import Any, List, Literal, Optional
+from typing import Any, List, Literal
 
 from . import __version__
 from . import cli_format
@@ -15,17 +15,19 @@ from mcp.server.stdio import stdio_server
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage, JSONRPCNotification
 
-from .db import Database
-from .errors import ActorError
-from .git import RealGit
-from .process import RealProcessManager
+from .errors import ActorError, DaemonUnreachableError
 from .service import (
-    LocalActorService,
+    ActorService,
     Notification,
+    RemoteActorService,
     agent_class,
 )
 from .types import ActorConfig
-from .cli import _build_cli_overrides, _db_path, _create_agent, _resolve_agent_kind_for_cli
+from .cli import (
+    _build_cli_overrides,
+    _daemon_socket_uri,
+    _resolve_agent_kind_for_cli,
+)
 
 
 class ActorMCP(FastMCP):
@@ -104,34 +106,17 @@ def _ask_tool(ask_key: str):
 # ---------------------------------------------------------------------------
 
 
-def _db() -> Database:
-    """Open a fresh DB connection. Each tool call gets its own to keep
-    SQLite-WAL-friendly isolation (and to keep test patches working —
-    `actor.server._db` is a common patch target).
+def _service() -> ActorService:
+    """Build a `RemoteActorService` pointing at the standard daemon
+    socket. The MCP bridge requires actord to be running — if it
+    isn't, calls surface as `DaemonUnreachableError` and the tool
+    response carries the message.
+
+    Phase 2 keeps a fresh service per tool call. Subscriptions
+    (`_spawn_background_run`) use their own per-spawn service so the
+    long-lived subscribe connection doesn't leak across tools.
     """
-    return Database.open(_db_path())
-
-
-def _service(db: Optional[Database] = None) -> LocalActorService:
-    """Build a LocalActorService against either a caller-supplied DB
-    handle or a fresh one. Tools that already opened a DB pass it in
-    so we don't double-open."""
-    from .config import load_config
-    try:
-        app_config = load_config()
-    except Exception as e:
-        print(
-            f"[actor-mcp] settings.kdl ignored (will use built-in defaults): {e}",
-            file=sys.stderr,
-        )
-        app_config = None
-    return LocalActorService(
-        db=db if db is not None else _db(),
-        git=RealGit(),
-        proc_mgr=RealProcessManager(),
-        agent_factory=_create_agent,
-        app_config=app_config,
-    )
+    return RemoteActorService(_daemon_socket_uri())
 
 
 # ---------------------------------------------------------------------------
@@ -434,13 +419,7 @@ async def new_actor(
         agent_cls, config or [], use_subscription=use_subscription,
     )
 
-    svc = LocalActorService(
-        db=_db(),
-        git=RealGit(),
-        proc_mgr=RealProcessManager(),
-        agent_factory=_create_agent,
-        app_config=app_config,
-    )
+    svc = _service()
     actor = await svc.new_actor(
         name=name,
         dir=dir,
@@ -493,7 +472,7 @@ async def run_actor(
     prompt = prompt.strip()
     if not prompt:
         raise ActorError("prompt is required")
-    actor = _db().get_actor(name)
+    actor = await _service().get_actor(name)
     agent_cls = agent_class(actor.agent)
     cli_overrides = _build_cli_overrides(
         agent_cls, config or [], use_subscription=use_subscription,

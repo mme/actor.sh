@@ -50,6 +50,20 @@ class ConfigError(ActorError):
         super().__init__(f"config error: {msg}")
 
 
+class DaemonUnreachableError(ActorError):
+    """Raised by `RemoteActorService` when actord isn't accepting
+    connections. CLI / MCP bridge translate this into a one-line "start
+    it with: actor daemon start" message before exiting non-zero."""
+    def __init__(self, socket_path: str, cause: BaseException | None = None) -> None:
+        self.socket_path = socket_path
+        self.cause = cause
+        suffix = f" ({cause})" if cause is not None else ""
+        super().__init__(
+            f"actord not reachable at {socket_path}{suffix}; "
+            f"start it with: actor daemon start"
+        )
+
+
 class HookFailedError(ActorError):
     def __init__(
         self,

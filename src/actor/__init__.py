@@ -19,6 +19,7 @@ from .errors import (
     GitError,
     ConfigError,
     HookFailedError,
+    DaemonUnreachableError,
 )
 
 # Types
@@ -68,6 +69,7 @@ from .process import RealProcessManager
 from .service import (
     ActorService,
     LocalActorService,
+    RemoteActorService,
     Notification,
     INTERACTIVE_PROMPT,
     RunStartResult,
@@ -108,6 +110,7 @@ __all__ = [
     "GitError",
     "ConfigError",
     "HookFailedError",
+    "DaemonUnreachableError",
     # Types
     "AgentKind",
     "Status",
@@ -146,6 +149,7 @@ __all__ = [
     # Service
     "ActorService",
     "LocalActorService",
+    "RemoteActorService",
     "Notification",
     "INTERACTIVE_PROMPT",
     "RunStartResult",

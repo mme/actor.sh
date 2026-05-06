@@ -40,6 +40,7 @@ from .errors import (
     ActorError,
     AgentNotFoundError,
     ConfigError,
+    DaemonUnreachableError,
     HookFailedError,
     IsRunningError,
     NotRunningError,
@@ -1400,14 +1401,17 @@ class RemoteActorService(ActorService):
         )
 
         req_id = self._alloc_id()
-        async with unix_connect(self._socket_path) as ws:
-            await ws.send(encode_request(JSONRPCRequest(
-                id=req_id, method=method, params=params,
-            )))
-            raw = await ws.recv()
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8", errors="replace")
-            msg = decode_message(raw)
+        try:
+            async with unix_connect(self._socket_path) as ws:
+                await ws.send(encode_request(JSONRPCRequest(
+                    id=req_id, method=method, params=params,
+                )))
+                raw = await ws.recv()
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8", errors="replace")
+                msg = decode_message(raw)
+        except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
+            raise DaemonUnreachableError(self._socket_path, e) from e
         if isinstance(msg, JSONRPCError):
             raise_from_wire(msg.code, msg.message, msg.data)
         if not isinstance(msg, JSONRPCResponse) or msg.id != req_id:
@@ -1638,7 +1642,10 @@ class RemoteActorService(ActorService):
             raise_from_wire,
         )
 
-        ws = await unix_connect(self._socket_path)
+        try:
+            ws = await unix_connect(self._socket_path)
+        except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
+            raise DaemonUnreachableError(self._socket_path, e) from e
 
         req_id = self._alloc_id()
         await ws.send(encode_request(JSONRPCRequest(

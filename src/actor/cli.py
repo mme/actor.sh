@@ -8,9 +8,15 @@ from typing import List, Optional
 
 from . import __version__
 from . import cli_format
-from .errors import ActorError, ConfigError
+from .errors import ActorError, ConfigError, DaemonUnreachableError
 from .interfaces import Agent
-from .service import LocalActorService, agent_class, create_agent
+from .service import (
+    ActorService,
+    LocalActorService,
+    RemoteActorService,
+    agent_class,
+    create_agent,
+)
 from .types import ActorConfig, AgentKind, parse_config
 from .db import Database
 from .git import RealGit
@@ -334,13 +340,30 @@ Examples:
     return parser
 
 
-def _build_service(app_config=None) -> LocalActorService:
-    """Construct a `LocalActorService` for the CLI process.
+def _daemon_socket_uri() -> str:
+    home = os.environ.get("HOME", "")
+    if not home:
+        raise ActorError("HOME environment variable is not set")
+    return f"unix:{home}/.actor/daemon.sock"
 
-    Opens a fresh `Database` connection. Caller is responsible for
-    closing it (most CLI invocations are one-shot processes that exit
-    after the call).
-    """
+
+def _build_remote_service() -> RemoteActorService:
+    """Construct a `RemoteActorService` pointing at the standard
+    user-wide daemon socket. The daemon must be running; the CLI does
+    NOT auto-spawn it (Phase 3)."""
+    return RemoteActorService(_daemon_socket_uri())
+
+
+def _build_local_service(app_config=None) -> LocalActorService:
+    """Construct a `LocalActorService` — used only for the interactive
+    PTY path (`actor run -i`). Phase 2 intentionally keeps interactive
+    sessions local; the rest of the CLI goes through `actord`.
+
+    Both services share the SQLite DB at `~/.actor/actor.db`; SQLite's
+    WAL mode handles the local-and-daemon concurrent writers. The
+    interactive run's state changes (run row insert / pid update /
+    finalize) become visible to the daemon-side service through the
+    shared DB on the next read."""
     try:
         db = Database.open(_db_path())
     except Exception as e:
@@ -355,7 +378,7 @@ def _build_service(app_config=None) -> LocalActorService:
     )
 
 
-async def _propagate_run_exit(service: LocalActorService, name: str) -> None:
+async def _propagate_run_exit(service: ActorService, name: str) -> None:
     """If the latest run exited non-zero, print an error to stderr and
     exit 2. Mirrors the previous behavior where `actor run` / `actor
     new <name> <prompt>` propagated the agent's exit code.
@@ -500,7 +523,14 @@ async def _amain(argv: Optional[List[str]] = None) -> None:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    service = _build_service(app_config=app_config)
+    # `actor run -i` opens a PTY locally — no daemon round-trip. Every
+    # other command goes through the remote service.
+    is_interactive = (args.command == "run" and getattr(args, "interactive", False))
+    service: ActorService = (
+        _build_local_service(app_config=app_config)
+        if is_interactive
+        else _build_remote_service()
+    )
 
     try:
         if args.command == "new":
@@ -634,6 +664,10 @@ async def _amain(argv: Optional[List[str]] = None) -> None:
             result = await service.discard_actor(name=args.name, force=args.force)
             print(cli_format.format_discard(result))
 
+    except DaemonUnreachableError as e:
+        # Same exit code as other ActorErrors but a friendlier message.
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
     except ActorError as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
