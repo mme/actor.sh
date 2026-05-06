@@ -2700,7 +2700,7 @@ class ActorWatchApp(App):
             return
         event.stop()
         event.prevent_default()
-        self.action_enter_interactive()
+        await self.action_enter_interactive()
 
     def on_descendant_focus(self, event) -> None:
         self._refresh_tab_arrows()
@@ -2872,7 +2872,7 @@ class ActorWatchApp(App):
 
     # -- Actions -------------------------------------------------------------
 
-    def on_tree_node_selected(self, event) -> None:
+    async def on_tree_node_selected(self, event) -> None:
         if event.control is not self.query_one(ActorTree):
             return
         node = event.node
@@ -2881,7 +2881,7 @@ class ActorWatchApp(App):
             node.expand()
             return
         if node.data is not None:
-            self.action_enter_interactive()
+            await self.action_enter_interactive()
 
     def on_tree_node_highlighted(self, event) -> None:
         # The tree may already be torn down by the time a queued
@@ -3077,7 +3077,7 @@ class ActorWatchApp(App):
             prefer_interactive=prefer_interactive,
         )
 
-    def action_enter_interactive(self) -> None:
+    async def action_enter_interactive(self) -> None:
         """Bound to `i` (app-wide) and Tree.NodeSelected (Enter on tree):
         take the user to the Interactive tab for the selected actor,
         creating the session if needed. Always scrolls to the bottom
@@ -3102,7 +3102,7 @@ class ActorWatchApp(App):
                             severity="error")
                 return
             try:
-                self._interactive.create(
+                await self._interactive.create(
                     actor_name=actor.name,
                     agent=_create_agent(actor.agent),
                     session_id=actor.agent_session,
@@ -3176,7 +3176,7 @@ class ActorWatchApp(App):
             self.set_focus(None, scroll_visible=False)
             self._refresh_focus_indicators()
 
-    def on_terminal_widget_session_exited(self, message: TerminalWidget.SessionExited) -> None:
+    async def on_terminal_widget_session_exited(self, message: TerminalWidget.SessionExited) -> None:
         target: str | None = None
         for name in self._interactive.live_names():
             info = self._interactive.get(name)
@@ -3185,7 +3185,7 @@ class ActorWatchApp(App):
                 break
         if target is None:
             return
-        self._interactive.close(target)
+        await self._interactive.close(target)
         # Switch to OVERVIEW BEFORE removing the INTERACTIVE pane.
         # `TabbedContent.remove_pane` on the currently-active tab
         # auto-falls-through to the next pane in tab order — which
@@ -3298,17 +3298,20 @@ class ActorWatchApp(App):
         )
 
     def _do_stop(self, name: str) -> None:
-        """Actual stop logic — runs `service.stop_actor` and refreshes
-        the tree. The MCP server's per-run thread-watcher picks up the
-        resulting state transition automatically (it's blocked on
+        """Schedule the async stop on the running loop and refresh the
+        tree once it completes. The MCP server's per-run task picks up
+        the resulting state transition automatically (it's awaiting
         `agent.wait(pid)`)."""
-        try:
-            self._service().stop_actor(name=name)
-            self.notify(f"Stopped {name}")
-        except Exception as e:
-            self.notify(f"failed to stop {name}: {e}", severity="error")
-            return
-        self._poll_actors_async()
+        async def _go() -> None:
+            try:
+                await self._service().stop_actor(name=name)
+                self.notify(f"Stopped {name}")
+            except Exception as e:
+                self.notify(f"failed to stop {name}: {e}", severity="error")
+                return
+            self._poll_actors_async()
+        import asyncio
+        asyncio.create_task(_go())
 
     def _palette_discard(self, name: str) -> None:
         """Palette command target: discard the named actor, after a
@@ -3339,18 +3342,20 @@ class ActorWatchApp(App):
         )
 
     def _do_discard(self, name: str) -> None:
-        """Actual discard logic — runs `service.discard_actor` with
-        `force=True` so a failing on-discard hook doesn't block the
-        palette-driven cleanup. The MCP server sees the actor row
-        disappear and emits a `status="discarded"` channel
-        notification automatically."""
-        try:
-            self._service().discard_actor(name=name, force=True)
-            self.notify(f"Discarded {name}")
-        except Exception as e:
-            self.notify(f"failed to discard {name}: {e}", severity="error")
-            return
-        self._poll_actors_async()
+        """Schedule the async discard with `force=True` so a failing
+        on-discard hook doesn't block the palette-driven cleanup. The
+        MCP server sees the actor row disappear and emits a
+        `status="discarded"` channel notification automatically."""
+        async def _go() -> None:
+            try:
+                await self._service().discard_actor(name=name, force=True)
+                self.notify(f"Discarded {name}")
+            except Exception as e:
+                self.notify(f"failed to discard {name}: {e}", severity="error")
+                return
+            self._poll_actors_async()
+        import asyncio
+        asyncio.create_task(_go())
 
     def _service(self) -> LocalActorService:
         """Construct a fresh service per palette command — palette
@@ -3413,12 +3418,12 @@ class ActorWatchApp(App):
         print("--- end ---", file=sys.stderr)
         self.notify(f"dumped {len(self._diagnostics)} diagnostic events to stderr")
 
-    def on_unmount(self) -> None:
+    async def on_unmount(self) -> None:
         """Textual app teardown: kill all live interactive subprocesses so
         no PTY child outlives the watch process. Uses the non-blocking
         shutdown path — a blocking waitpid here stalls Textual's own
         shutdown coroutine and leads to a hang that only Ctrl+C escapes."""
-        self._interactive.shutdown()
+        await self._interactive.shutdown()
 
     def _focus_tabs_bar(self) -> bool:
         """Synchronously focus TabbedContent's inner Tabs widget."""
@@ -3574,27 +3579,15 @@ class ActorWatchApp(App):
                 focused.scroll_down()
 
 
-def run_watch(serve: bool = False, animate: bool = True) -> None:
-    """Entry point for `actor watch`."""
-    if serve:
-        try:
-            from textual_serve.server import Server
-            cmd = "uv run python -m actor.watch --no-serve"
-            if not animate:
-                cmd += " --no-animation"
-            server = Server(cmd, port=2204)
-            server.serve()
-        except ImportError:
-            app = ActorWatchApp(animate=animate)
-            app.run()
-    else:
-        app = ActorWatchApp(animate=animate)
-        app.run()
+def run_watch(animate: bool = True) -> None:
+    """Entry point for `actor watch`. Port 2204 is reserved for actord
+    (issue #35) — there is no longer a browser/serve mode."""
+    app = ActorWatchApp(animate=animate)
+    app.run()
 
 
 def main() -> None:
     """Direct entry point when run as module."""
     import sys
-    serve = "--no-serve" not in sys.argv
     animate = "--no-animation" not in sys.argv
-    run_watch(serve=serve, animate=animate)
+    run_watch(animate=animate)

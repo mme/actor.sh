@@ -12,6 +12,7 @@ DB ledger updates are delegated to
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -74,7 +75,7 @@ class InteractiveSessionManager:
 
     # -- lifecycle --------------------------------------------------------
 
-    def create(
+    async def create(
         self,
         actor_name: str,
         agent: Agent,
@@ -97,7 +98,7 @@ class InteractiveSessionManager:
             )
 
         svc = self._service_factory()
-        handle = svc.start_interactive_run(actor_name, agent=agent)
+        handle = await svc.start_interactive_run(actor_name, agent=agent)
 
         pty_session = PtySession(
             argv=handle.argv,
@@ -120,12 +121,16 @@ class InteractiveSessionManager:
 
         # Chain on_exit: preserve the widget's handler (which posts
         # the SessionExited message for UI recovery) AND add DB
-        # finalization through the service.
+        # finalization through the service. PtySession invokes the
+        # callback synchronously from the asyncio loop, so we
+        # schedule the async finalize as a task.
         widget_on_exit = pty_session._on_exit  # set by widget constructor
 
         def _chained_on_exit(code: int) -> None:
             try:
-                self._finalize_run(actor_name, info.run_id, code)
+                asyncio.create_task(
+                    self._finalize_run(actor_name, info.run_id, code),
+                )
             finally:
                 if widget_on_exit is not None:
                     widget_on_exit(code)
@@ -138,7 +143,7 @@ class InteractiveSessionManager:
         # here shouldn't kill the spawn.
         if pty_session.pid is not None:
             try:
-                self._service_factory().update_interactive_run_pid(
+                await self._service_factory().update_interactive_run_pid(
                     handle.run_id, pty_session.pid,
                 )
             except Exception as e:
@@ -147,7 +152,7 @@ class InteractiveSessionManager:
                 )
         return info
 
-    def close(self, actor_name: str) -> None:
+    async def close(self, actor_name: str) -> None:
         """App-initiated teardown. Run is marked STOPPED (not ERROR)
         so the status distinguishes `quit watch` from the child
         exiting."""
@@ -161,20 +166,20 @@ class InteractiveSessionManager:
             # Always finalize the run, even if session.close() raises
             # (incl. KeyboardInterrupt during the close poll).
             try:
-                self._finalize_run(
+                await self._finalize_run(
                     actor_name, info.run_id, info.session.exit_code or -1,
                 )
             finally:
                 self._stopping.discard(actor_name)
 
-    def close_all(self) -> None:
+    async def close_all(self) -> None:
         for name in list(self._sessions.keys()):
             try:
-                self.close(name)
+                await self.close(name)
             except Exception as e:
                 self._record_error(f"close_all({name!r}): {e!r}")
 
-    def shutdown(self) -> None:
+    async def shutdown(self) -> None:
         """Non-blocking variant for Textual app teardown. SIGKILLs
         every live session, finalizes each Run as STOPPED, returns
         fast. Any child that doesn't reap inside the WNOHANG window
@@ -191,7 +196,7 @@ class InteractiveSessionManager:
                 except Exception as e:
                     self._record_error(f"shutdown({name!r}): {e!r}")
                 try:
-                    self._finalize_run(
+                    await self._finalize_run(
                         name, info.run_id, info.session.exit_code or -1,
                     )
                 except Exception as e:
@@ -201,7 +206,7 @@ class InteractiveSessionManager:
 
     # -- service integration ----------------------------------------------
 
-    def _finalize_run(
+    async def _finalize_run(
         self, actor_name: str, run_id: int, exit_code: int,
     ) -> None:
         """Idempotent, never raises. Errors are routed to the
@@ -214,7 +219,7 @@ class InteractiveSessionManager:
         from ...types import Status
         force_status = Status.STOPPED if actor_name in self._stopping else None
         try:
-            self._service_factory().finalize_interactive_run(
+            await self._service_factory().finalize_interactive_run(
                 run_id, exit_code, force_status=force_status,
             )
         except Exception as e:

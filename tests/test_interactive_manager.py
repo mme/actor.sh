@@ -63,7 +63,9 @@ class _FakeAgent:
         raise AssertionError("stop should not be called")
 
 
-def _ensure_actor(db: Database, name: str, session: str = "sess-1") -> None:
+async def _ensure_actor_async(
+    db: Database, name: str, session: str = "sess-1",
+) -> None:
     """Insert an actor via LocalActorService.new_actor so we don't
     hardcode schema."""
     from tests.test_actor import FakeGit
@@ -73,11 +75,16 @@ def _ensure_actor(db: Database, name: str, session: str = "sess-1") -> None:
         proc_mgr=None,
         agent_factory=lambda _k: None,
     )
-    svc.new_actor(
+    await svc.new_actor(
         name=name, dir="/tmp", no_worktree=True, base=None,
         agent_name="claude", config=ActorConfig(),
     )
     db.update_actor_session(name, session)
+
+
+def _ensure_actor(db: Database, name: str, session: str = "sess-1") -> None:
+    """Sync bridge for setUp paths that have no running loop yet."""
+    asyncio.run(_ensure_actor_async(db, name, session))
 
 
 def _service_factory(db_path: str):
@@ -121,7 +128,7 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_create_spawns_and_inserts_run(self):
         cat = _find_binary("cat")
-        info = self.manager.create(
+        info = await self.manager.create(
             actor_name="alice",
             agent=_FakeAgent([cat]),
             session_id="sess-1",
@@ -135,32 +142,32 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(run)
         self.assertEqual(run.prompt, INTERACTIVE_PROMPT)
         self.assertEqual(run.status, Status.RUNNING)
-        self.manager.close("alice")
+        await self.manager.close("alice")
 
     async def test_duplicate_create_raises(self):
         cat = _find_binary("cat")
-        first = self.manager.create(
+        first = await self.manager.create(
             actor_name="alice", agent=_FakeAgent([cat]),
             session_id="s", cwd=Path("/tmp"), config=ActorConfig(),
         )
         try:
             with self.assertRaises(RuntimeError):
-                self.manager.create(
+                await self.manager.create(
                     actor_name="alice", agent=_FakeAgent([cat]),
                     session_id="s", cwd=Path("/tmp"), config=ActorConfig(),
                 )
             # The original session is still registered and alive.
             self.assertIs(self.manager.get("alice"), first)
         finally:
-            self.manager.close("alice")
+            await self.manager.close("alice")
 
     async def test_close_marks_run_stopped(self):
         cat = _find_binary("cat")
-        info = self.manager.create(
+        info = await self.manager.create(
             actor_name="alice", agent=_FakeAgent([cat]),
             session_id="s", cwd=Path("/tmp"), config=ActorConfig(),
         )
-        self.manager.close("alice")
+        await self.manager.close("alice")
         self.assertFalse(self.manager.has("alice"))
         run = self.db.get_run(info.run_id)
         self.assertEqual(
@@ -170,7 +177,7 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_natural_exit_marks_run_error_on_nonzero(self):
         sh = _find_binary("sh")
-        info = self.manager.create(
+        info = await self.manager.create(
             actor_name="alice", agent=_FakeAgent([sh, "-c", "exit 3"]),
             session_id="s", cwd=Path("/tmp"), config=ActorConfig(),
         )
@@ -187,11 +194,11 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         # on_terminal_widget_session_exited handler. The manager alone
         # doesn't pop on natural exit, so we pop it ourselves.
         if self.manager.has("alice"):
-            self.manager.close("alice")
+            await self.manager.close("alice")
 
     async def test_natural_exit_marks_done_on_zero(self):
         sh = _find_binary("sh")
-        info = self.manager.create(
+        info = await self.manager.create(
             actor_name="alice", agent=_FakeAgent([sh, "-c", "exit 0"]),
             session_id="s", cwd=Path("/tmp"), config=ActorConfig(),
         )
@@ -204,13 +211,13 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run.status, Status.DONE)
         self.assertEqual(run.exit_code, 0)
         if self.manager.has("alice"):
-            self.manager.close("alice")
+            await self.manager.close("alice")
 
     async def test_create_updates_run_pid(self):
         """The Run row must record the PTY's pid so resolve_actor_status
         sees the child as alive (otherwise it flips to ERROR)."""
         cat = _find_binary("cat")
-        info = self.manager.create(
+        info = await self.manager.create(
             actor_name="alice", agent=_FakeAgent([cat]),
             session_id="s", cwd=Path("/tmp"), config=ActorConfig(),
         )
@@ -225,17 +232,17 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
             status = self.db.resolve_actor_status("alice", RealProcessManager())
             self.assertEqual(status, Status.RUNNING)
         finally:
-            self.manager.close("alice")
+            await self.manager.close("alice")
 
     async def test_shutdown_marks_runs_stopped_without_blocking(self):
         import time, signal
         sleep_bin = _find_binary("sleep")
-        info = self.manager.create(
+        info = await self.manager.create(
             actor_name="alice", agent=_FakeAgent([sleep_bin, "100"]),
             session_id="s", cwd=Path("/tmp"), config=ActorConfig(),
         )
         start = time.monotonic()
-        self.manager.shutdown()
+        await self.manager.shutdown()
         elapsed = time.monotonic() - start
         self.assertLess(elapsed, 0.3, f"shutdown must not block; took {elapsed:.3f}s")
         self.assertEqual(self.manager.live_names(), [])
@@ -247,15 +254,15 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_close_all_kills_every_session(self):
         cat = _find_binary("cat")
-        alice = self.manager.create(
+        alice = await self.manager.create(
             actor_name="alice", agent=_FakeAgent([cat]),
             session_id="s1", cwd=Path("/tmp"), config=ActorConfig(),
         )
-        bob = self.manager.create(
+        bob = await self.manager.create(
             actor_name="bob", agent=_FakeAgent([cat]),
             session_id="s2", cwd=Path("/tmp"), config=ActorConfig(),
         )
-        self.manager.close_all()
+        await self.manager.close_all()
         self.assertEqual(self.manager.live_names(), [])
         for info in (alice, bob):
             run = self.db.get_run(info.run_id)
@@ -264,20 +271,20 @@ class InteractiveSessionManagerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_finalize_does_not_overwrite_existing_terminal_status(self):
         cat = _find_binary("cat")
-        info = self.manager.create(
+        info = await self.manager.create(
             actor_name="alice", agent=_FakeAgent([cat]),
             session_id="s", cwd=Path("/tmp"), config=ActorConfig(),
         )
         # Simulate external stop marking the row DONE before our on_exit.
         self.db.update_run_status(info.run_id, Status.DONE, 0)
-        self.manager.close("alice")
+        await self.manager.close("alice")
         run = self.db.get_run(info.run_id)
         self.assertEqual(run.status, Status.DONE,
                          "finalize must not overwrite terminal status")
 
 
 class ManagerDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
-    def test_close_all_failure_recorded(self):
+    async def test_close_all_failure_recorded(self):
         recorder = DiagnosticRecorder()
 
         class _BadClose:
@@ -295,7 +302,7 @@ class ManagerDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(tmp.cleanup)
         db_path = str(Path(tmp.name) / "actor.db")
         with Database.open(db_path) as seed:
-            _ensure_actor(seed, "alice")
+            await _ensure_actor_async(seed, "alice")
         mgr = InteractiveSessionManager(
             service_factory=_service_factory(db_path), recorder=recorder,
         )
@@ -308,7 +315,7 @@ class ManagerDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             run_id=999,
         )
         mgr._sessions["alice"] = fake
-        mgr.close_all()
+        await mgr.close_all()
         events = [e for e in recorder.recent() if e.kind == EventKind.ERROR]
         self.assertTrue(
             any("close_all" in e.note for e in events),

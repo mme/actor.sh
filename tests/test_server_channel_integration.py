@@ -1,23 +1,21 @@
 """Integration test for the channel-notification delivery path.
 
-Drives the real MCP server over in-memory streams, invokes the sync
-run_actor tool, and asserts a notifications/claude/channel event hits the
-wire after the background run completes.
+Drives the real MCP server over in-memory streams, invokes the
+async run_actor tool, and asserts a notifications/claude/channel
+event hits the wire after the background run completes.
 
 This is the only test that exercises the full dispatch:
-  tool invocation -> _spawn_background_run -> loop capture ->
-  background thread -> run_coroutine_threadsafe -> wire
+  tool invocation -> _spawn_background_run -> task on the loop ->
+  service publishes Notification -> dispatch handler relays to wire
 
 Guards against regressions such as:
-  - FastMCP moving sync tools onto a worker thread (loop capture would
-    break — this was the suspected cause in issue #6, which turned out
-    to be a false alarm; see PR that added this test).
-  - Future refactors of _spawn_background_run that drop the loop handoff.
+  - Future refactors of `_spawn_background_run` dropping the
+    notification subscription.
+  - The wire format of channel events changing accidentally.
 """
 from __future__ import annotations
 
 import asyncio
-import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -46,9 +44,9 @@ class ChannelNotificationReproTest(unittest.IsolatedAsyncioTestCase):
         resolved.value = "done"
         fake_db.resolve_actor_status.return_value = resolved
 
-        run_done = threading.Event()
+        run_done = asyncio.Event()
 
-        def fake_run_actor(self, name, prompt, config):
+        async def fake_run_actor(self, name, prompt, config):
             """Stand in for the real `LocalActorService.run_actor`.
 
             Publishes a `run_completed` notification through the
@@ -56,7 +54,7 @@ class ChannelNotificationReproTest(unittest.IsolatedAsyncioTestCase):
             relays it to the channel — same wire path the production
             code drives, just without spawning a real agent."""
             try:
-                self.publish_notification(Notification(
+                await self.publish_notification(Notification(
                     actor=name,
                     event="run_completed",
                     run_id=1,
@@ -138,7 +136,7 @@ class ChannelNotificationReproTest(unittest.IsolatedAsyncioTestCase):
                 ))
 
                 await wait_for_response(2)
-                await asyncio.to_thread(run_done.wait, 5.0)
+                await asyncio.wait_for(run_done.wait(), timeout=5.0)
                 # Give the server a moment to flush any trailing notification.
                 await asyncio.sleep(0.5)
 
@@ -165,6 +163,13 @@ class ChannelNotificationReproTest(unittest.IsolatedAsyncioTestCase):
             f"after run_actor completion; saw {len(channel_notifs)}. "
             f"Messages received: {wire_methods}",
         )
+
+        # Wire format invariant — content prefix and meta keys must
+        # stay byte-identical to the pre-async dispatcher so existing
+        # parent claude sessions parse it the same way.
+        params = channel_notifs[0].message.root.params
+        self.assertEqual(params["content"], "[x] finished")
+        self.assertEqual(params["meta"], {"actor": "x", "status": "done"})
 
 
 if __name__ == "__main__":

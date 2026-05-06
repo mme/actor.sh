@@ -1,10 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import signal
-import subprocess
-import threading
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -29,8 +28,7 @@ class ClaudeAgent(Agent):
     SYSTEM_PROMPT_KEY: Optional[str] = "append-system-prompt"
 
     def __init__(self) -> None:
-        self._children: Dict[int, subprocess.Popen] = {}  # type: ignore[type-arg]
-        self._lock = threading.Lock()
+        self._children: Dict[int, asyncio.subprocess.Process] = {}
 
     def emit_agent_args(self, defaults: Dict[str, str]) -> List[str]:
         """Map the resolved `agent_args` dict to claude CLI flags.
@@ -39,7 +37,7 @@ class ClaudeAgent(Agent):
         a bare `--key`. `None` values are skipped defensively — ActorConfig
         is supposed to contain only concrete strings (the cmd_new resolver
         strips kdl-layer `None` cancel markers), but we drop them here too
-        so a misrouted caller can't feed `None` into subprocess.Popen."""
+        so a misrouted caller can't feed `None` into create_subprocess_exec."""
         args: List[str] = []
         for key, value in sorted(defaults.items()):
             if value is None:
@@ -59,19 +57,20 @@ class ClaudeAgent(Agent):
             out.pop("ANTHROPIC_API_KEY", None)
         return out
 
-    def _spawn_and_track(self, args: List[str], cwd: Path, config: ActorConfig) -> int:
+    async def _spawn_and_track(
+        self, args: List[str], cwd: Path, config: ActorConfig,
+    ) -> int:
         env = self.apply_actor_keys(config.actor_keys, os.environ)
-        proc = subprocess.Popen(
-            args,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
             cwd=str(cwd),
             env=env,
         )
         pid = proc.pid
-        with self._lock:
-            self._children[pid] = proc
+        self._children[pid] = proc
         return pid
 
     @staticmethod
@@ -92,7 +91,9 @@ class ClaudeAgent(Agent):
     # orchestrate their own children identically to the top-level Claude session.
     _CHANNEL_ARGS = ["--dangerously-load-development-channels", "server:actor"]
 
-    def start(self, dir: Path, prompt: str, config: ActorConfig) -> Tuple[int, Optional[str]]:
+    async def start(
+        self, dir: Path, prompt: str, config: ActorConfig,
+    ) -> Tuple[int, Optional[str]]:
         session_id = str(uuid.uuid4())
         args = [
             "claude",
@@ -104,10 +105,12 @@ class ClaudeAgent(Agent):
             "--",
             prompt,
         ]
-        pid = self._spawn_and_track(args, dir, config)
+        pid = await self._spawn_and_track(args, dir, config)
         return pid, session_id
 
-    def resume(self, dir: Path, session_id: str, prompt: str, config: ActorConfig) -> int:
+    async def resume(
+        self, dir: Path, session_id: str, prompt: str, config: ActorConfig,
+    ) -> int:
         args = [
             "claude",
             *self._CHANNEL_ARGS,
@@ -118,27 +121,32 @@ class ClaudeAgent(Agent):
             "--",
             prompt,
         ]
-        return self._spawn_and_track(args, dir, config)
+        return await self._spawn_and_track(args, dir, config)
 
-    def wait(self, pid: int) -> Tuple[int, str]:
-        with self._lock:
-            proc = self._children.pop(pid, None)
+    async def wait(self, pid: int) -> Tuple[int, str]:
+        proc = self._children.pop(pid, None)
         if proc is None:
             raise ActorError(f"no tracked process with pid {pid}")
-        stdout, _ = proc.communicate()
+        stdout, _ = await proc.communicate()
         output = stdout.decode("utf-8", errors="replace") if stdout else ""
         returncode = proc.returncode
         return (returncode if returncode is not None else -1, output)
 
-    def read_logs(self, dir: Path, session_id: str) -> List[LogEntry]:
+    async def read_logs(self, dir: Path, session_id: str) -> List[LogEntry]:
         path = self._session_file_path(dir, session_id)
-        try:
-            content = path.read_text()
-        except FileNotFoundError:
+
+        def _read() -> Optional[str]:
+            try:
+                return path.read_text()
+            except FileNotFoundError:
+                return None
+
+        content = await asyncio.to_thread(_read)
+        if content is None:
             return []
         return self._parse_entries(content)
 
-    def read_logs_since(
+    async def read_logs_since(
         self, dir: Path, session_id: str, cursor: Any = None,
     ) -> Tuple[List[LogEntry], Any]:
         """Read the tail of the session JSONL starting from a byte
@@ -153,21 +161,26 @@ class ClaudeAgent(Agent):
           cursor as stale and full-read from 0.
         """
         path = self._session_file_path(dir, session_id)
-        try:
-            size = path.stat().st_size
-        except (FileNotFoundError, OSError):
-            return [], cursor
 
-        if isinstance(cursor, int) and 0 <= cursor <= size:
-            offset = cursor
-        else:
-            offset = 0
+        def _read_tail() -> Tuple[Optional[bytes], int]:
+            try:
+                size = path.stat().st_size
+            except (FileNotFoundError, OSError):
+                return None, 0
+            if isinstance(cursor, int) and 0 <= cursor <= size:
+                offset = cursor
+            else:
+                offset = 0
+            try:
+                with open(path, "rb") as f:
+                    f.seek(offset)
+                    data = f.read()
+            except OSError:
+                return None, offset
+            return data, offset
 
-        try:
-            with open(path, "rb") as f:
-                f.seek(offset)
-                data = f.read()
-        except OSError:
+        data, offset = await asyncio.to_thread(_read_tail)
+        if data is None:
             return [], cursor
 
         text, cursor_advance = split_complete_lines(data)
@@ -297,16 +310,15 @@ class ClaudeAgent(Agent):
             *self.emit_agent_args(config.agent_args),
         ]
 
-    def stop(self, pid: int) -> None:
-        with self._lock:
-            proc = self._children.pop(pid, None)
+    async def stop(self, pid: int) -> None:
+        proc = self._children.pop(pid, None)
         if proc is not None:
             try:
                 proc.kill()
-            except OSError as e:
+            except (OSError, ProcessLookupError) as e:
                 raise ActorError(f"failed to kill pid {pid}: {e}")
             try:
-                proc.wait()
+                await proc.wait()
             except Exception:
                 pass
         else:

@@ -455,6 +455,6 @@ dumps the DiagnosticRecorder ring buffer to stderr for post-mortems.
 ## Architecture notes
 
 - Commands are pure functions that take a `Database` + interfaces and return strings. Side effects go through the `Agent`, `GitOps`, and `ProcessManager` ABCs — this is what makes everything testable with fakes.
-- Requires Python 3.10+. Runtime deps: `kdl-py` (config parser), `mcp` (MCP server), `pyte` / `textual` / `textual-serve` (watch dashboard + embedded TTYs).
+- Requires Python 3.10+. Runtime deps: `kdl-py` (config parser), `mcp` (MCP server), `pyte` / `textual` (watch dashboard + embedded TTYs). Port 2204 is reserved for the upcoming actord daemon (issue #35) and is intentionally not bound by anything in-tree today.
 - Actors spawned by other actors are tracked via the `parent` column. The `ACTOR_NAME` env var is set before launching an agent, so child actors automatically record their parent. `discard` cascades recursively — stops running children, then deletes.
 - DB migrations run on open (see `db.py` after schema creation). New columns are added via `ALTER TABLE` if missing.

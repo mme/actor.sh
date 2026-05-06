@@ -21,7 +21,7 @@ from actor import (
 from tests.test_actor import FakeAgent, FakeGit, FakeProcessManager
 
 
-class ConstructAndInvokeTests(unittest.TestCase):
+class ConstructAndInvokeTests(unittest.IsolatedAsyncioTestCase):
 
     def _service(self, agent=None):
         return LocalActorService(
@@ -31,9 +31,9 @@ class ConstructAndInvokeTests(unittest.TestCase):
             agent_factory=lambda _k: agent if agent is not None else FakeAgent(),
         )
 
-    def test_service_constructs_and_creates_actor(self):
+    async def test_service_constructs_and_creates_actor(self):
         svc = self._service()
-        actor = svc.new_actor(
+        actor = await svc.new_actor(
             name="alpha",
             dir="/tmp",
             no_worktree=True,
@@ -43,13 +43,15 @@ class ConstructAndInvokeTests(unittest.TestCase):
         )
         self.assertEqual(actor.name, "alpha")
         # Round-trip through discovery.
-        self.assertEqual(svc.get_actor("alpha").name, "alpha")
-        self.assertEqual([a.name for a in svc.list_actors()], ["alpha"])
+        got = await svc.get_actor("alpha")
+        self.assertEqual(got.name, "alpha")
+        listed = await svc.list_actors()
+        self.assertEqual([a.name for a in listed], ["alpha"])
 
-    def test_run_actor_publishes_run_completed_notification(self):
+    async def test_run_actor_publishes_run_completed_notification(self):
         agent = FakeAgent()
         svc = self._service(agent=agent)
-        svc.new_actor(
+        await svc.new_actor(
             name="beta", dir="/tmp", no_worktree=True, base=None,
             agent_name="claude", config=ActorConfig(),
         )
@@ -57,7 +59,7 @@ class ConstructAndInvokeTests(unittest.TestCase):
         seen: list[Notification] = []
         cancel = svc.subscribe_notifications(seen.append)
         try:
-            result = svc.run_actor("beta", prompt="go", config=ActorConfig())
+            result = await svc.run_actor("beta", prompt="go", config=ActorConfig())
         finally:
             cancel()
 
@@ -68,16 +70,16 @@ class ConstructAndInvokeTests(unittest.TestCase):
         self.assertEqual(seen[0].actor, "beta")
         self.assertEqual(seen[0].status, Status.DONE)
 
-    def test_subscribe_notifications_returns_cancel(self):
+    async def test_subscribe_notifications_returns_cancel(self):
         svc = self._service()
         events: list[Notification] = []
         cancel = svc.subscribe_notifications(events.append)
         # Cancel before publishing — handler must not fire.
         cancel()
-        svc.publish_notification(Notification(actor="x", event="run_completed"))
+        await svc.publish_notification(Notification(actor="x", event="run_completed"))
         self.assertEqual(events, [])
 
-    def test_misbehaving_handler_does_not_break_others(self):
+    async def test_misbehaving_handler_does_not_break_others(self):
         svc = self._service()
         ok_calls: list[Notification] = []
 
@@ -86,7 +88,7 @@ class ConstructAndInvokeTests(unittest.TestCase):
 
         svc.subscribe_notifications(bad)
         svc.subscribe_notifications(ok_calls.append)
-        svc.publish_notification(Notification(actor="x", event="run_completed"))
+        await svc.publish_notification(Notification(actor="x", event="run_completed"))
         self.assertEqual(len(ok_calls), 1)
 
 

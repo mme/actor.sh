@@ -64,22 +64,26 @@ class Agent(abc.ABC):
         (e.g. stripping API keys)."""
 
     @abc.abstractmethod
-    def start(self, dir: Path, prompt: str, config: ActorConfig) -> Tuple[int, Optional[str]]:
+    async def start(
+        self, dir: Path, prompt: str, config: ActorConfig,
+    ) -> Tuple[int, Optional[str]]:
         """Start a new agent session. Returns (pid, optional session_id)."""
 
     @abc.abstractmethod
-    def resume(self, dir: Path, session_id: str, prompt: str, config: ActorConfig) -> int:
+    async def resume(
+        self, dir: Path, session_id: str, prompt: str, config: ActorConfig,
+    ) -> int:
         """Resume an existing session with a new prompt. Returns pid."""
 
     @abc.abstractmethod
-    def wait(self, pid: int) -> Tuple[int, str]:
+    async def wait(self, pid: int) -> Tuple[int, str]:
         """Wait for the agent process to exit. Returns (exit_code, output)."""
 
     @abc.abstractmethod
-    def read_logs(self, dir: Path, session_id: str) -> List[LogEntry]:
+    async def read_logs(self, dir: Path, session_id: str) -> List[LogEntry]:
         """Read logs from the agent's session files."""
 
-    def read_logs_since(
+    async def read_logs_since(
         self, dir: Path, session_id: str, cursor: Any = None,
     ) -> Tuple[List[LogEntry], Any]:
         """Read entries that have arrived since `cursor`.
@@ -98,10 +102,10 @@ class Agent(abc.ABC):
         override this; everything else keeps working correctness-wise,
         just without the I/O savings. Watch callers that don't care
         about streaming can ignore the returned cursor."""
-        return self.read_logs(dir, session_id), None
+        return await self.read_logs(dir, session_id), None
 
     @abc.abstractmethod
-    def stop(self, pid: int) -> None:
+    async def stop(self, pid: int) -> None:
         """Kill a running agent process."""
 
     @abc.abstractmethod
@@ -111,28 +115,28 @@ class Agent(abc.ABC):
 
 class GitOps(abc.ABC):
     @abc.abstractmethod
-    def create_worktree(self, repo: Path, target: Path, branch: str, base: str) -> None: ...
+    async def create_worktree(self, repo: Path, target: Path, branch: str, base: str) -> None: ...
 
     @abc.abstractmethod
-    def remove_worktree(self, repo: Path, target: Path) -> None: ...
+    async def remove_worktree(self, repo: Path, target: Path) -> None: ...
 
     @abc.abstractmethod
-    def merge_branch(self, repo: Path, branch: str, into: str) -> None: ...
+    async def merge_branch(self, repo: Path, branch: str, into: str) -> None: ...
 
     @abc.abstractmethod
-    def delete_branch(self, repo: Path, branch: str) -> None: ...
+    async def delete_branch(self, repo: Path, branch: str) -> None: ...
 
     @abc.abstractmethod
-    def push_branch(self, repo: Path, branch: str) -> None: ...
+    async def push_branch(self, repo: Path, branch: str) -> None: ...
 
     @abc.abstractmethod
-    def create_pr(self, repo: Path, branch: str, base: str, title: str, body: str) -> str: ...
+    async def create_pr(self, repo: Path, branch: str, base: str, title: str, body: str) -> str: ...
 
     @abc.abstractmethod
-    def current_branch(self, repo: Path) -> str: ...
+    async def current_branch(self, repo: Path) -> str: ...
 
     @abc.abstractmethod
-    def is_repo(self, path: Path) -> bool: ...
+    async def is_repo(self, path: Path) -> bool: ...
 
 
 class ProcessManager(abc.ABC):

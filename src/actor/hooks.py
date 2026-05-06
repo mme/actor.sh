@@ -10,10 +10,11 @@ HookRunner type without touching subprocess.
 """
 from __future__ import annotations
 
-import subprocess
+import asyncio
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Mapping, MutableMapping, Optional, Union
+from typing import Awaitable, Callable, Dict, Mapping, MutableMapping, Optional, Union
 
 from .errors import HookFailedError
 
@@ -52,14 +53,18 @@ class HookResult:
     stderr: str = ""
 
 
-# Signature: (command, env, cwd) -> int | HookResult. Test fakes
-# typically return a bare int; the default runner returns HookResult so
-# captured stdio can flow into HookFailedError on failure. ``run_hook``
-# normalizes both.
-HookRunner = Callable[[str, Mapping[str, str], Path], Union[int, HookResult]]
+# Signature: (command, env, cwd) -> int | HookResult, or an awaitable
+# of either. Test fakes typically return a bare int synchronously; the
+# default runner is async and returns HookResult so captured stdio can
+# flow into HookFailedError on failure. ``run_hook`` normalizes both.
+HookRunnerResult = Union[int, HookResult]
+HookRunner = Callable[
+    [str, Mapping[str, str], Path],
+    Union[HookRunnerResult, Awaitable[HookRunnerResult]],
+]
 
 
-def run_hook(
+async def run_hook(
     event: str,
     command: Optional[str],
     env: Mapping[str, str],
@@ -72,6 +77,8 @@ def run_hook(
         return
     exec_runner = runner if runner is not None else _default_hook_runner
     result = exec_runner(command, env, cwd)
+    if inspect.isawaitable(result):
+        result = await result
     if isinstance(result, HookResult):
         exit_code = result.exit_code
         stdout = result.stdout
@@ -91,21 +98,22 @@ def run_hook(
         )
 
 
-def _default_hook_runner(
+async def _default_hook_runner(
     command: str, env: Mapping[str, str], cwd: Path
 ) -> HookResult:
-    proc = subprocess.run(
-        ["/bin/sh", "-c", command],
+    proc = await asyncio.create_subprocess_exec(
+        "/bin/sh", "-c", command,
         cwd=str(cwd),
         env=dict(env),
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
+    stdout, stderr = await proc.communicate()
     return HookResult(
-        exit_code=proc.returncode,
-        stdout=proc.stdout or "",
-        stderr=proc.stderr or "",
+        exit_code=proc.returncode if proc.returncode is not None else -1,
+        stdout=stdout.decode("utf-8", errors="replace") if stdout else "",
+        stderr=stderr.decode("utf-8", errors="replace") if stderr else "",
     )
 
 

@@ -70,7 +70,7 @@ class Database:
     @classmethod
     def open(cls, path: str) -> Database:
         if path == ":memory:":
-            conn = sqlite3.connect(":memory:", timeout=10.0)
+            conn = sqlite3.connect(":memory:", timeout=10.0, check_same_thread=False)
         else:
             parent = os.path.dirname(path)
             if parent:
@@ -80,7 +80,13 @@ class Database:
             # acquire the lock — without this, two concurrent CLI
             # creates can race during schema-init and one fails with
             # "database is locked" before busy_timeout below kicks in.
-            conn = sqlite3.connect(path, timeout=10.0)
+            #
+            # `check_same_thread=False` lets us hand the connection
+            # off to executor threads via `asyncio.to_thread` from the
+            # async service layer. SQLite itself is fine with this in
+            # WAL mode (concurrent readers, serialized writers); we
+            # already serialise writes through the single asyncio loop.
+            conn = sqlite3.connect(path, timeout=10.0, check_same_thread=False)
 
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA busy_timeout=10000;")
