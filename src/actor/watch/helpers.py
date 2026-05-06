@@ -94,8 +94,13 @@ def read_log_entries_since(actor: Actor, cursor=None):
 
     if actor.agent_session is None:
         return [], cursor
+    # Bridge: agent.read_logs_since is async (uses asyncio.to_thread for file
+    # I/O). This helper is invoked from Textual @work(thread=True) workers,
+    # which run outside any event loop, so we drive the coroutine to
+    # completion synchronously.
+    import asyncio
     try:
-        return agent.read_logs_since(Path(actor.dir), actor.agent_session, cursor)
+        return asyncio.run(agent.read_logs_since(Path(actor.dir), actor.agent_session, cursor))
     except Exception:
         return [], cursor
 

@@ -6,6 +6,7 @@ splitter that keeps partial final lines out of the parse until more
 bytes arrive."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -18,6 +19,11 @@ from actor.agents._jsonl import split_complete_lines
 from actor.agents.claude import ClaudeAgent
 from actor.agents.codex import CodexAgent
 from actor.interfaces import LogEntryKind
+
+
+def _arun(coro):
+    """Drive an async agent coroutine from a sync test method."""
+    return asyncio.run(coro)
 
 
 class TestSplitCompleteLines(unittest.TestCase):
@@ -89,7 +95,7 @@ class TestClaudeStreamingReads(unittest.TestCase):
     def test_full_read_when_cursor_none(self):
         agent, dir_path, session_id = self._with_session()
         self._append(agent, dir_path, session_id, self._user("hello"), self._user("world"))
-        entries, cursor = agent.read_logs_since(dir_path, session_id, None)
+        entries, cursor = _arun(agent.read_logs_since(dir_path, session_id, None))
         self.assertEqual([e.text for e in entries], ["hello", "world"])
         self.assertIsInstance(cursor, int)
         self.assertGreater(cursor, 0)
@@ -97,17 +103,17 @@ class TestClaudeStreamingReads(unittest.TestCase):
     def test_cursor_resumes_after_previous_read(self):
         agent, dir_path, session_id = self._with_session()
         self._append(agent, dir_path, session_id, self._user("first"))
-        _, cursor = agent.read_logs_since(dir_path, session_id, None)
+        _, cursor = _arun(agent.read_logs_since(dir_path, session_id, None))
         self._append(agent, dir_path, session_id, self._user("second"))
-        entries, cursor2 = agent.read_logs_since(dir_path, session_id, cursor)
+        entries, cursor2 = _arun(agent.read_logs_since(dir_path, session_id, cursor))
         self.assertEqual([e.text for e in entries], ["second"])
         self.assertGreater(cursor2, cursor)
 
     def test_no_new_content_returns_empty_with_same_cursor(self):
         agent, dir_path, session_id = self._with_session()
         self._append(agent, dir_path, session_id, self._user("only"))
-        _, cursor = agent.read_logs_since(dir_path, session_id, None)
-        entries, cursor2 = agent.read_logs_since(dir_path, session_id, cursor)
+        _, cursor = _arun(agent.read_logs_since(dir_path, session_id, None))
+        entries, cursor2 = _arun(agent.read_logs_since(dir_path, session_id, cursor))
         self.assertEqual(entries, [])
         self.assertEqual(cursor2, cursor)
 
@@ -118,7 +124,7 @@ class TestClaudeStreamingReads(unittest.TestCase):
         with path.open("a") as f:
             f.write(json.dumps(self._user("first")) + "\n")
             f.write('{"type":"user","message":{"content":"part')  # no newline
-        entries, cursor = agent.read_logs_since(dir_path, session_id, None)
+        entries, cursor = _arun(agent.read_logs_since(dir_path, session_id, None))
         # Only the first, fully-terminated line is parsed.
         self.assertEqual([e.text for e in entries], ["first"])
         # Cursor advances only past the complete line, not the partial.
@@ -126,7 +132,7 @@ class TestClaudeStreamingReads(unittest.TestCase):
         # When the rest of the partial line arrives, next read picks it up.
         with path.open("a") as f:
             f.write('ial"}}\n')
-        entries, cursor2 = agent.read_logs_since(dir_path, session_id, cursor)
+        entries, cursor2 = _arun(agent.read_logs_since(dir_path, session_id, cursor))
         self.assertEqual([e.text for e in entries], ["partial"])
         self.assertEqual(cursor2, path.stat().st_size)
 
@@ -134,7 +140,9 @@ class TestClaudeStreamingReads(unittest.TestCase):
         # File rotation / truncation: the stored cursor is now past EOF.
         agent, dir_path, session_id = self._with_session()
         self._append(agent, dir_path, session_id, self._user("fresh"))
-        entries, cursor = agent.read_logs_since(dir_path, session_id, 10_000_000)
+        entries, cursor = _arun(
+            agent.read_logs_since(dir_path, session_id, 10_000_000),
+        )
         # A stale cursor triggers a full re-read.
         self.assertEqual([e.text for e in entries], ["fresh"])
         self.assertIsInstance(cursor, int)
@@ -142,7 +150,7 @@ class TestClaudeStreamingReads(unittest.TestCase):
     def test_missing_file_returns_empty_preserves_cursor(self):
         agent = ClaudeAgent()
         dir_path = Path(tempfile.mkdtemp())
-        entries, cursor = agent.read_logs_since(dir_path, "no-such-session", 42)
+        entries, cursor = _arun(agent.read_logs_since(dir_path, "no-such-session", 42))
         self.assertEqual(entries, [])
         self.assertEqual(cursor, 42)
 
@@ -174,18 +182,18 @@ class TestCodexStreamingReads(unittest.TestCase):
         agent, dir_path, session_id, rollout = self._with_rollout()
         self._append(rollout, self._agent_message("hello"))
         with patch.object(CodexAgent, "_find_rollout_path", return_value=rollout):
-            _, cursor = agent.read_logs_since(dir_path, session_id, None)
+            _, cursor = _arun(agent.read_logs_since(dir_path, session_id, None))
             self._append(rollout, self._agent_message("world"))
-            entries, cursor2 = agent.read_logs_since(dir_path, session_id, cursor)
+            entries, cursor2 = _arun(agent.read_logs_since(dir_path, session_id, cursor))
         self.assertEqual([e.text for e in entries], ["world"])
         self.assertGreater(cursor2, cursor)
 
     def test_missing_rollout_preserves_cursor(self):
         agent = CodexAgent()
         with patch.object(CodexAgent, "_find_rollout_path", return_value=None):
-            entries, cursor = agent.read_logs_since(
+            entries, cursor = _arun(agent.read_logs_since(
                 Path("/tmp"), "unknown", cursor=7,
-            )
+            ))
         self.assertEqual(entries, [])
         self.assertEqual(cursor, 7)
 
@@ -203,15 +211,15 @@ class TestDefaultAgentReadLogsSince(unittest.TestCase):
 
             def emit_agent_args(self, defaults): return []
             def apply_actor_keys(self, flat, env): return dict(env)
-            def start(self, dir, prompt, config): return 0, None
-            def resume(self, dir, session_id, prompt, config): return 0
-            def wait(self, pid): return 0, ""
-            def read_logs(self, dir, session_id): return ["FULL-READ-MARKER"]
-            def stop(self, pid): pass
+            async def start(self, dir, prompt, config): return 0, None
+            async def resume(self, dir, session_id, prompt, config): return 0
+            async def wait(self, pid): return 0, ""
+            async def read_logs(self, dir, session_id): return ["FULL-READ-MARKER"]
+            async def stop(self, pid): pass
             def interactive_argv(self, session_id, config): return []
 
         agent = FullReadAgent()
-        entries, cursor = agent.read_logs_since(Path("/"), "s", cursor=999)
+        entries, cursor = _arun(agent.read_logs_since(Path("/"), "s", cursor=999))
         self.assertEqual(entries, ["FULL-READ-MARKER"])
         self.assertIsNone(cursor)
 

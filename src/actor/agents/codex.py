@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import io
+import asyncio
 import json
 import os
 import signal
 import sqlite3
-import subprocess
 import sys
-import threading
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -27,7 +25,11 @@ def _coerce_int(v: Any) -> int:
 
 
 class _CodexChild:
-    def __init__(self, proc: subprocess.Popen, relay: Optional[threading.Thread]) -> None:  # type: ignore[type-arg]
+    def __init__(
+        self,
+        proc: asyncio.subprocess.Process,
+        relay: Optional[asyncio.Task],
+    ) -> None:
         self.proc = proc
         self.relay = relay
         self.output_lines: List[str] = []
@@ -49,7 +51,6 @@ class CodexAgent(Agent):
 
     def __init__(self) -> None:
         self._children: Dict[int, _CodexChild] = {}
-        self._lock = threading.Lock()
 
     def emit_agent_args(self, defaults: Dict[str, str]) -> List[str]:
         """Map the resolved `agent_args` dict to codex CLI flags.
@@ -60,7 +61,7 @@ class CodexAgent(Agent):
         a bare flag. `None` values are skipped defensively — ActorConfig
         is supposed to contain only concrete strings (the cmd_new resolver
         strips kdl-layer `None` cancel markers), but we drop them here too
-        so a misrouted caller can't feed `None` into subprocess.Popen."""
+        so a misrouted caller can't feed `None` into create_subprocess_exec."""
         args: List[str] = []
         for key, value in sorted(defaults.items()):
             if value is None:
@@ -81,19 +82,19 @@ class CodexAgent(Agent):
             out.pop("OPENAI_API_KEY", None)
         return out
 
-    def _spawn_and_capture(
+    async def _spawn_and_capture(
         self, args: List[str], cwd: Optional[Path], config: ActorConfig
     ) -> Tuple[int, Optional[str]]:
         env = self.apply_actor_keys(config.actor_keys, os.environ)
         kwargs: dict = dict(
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
             stderr=None,  # inherit
             env=env,
         )
         if cwd is not None:
             kwargs["cwd"] = str(cwd)
-        proc = subprocess.Popen(args, **kwargs)
+        proc = await asyncio.create_subprocess_exec(*args, **kwargs)
         pid = proc.pid
 
         stdout = proc.stdout
@@ -101,10 +102,9 @@ class CodexAgent(Agent):
             raise ActorError("failed to capture codex stdout")
 
         # Read the first line to get thread_id
-        reader = io.BufferedReader(stdout)  # type: ignore[arg-type]
         first_line = b""
         try:
-            first_line = reader.readline()
+            first_line = await stdout.readline()
         except Exception:
             pass
 
@@ -120,11 +120,10 @@ class CodexAgent(Agent):
 
         child = _CodexChild(proc, None)
 
-        # Spawn a thread to relay remaining stdout
-        def _relay() -> None:
+        async def _relay() -> None:
             try:
                 while True:
-                    line = reader.readline()
+                    line = await stdout.readline()
                     if not line:
                         break
                     try:
@@ -144,12 +143,10 @@ class CodexAgent(Agent):
             except Exception:
                 pass
 
-        relay_thread = threading.Thread(target=_relay, daemon=True)
-        relay_thread.start()
-        child.relay = relay_thread
+        relay_task = asyncio.create_task(_relay())
+        child.relay = relay_task
 
-        with self._lock:
-            self._children[pid] = child
+        self._children[pid] = child
 
         return pid, thread_id
 
@@ -178,7 +175,9 @@ class CodexAgent(Agent):
         except Exception as e:
             raise ActorError(f"codex DB query failed: {e}")
 
-    def start(self, dir: Path, prompt: str, config: ActorConfig) -> Tuple[int, Optional[str]]:
+    async def start(
+        self, dir: Path, prompt: str, config: ActorConfig,
+    ) -> Tuple[int, Optional[str]]:
         # Agent args go BEFORE `exec` so they're parsed as parent-codex
         # flags. The parent CLI accepts the union of every flag we emit
         # (-a, -m, -s, -c, -p, -i); the `exec` subcommand omits `-a`,
@@ -196,9 +195,11 @@ class CodexAgent(Agent):
             str(dir),
             prompt,
         ]
-        return self._spawn_and_capture(args, cwd=None, config=config)
+        return await self._spawn_and_capture(args, cwd=None, config=config)
 
-    def resume(self, dir: Path, session_id: str, prompt: str, config: ActorConfig) -> int:
+    async def resume(
+        self, dir: Path, session_id: str, prompt: str, config: ActorConfig,
+    ) -> int:
         # Same parent-flags-before-`exec` ordering as `start` — see the
         # comment there for why.
         args = [
@@ -210,54 +211,67 @@ class CodexAgent(Agent):
             "--json",
             prompt,
         ]
-        pid, _ = self._spawn_and_capture(args, cwd=dir, config=config)
+        pid, _ = await self._spawn_and_capture(args, cwd=dir, config=config)
         return pid
 
-    def wait(self, pid: int) -> Tuple[int, str]:
-        with self._lock:
-            entry = self._children.pop(pid, None)
+    async def wait(self, pid: int) -> Tuple[int, str]:
+        entry = self._children.pop(pid, None)
         if entry is None:
             raise ActorError(f"no tracked process with pid {pid}")
-        returncode = entry.proc.wait()
+        returncode = await entry.proc.wait()
         if entry.relay is not None:
-            entry.relay.join(timeout=5)
+            try:
+                await asyncio.wait_for(entry.relay, timeout=5)
+            except (asyncio.TimeoutError, Exception):
+                pass
         output = "\n".join(entry.output_lines)
         return (returncode if returncode is not None else -1, output)
 
-    def read_logs(self, dir: Path, session_id: str) -> List[LogEntry]:
-        rollout_path = self._find_rollout_path(session_id)
+    async def read_logs(self, dir: Path, session_id: str) -> List[LogEntry]:
+        rollout_path = await asyncio.to_thread(self._find_rollout_path, session_id)
         if rollout_path is None:
             return []
-        try:
-            content = rollout_path.read_text()
-        except FileNotFoundError:
+
+        def _read() -> Optional[str]:
+            try:
+                return rollout_path.read_text()
+            except FileNotFoundError:
+                return None
+
+        content = await asyncio.to_thread(_read)
+        if content is None:
             return []
         return self._parse_entries(content)
 
-    def read_logs_since(
+    async def read_logs_since(
         self, dir: Path, session_id: str, cursor: Any = None,
     ) -> Tuple[List[LogEntry], Any]:
         """Byte-offset cursor tail read against the Codex rollout file.
         Same semantics as ClaudeAgent.read_logs_since — see that
         docstring for cursor behavior."""
-        rollout_path = self._find_rollout_path(session_id)
+        rollout_path = await asyncio.to_thread(self._find_rollout_path, session_id)
         if rollout_path is None:
             return [], cursor
-        try:
-            size = rollout_path.stat().st_size
-        except (FileNotFoundError, OSError):
-            return [], cursor
 
-        if isinstance(cursor, int) and 0 <= cursor <= size:
-            offset = cursor
-        else:
-            offset = 0
+        def _read_tail() -> Tuple[Optional[bytes], int]:
+            try:
+                size = rollout_path.stat().st_size
+            except (FileNotFoundError, OSError):
+                return None, 0
+            if isinstance(cursor, int) and 0 <= cursor <= size:
+                offset = cursor
+            else:
+                offset = 0
+            try:
+                with open(rollout_path, "rb") as f:
+                    f.seek(offset)
+                    data = f.read()
+            except OSError:
+                return None, offset
+            return data, offset
 
-        try:
-            with open(rollout_path, "rb") as f:
-                f.seek(offset)
-                data = f.read()
-        except OSError:
+        data, offset = await asyncio.to_thread(_read_tail)
+        if data is None:
             return [], cursor
 
         text, cursor_advance = split_complete_lines(data)
@@ -437,20 +451,22 @@ class CodexAgent(Agent):
             *self.emit_agent_args(config.agent_args),
         ]
 
-    def stop(self, pid: int) -> None:
-        with self._lock:
-            entry = self._children.pop(pid, None)
+    async def stop(self, pid: int) -> None:
+        entry = self._children.pop(pid, None)
         if entry is not None:
             try:
                 entry.proc.kill()
-            except OSError as e:
+            except (OSError, ProcessLookupError) as e:
                 raise ActorError(f"failed to kill pid {pid}: {e}")
             try:
-                entry.proc.wait()
+                await entry.proc.wait()
             except Exception:
                 pass
             if entry.relay is not None:
-                entry.relay.join(timeout=5)
+                try:
+                    await asyncio.wait_for(entry.relay, timeout=5)
+                except (asyncio.TimeoutError, Exception):
+                    pass
         else:
             try:
                 os.kill(pid, signal.SIGTERM)

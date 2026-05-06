@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
-import threading
 import traceback
-from typing import Any, List, Literal, Optional, Tuple
+from typing import Any, List, Literal, Optional
 
 from . import __version__
 from . import cli_format
@@ -21,11 +20,9 @@ from .errors import ActorError
 from .git import RealGit
 from .process import RealProcessManager
 from .service import (
-    ActorService,
     LocalActorService,
     Notification,
     agent_class,
-    create_agent,
 )
 from .types import ActorConfig
 from .cli import _build_cli_overrides, _db_path, _create_agent, _resolve_agent_kind_for_cli
@@ -142,12 +139,13 @@ def _service(db: Optional[Database] = None) -> LocalActorService:
 # ---------------------------------------------------------------------------
 
 
-# Registry of in-flight background runs keyed by actor name. Each
-# entry carries the asyncio session + loop captured at spawn time,
-# plus a one-shot flag so we don't double-emit if both
-# `run_completed` and `actor_discarded` arrive (mid-run discard).
-_active_spawns_lock = threading.Lock()
-_active_spawns: dict[str, Tuple[Any, asyncio.AbstractEventLoop]] = {}
+# Registry of in-flight background runs keyed by actor name. The
+# value is the session captured at spawn time (the same asyncio loop
+# is shared with the publishing service, so we no longer need to
+# thread a loop through). Pop on first match so we don't double-emit
+# if both `run_completed` and `actor_discarded` arrive (mid-run
+# discard).
+_active_spawns: dict[str, Any] = {}
 
 
 async def _send_channel_notification(
@@ -168,13 +166,13 @@ async def _send_channel_notification(
     await session.send_message(message)
 
 
-def _dispatch_notification(n: Notification) -> None:
+async def _dispatch_notification(n: Notification) -> None:
     """Service-side notification handler subscribed at server startup.
 
     Looks up the active spawn for `n.actor`; if there's one, formats
     the event into a `notifications/claude/channel` and dispatches it
-    through the captured loop. The wire format is byte-identical to
-    the pre-refactor implementation: `content = "[<actor>] <body>"`,
+    on the running loop. The wire format is byte-identical to the
+    pre-refactor implementation: `content = "[<actor>] <body>"`,
     `meta = {"actor": <actor>, "status": <status>}`.
 
     Plain `actor_discarded` events without an active spawn (e.g. user
@@ -182,11 +180,9 @@ def _dispatch_notification(n: Notification) -> None:
     parent claude is waiting on them. Mid-run discards arrive with
     `run_id` set and ARE relayed.
     """
-    with _active_spawns_lock:
-        registration = _active_spawns.pop(n.actor, None)
-    if registration is None:
+    session = _active_spawns.pop(n.actor, None)
+    if session is None:
         return
-    session, loop = registration
 
     if n.event == "run_completed":
         status_str = n.status.value if n.status is not None else "unknown"
@@ -203,11 +199,8 @@ def _dispatch_notification(n: Notification) -> None:
     content = f"[{n.actor}] {body}"
     meta = {"actor": n.actor, "status": status_str}
 
-    future = asyncio.run_coroutine_threadsafe(
-        _send_channel_notification(session, content, meta), loop,
-    )
     try:
-        future.result(timeout=5)
+        await _send_channel_notification(session, content, meta)
     except Exception as e:
         print(
             f"[actor-mcp] failed to send channel notification: {e}",
@@ -217,11 +210,11 @@ def _dispatch_notification(n: Notification) -> None:
 
 # Subscribe a long-lived service to receive notifications. The service
 # itself is constructed per-tool-call (see `_service()`), but
-# notifications need a persistent subscription to survive across
-# spawns. Trick: each `_spawn_background_run` builds its own service
-# (which it uses for `run_actor`) and subscribes `_dispatch_notification`
-# for that one call's lifetime. The handler then pops the active spawn
-# and dispatches.
+# notifications need a per-spawn subscription that survives across the
+# task's lifetime. `_spawn_background_run` builds its own service
+# (which it uses for `run_actor`) and subscribes
+# `_dispatch_notification` for that one call's lifetime. The handler
+# then pops the active spawn and dispatches.
 #
 # This reads like a pure pub/sub even though every spawn carries its
 # own service — the subscription token lives on the per-spawn service
@@ -234,21 +227,21 @@ def _dispatch_notification(n: Notification) -> None:
 
 
 @mcp.tool()
-def list_actors(status: str | None = None) -> str:
+async def list_actors(status: str | None = None) -> str:
     """List all actors and their status.
 
     Args:
         status: Optional filter — e.g. "running", "done", "error".
     """
     svc = _service()
-    actors = svc.list_actors(status_filter=status)
-    statuses = {a.name: svc.actor_status(a.name) for a in actors}
-    latest_runs = {a.name: svc.latest_run(a.name) for a in actors}
+    actors = await svc.list_actors(status_filter=status)
+    statuses = {a.name: await svc.actor_status(a.name) for a in actors}
+    latest_runs = {a.name: await svc.latest_run(a.name) for a in actors}
     return cli_format.format_actor_table(actors, statuses, latest_runs)
 
 
 @mcp.tool()
-def list_roles() -> str:
+async def list_roles() -> str:
     """List available roles from settings.kdl.
 
     Roles are named presets users define in `~/.actor/settings.kdl`
@@ -257,58 +250,58 @@ def list_roles() -> str:
     optional `description` that explains when to use it. Apply a role
     at actor creation by passing `role="<name>"` to `new_actor`.
     """
-    return cli_format.format_roles(_service().list_roles())
+    return cli_format.format_roles(await _service().list_roles())
 
 
 @mcp.tool()
-def show_actor(name: str, runs: int = 5) -> str:
+async def show_actor(name: str, runs: int = 5) -> str:
     """Show full details for an actor including run history.
 
     Args:
         name: Actor name.
         runs: Number of recent runs to display (default 5, 0 for none).
     """
-    detail = _service().show_actor(name=name, runs_limit=runs)
+    detail = await _service().show_actor(name=name, runs_limit=runs)
     return cli_format.format_actor_detail(detail)
 
 
 @mcp.tool()
-def logs_actor(name: str, verbose: bool = False) -> str:
+async def logs_actor(name: str, verbose: bool = False) -> str:
     """View agent session output for an actor.
 
     Args:
         name: Actor name.
         verbose: If True, include tool calls, thinking, and timestamps.
     """
-    logs = _service().get_logs(name)
+    logs = await _service().get_logs(name)
     return cli_format.format_logs(logs, verbose=verbose)
 
 
 @mcp.tool()
-def stop_actor(name: str) -> str:
+async def stop_actor(name: str) -> str:
     """Stop a running actor.
 
     Args:
         name: Actor name.
     """
-    result = _service().stop_actor(name=name)
+    result = await _service().stop_actor(name=name)
     return cli_format.format_stop(result)
 
 
 @_ask_tool("on-discard")
-def discard_actor(name: str, force: bool = False) -> str:
+async def discard_actor(name: str, force: bool = False) -> str:
     """Remove an actor from the database. Stops it first if running. Worktree stays on disk.
 
     Args:
         name: Actor name.
         force: If True, ignore on-discard hook failures and discard anyway.
     """
-    result = _service().discard_actor(name=name, force=force)
+    result = await _service().discard_actor(name=name, force=force)
     return cli_format.format_discard(result)
 
 
 @mcp.tool()
-def config_actor(name: str, pairs: List[str] | None = None) -> str:
+async def config_actor(name: str, pairs: List[str] | None = None) -> str:
     """View or update actor config.
 
     Args:
@@ -317,9 +310,9 @@ def config_actor(name: str, pairs: List[str] | None = None) -> str:
     """
     svc = _service()
     if pairs:
-        svc.config_actor(name=name, pairs=pairs)
+        await svc.config_actor(name=name, pairs=pairs)
         return f"{name} config updated"
-    cfg = svc.config_actor(name=name)
+    cfg = await svc.config_actor(name=name)
     return cli_format.format_config_view(cfg)
 
 
@@ -329,31 +322,22 @@ def _spawn_background_run(
     cli_overrides: ActorConfig,
     ctx: Context | None,
 ) -> None:
-    """Kick off a run in a background thread; the service publishes a
-    completion notification, our subscribed handler relays it as a
-    `notifications/claude/channel` event."""
+    """Schedule a run as a background task on the running loop. The
+    service publishes a completion notification; our subscribed
+    handler relays it as a `notifications/claude/channel` event."""
     session = ctx.session if ctx else None
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
+    if session is not None:
+        _active_spawns[name] = session
 
-    if session is not None and loop is not None:
-        with _active_spawns_lock:
-            _active_spawns[name] = (session, loop)
-    else:
-        # No session/loop to dispatch on — record nothing, we'll just
-        # run the thread for its DB side effects.
-        pass
-
-    def _run() -> None:
-        # Per-thread service so the DB connection isn't shared with
-        # the main thread (SQLite connections aren't thread-safe).
+    async def _run() -> None:
+        # Per-task service so the DB connection isn't shared. SQLite
+        # connections opened with `check_same_thread=False` are still
+        # cheaper to keep one-per-task than to add cross-task locking.
         svc = _service()
         cancel = svc.subscribe_notifications(_dispatch_notification)
         try:
             try:
-                svc.run_actor(name=name, prompt=prompt, config=cli_overrides)
+                await svc.run_actor(name=name, prompt=prompt, config=cli_overrides)
             except Exception as e:
                 print(
                     f"[actor-mcp] run for '{name}' failed: {e}",
@@ -367,8 +351,8 @@ def _spawn_background_run(
                 # from inside `wait_for_run`). The dispatch handler
                 # relays it as status="discarded" when a spawn is
                 # registered.
-                if not svc.actor_exists(name):
-                    svc.publish_notification(Notification(
+                if not await svc.actor_exists(name):
+                    await svc.publish_notification(Notification(
                         actor=name,
                         event="actor_discarded",
                         run_id=-1,  # marker so dispatcher relays
@@ -378,7 +362,7 @@ def _spawn_background_run(
                     # Other failure — still emit a run_completed-ish
                     # event so the orchestrator gets feedback.
                     from .types import Status as _S
-                    svc.publish_notification(Notification(
+                    await svc.publish_notification(Notification(
                         actor=name,
                         event="run_completed",
                         run_id=-1,
@@ -389,14 +373,13 @@ def _spawn_background_run(
             cancel()
             # Drop any leftover spawn registration (defensive — the
             # handler usually pops it).
-            with _active_spawns_lock:
-                _active_spawns.pop(name, None)
+            _active_spawns.pop(name, None)
 
-    threading.Thread(target=_run, daemon=True).start()
+    asyncio.create_task(_run())
 
 
 @_ask_tool("on-start")
-def new_actor(
+async def new_actor(
     name: str,
     prompt: str | None = None,
     agent: Literal["claude", "codex"] | None = None,
@@ -458,7 +441,7 @@ def new_actor(
         agent_factory=_create_agent,
         app_config=app_config,
     )
-    actor = svc.new_actor(
+    actor = await svc.new_actor(
         name=name,
         dir=dir,
         no_worktree=no_worktree,
@@ -488,7 +471,7 @@ def new_actor(
 
 
 @_ask_tool("before-run")
-def run_actor(
+async def run_actor(
     name: str,
     prompt: str,
     config: List[str] | None = None,
@@ -519,7 +502,7 @@ def run_actor(
     return f"Actor '{name}' is running."
 
 
-def main(for_host: str | None = None) -> None:
+async def main(for_host: str | None = None) -> None:
     # for_host is accepted for forward compat but not yet used —
     # FastMCP's instructions are set once at construction (the
     # property is read-only), so host-specific variation will require
@@ -531,4 +514,7 @@ def main(for_host: str | None = None) -> None:
             "behavior isn't wired up yet; running in default mode.",
             file=sys.stderr,
         )
-    mcp.run(transport="stdio")
+    # FastMCP's sync `mcp.run(transport="stdio")` calls `anyio.run()` which
+    # would conflict with the asyncio loop already running in `cli._amain`.
+    # Use the async-native entry instead.
+    await mcp.run_stdio_async()

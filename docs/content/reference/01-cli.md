@@ -157,12 +157,10 @@ Open the dashboard TUI. Animated splash by default; use `--no-animation` over sl
 
 | Flag | Description |
 | --- | --- |
-| `--serve` | Serve in a browser via textual-serve on port 2204. |
 | `--no-animation` | Disable splash animation. |
 
 ```bash
 actor watch                                               # local TUI
-actor watch --serve                                       # browser-served on :2204
 actor watch --no-animation                                # skip splash
 ```
 

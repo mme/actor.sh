@@ -7,14 +7,20 @@ covered by test_actor.py.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from actor import ActorConfig, RunResult, Status, __version__
 from actor.cli import main
 from actor.errors import ActorError, ConfigError
+
+
+def _run_async(coro):
+    """Drive an async test body from a sync test method."""
+    return asyncio.run(coro)
 
 
 class VersionFlagTests(unittest.TestCase):
@@ -63,8 +69,11 @@ class NewCommandTests(unittest.TestCase):
         fake_actor.name = argv[1] if len(argv) > 1 else "a"
         fake_actor.dir = "/tmp/actor"
 
-        new_actor = MagicMock(return_value=fake_actor)
-        run_actor = MagicMock(return_value=_fake_run_result())
+        # AsyncMock so the CLI's `await service.new_actor(...)` /
+        # `await service.run_actor(...)` resolve to the fake values
+        # rather than coroutines that never finish.
+        new_actor = AsyncMock(return_value=fake_actor)
+        run_actor = AsyncMock(return_value=_fake_run_result())
 
         stdin = io.StringIO(stdin_text or "")
         stdin.isatty = lambda: stdin_is_tty  # type: ignore[assignment]
@@ -75,7 +84,7 @@ class NewCommandTests(unittest.TestCase):
 
         with patch("actor.service.LocalActorService.new_actor", new_actor), \
              patch("actor.service.LocalActorService.run_actor", run_actor), \
-             patch("actor.service.LocalActorService.latest_run", return_value=latest_run), \
+             patch("actor.service.LocalActorService.latest_run", new=AsyncMock(return_value=latest_run)), \
              patch("actor.config.load_config", return_value=cfg), \
              patch("actor.cli.Database") as db_cls, \
              patch("sys.stdin", stdin):
@@ -222,8 +231,8 @@ class NewCommandTests(unittest.TestCase):
         fake_actor.name = "foo"
         fake_actor.dir = "/tmp/foo"
 
-        new_actor = MagicMock(return_value=fake_actor)
-        run_actor = MagicMock(side_effect=ActorError("agent binary missing"))
+        new_actor = AsyncMock(return_value=fake_actor)
+        run_actor = AsyncMock(side_effect=ActorError("agent binary missing"))
 
         with patch("actor.service.LocalActorService.new_actor", new_actor), \
              patch("actor.service.LocalActorService.run_actor", run_actor), \
@@ -245,13 +254,14 @@ class RunCommandTests(unittest.TestCase):
     def test_run_passes_config_overrides(self):
         from actor import AppConfig
         from actor.types import AgentKind
-        run_actor = MagicMock(return_value=_fake_run_result())
-        get_actor = MagicMock()
-        get_actor.return_value.agent = AgentKind.CLAUDE
+        run_actor = AsyncMock(return_value=_fake_run_result())
+        actor_row = MagicMock()
+        actor_row.agent = AgentKind.CLAUDE
+        get_actor = AsyncMock(return_value=actor_row)
         latest_run = MagicMock(exit_code=0)
         with patch("actor.service.LocalActorService.run_actor", run_actor), \
              patch("actor.service.LocalActorService.get_actor", get_actor), \
-             patch("actor.service.LocalActorService.latest_run", return_value=latest_run), \
+             patch("actor.service.LocalActorService.latest_run", new=AsyncMock(return_value=latest_run)), \
              patch("actor.config.load_config", return_value=AppConfig()), \
              patch("actor.cli.Database") as db_cls:
             db_cls.open.return_value = MagicMock()
@@ -267,8 +277,8 @@ class RunCommandTests(unittest.TestCase):
     def test_run_dash_i_dispatches_to_interactive_actor(self):
         """`actor run foo -i` must route through interactive_actor, not run_actor."""
         from actor import AppConfig
-        interactive_actor = MagicMock(return_value=(0, "ok"))
-        run_actor = MagicMock(return_value=_fake_run_result(output="should-not-run"))
+        interactive_actor = AsyncMock(return_value=(0, "ok"))
+        run_actor = AsyncMock(return_value=_fake_run_result(output="should-not-run"))
         with patch("actor.service.LocalActorService.interactive_actor", interactive_actor), \
              patch("actor.service.LocalActorService.run_actor", run_actor), \
              patch("actor.config.load_config", return_value=AppConfig()), \
@@ -286,7 +296,7 @@ class RunCommandTests(unittest.TestCase):
         """Negative exit code from interactive_actor (signal) → 128 + signum."""
         import signal as _sig
         from actor import AppConfig
-        interactive_actor = MagicMock(return_value=(-_sig.SIGTERM, "stopped"))
+        interactive_actor = AsyncMock(return_value=(-_sig.SIGTERM, "stopped"))
         with patch("actor.service.LocalActorService.interactive_actor", interactive_actor), \
              patch("actor.config.load_config", return_value=AppConfig()), \
              patch("actor.cli.Database") as db_cls:
@@ -400,12 +410,12 @@ class SubClaudeChannelTests(unittest.TestCase):
 
         captured = {}
 
-        def fake_spawn(self, args, cwd, config):
+        async def fake_spawn(self, args, cwd, config):
             captured["args"] = args
             return 12345
 
         with patch.object(ClaudeAgent, "_spawn_and_track", fake_spawn):
-            agent.start(Path("/tmp"), "hi", ActorConfig())
+            _run_async(agent.start(Path("/tmp"), "hi", ActorConfig()))
 
         self.assertIn("--dangerously-load-development-channels", captured["args"])
         idx = captured["args"].index("--dangerously-load-development-channels")
@@ -418,12 +428,12 @@ class SubClaudeChannelTests(unittest.TestCase):
 
         captured = {}
 
-        def fake_spawn(self, args, cwd, config):
+        async def fake_spawn(self, args, cwd, config):
             captured["args"] = args
             return 12345
 
         with patch.object(ClaudeAgent, "_spawn_and_track", fake_spawn):
-            agent.resume(Path("/tmp"), "some-session", "continue", ActorConfig())
+            _run_async(agent.resume(Path("/tmp"), "some-session", "continue", ActorConfig()))
 
         self.assertIn("--dangerously-load-development-channels", captured["args"])
 
@@ -434,15 +444,15 @@ class McpToolTests(unittest.TestCase):
     def test_run_actor_strips_and_rejects_whitespace_prompt(self):
         from actor.server import run_actor
         with self.assertRaises(ActorError):
-            run_actor(name="foo", prompt="   ")
+            _run_async(run_actor(name="foo", prompt="   "))
 
     def test_new_actor_without_prompt_does_not_spawn(self):
         from actor import server
         fake_actor = MagicMock()
         fake_actor.dir = "/tmp/foo"
-        with patch("actor.service.LocalActorService.new_actor", return_value=fake_actor), \
+        with patch("actor.service.LocalActorService.new_actor", AsyncMock(return_value=fake_actor)), \
              patch("actor.server._spawn_background_run") as spawn:
-            msg = server.new_actor(name="foo")
+            msg = _run_async(server.new_actor(name="foo"))
         spawn.assert_not_called()
         self.assertIn("created", msg)
         self.assertNotIn("running", msg)
@@ -451,9 +461,9 @@ class McpToolTests(unittest.TestCase):
         from actor import server
         fake_actor = MagicMock()
         fake_actor.dir = "/tmp/foo"
-        with patch("actor.service.LocalActorService.new_actor", return_value=fake_actor), \
+        with patch("actor.service.LocalActorService.new_actor", AsyncMock(return_value=fake_actor)), \
              patch("actor.server._spawn_background_run") as spawn:
-            msg = server.new_actor(name="foo", prompt="   ")
+            msg = _run_async(server.new_actor(name="foo", prompt="   "))
         spawn.assert_not_called()
         self.assertIn("created", msg)
         self.assertNotIn("running", msg)
@@ -462,9 +472,9 @@ class McpToolTests(unittest.TestCase):
         from actor import server
         fake_actor = MagicMock()
         fake_actor.dir = "/tmp/foo"
-        with patch("actor.service.LocalActorService.new_actor", return_value=fake_actor), \
+        with patch("actor.service.LocalActorService.new_actor", AsyncMock(return_value=fake_actor)), \
              patch("actor.server._spawn_background_run") as spawn:
-            msg = server.new_actor(name="foo", prompt="do x")
+            msg = _run_async(server.new_actor(name="foo", prompt="do x"))
         spawn.assert_called_once()
         self.assertIn("running", msg)
 
@@ -472,10 +482,10 @@ class McpToolTests(unittest.TestCase):
         from actor import server
         fake_actor = MagicMock()
         fake_actor.dir = "/tmp/foo"
-        with patch("actor.service.LocalActorService.new_actor", return_value=fake_actor), \
+        with patch("actor.service.LocalActorService.new_actor", AsyncMock(return_value=fake_actor)), \
              patch("actor.server._spawn_background_run", side_effect=RuntimeError("boom")):
             with patch("sys.stderr", io.StringIO()):
-                msg = server.new_actor(name="foo", prompt="do x")
+                msg = _run_async(server.new_actor(name="foo", prompt="do x"))
         self.assertIn("created", msg)
         self.assertIn("run failed to start", msg)
 
@@ -489,11 +499,11 @@ class McpToolTests(unittest.TestCase):
         })
         fake_actor = MagicMock()
         fake_actor.dir = "/tmp/foo"
-        new_actor_call = MagicMock(return_value=fake_actor)
+        new_actor_call = AsyncMock(return_value=fake_actor)
         with patch("actor.service.LocalActorService.new_actor", new_actor_call), \
              patch("actor.server._spawn_background_run") as spawn, \
              patch("actor.config.load_config", return_value=cfg):
-            server.new_actor(name="foo", role="qa")
+            _run_async(server.new_actor(name="foo", role="qa"))
         kwargs = new_actor_call.call_args.kwargs
         self.assertEqual(kwargs["role_name"], "qa")
         spawn.assert_not_called()
@@ -505,10 +515,12 @@ class McpToolTests(unittest.TestCase):
         })
         fake_actor = MagicMock()
         fake_actor.dir = "/tmp/foo"
-        with patch("actor.service.LocalActorService.new_actor", return_value=fake_actor), \
+        with patch("actor.service.LocalActorService.new_actor", AsyncMock(return_value=fake_actor)), \
              patch("actor.server._spawn_background_run") as spawn, \
              patch("actor.config.load_config", return_value=cfg):
-            server.new_actor(name="foo", role="qa", prompt="review the auth module")
+            _run_async(server.new_actor(
+                name="foo", role="qa", prompt="review the auth module",
+            ))
         # spawn receives the explicit task prompt, not the role's prompt.
         spawn.assert_called_once()
         spawn_args = spawn.call_args
@@ -525,11 +537,11 @@ class McpToolTests(unittest.TestCase):
         })
         fake_actor = MagicMock()
         fake_actor.dir = "/tmp/foo"
-        new_actor_call = MagicMock(return_value=fake_actor)
+        new_actor_call = AsyncMock(return_value=fake_actor)
         with patch("actor.service.LocalActorService.new_actor", new_actor_call), \
              patch("actor.server._spawn_background_run"), \
              patch("actor.config.load_config", return_value=cfg):
-            server.new_actor(name="foo", role="code")
+            _run_async(server.new_actor(name="foo", role="code"))
         kwargs = new_actor_call.call_args.kwargs
         # `agent` arg from MCP is None; service.new_actor will resolve via role.
         self.assertIsNone(kwargs["agent_name"])
@@ -544,7 +556,9 @@ class McpToolTests(unittest.TestCase):
         with patch("actor.server._db") as db_fn, \
              patch("actor.server._spawn_background_run") as spawn:
             db_fn.return_value.get_actor.return_value.agent = AgentKind.CLAUDE
-            server.run_actor(name="foo", prompt="do x", config=["model=opus"])
+            _run_async(server.run_actor(
+                name="foo", prompt="do x", config=["model=opus"],
+            ))
         args, kwargs = spawn.call_args
         overrides = kwargs["cli_overrides"]
         self.assertEqual(overrides.agent_args.get("model"), "opus")
@@ -556,13 +570,12 @@ class McpToolTests(unittest.TestCase):
         """Invoke server.new_actor with no prompt, return the
         `config` kwarg the service saw."""
         from actor import server
-        new_actor_call = MagicMock()
         fake_actor = MagicMock()
         fake_actor.dir = "/tmp/foo"
-        new_actor_call.return_value = fake_actor
+        new_actor_call = AsyncMock(return_value=fake_actor)
         with patch("actor.service.LocalActorService.new_actor", new_actor_call), \
              patch("actor.server._spawn_background_run") as spawn:
-            server.new_actor(name="foo", **kwargs)
+            _run_async(server.new_actor(name="foo", **kwargs))
         spawn.assert_not_called()
         return new_actor_call.call_args.kwargs["config"]
 
@@ -584,10 +597,12 @@ class McpToolTests(unittest.TestCase):
 
     def test_new_actor_rejects_use_subscription_via_config(self):
         from actor import server
-        new_actor_call = MagicMock()
+        new_actor_call = AsyncMock()
         with patch("actor.service.LocalActorService.new_actor", new_actor_call):
             with self.assertRaises(ConfigError):
-                server.new_actor(name="foo", config=["use-subscription=true"])
+                _run_async(server.new_actor(
+                    name="foo", config=["use-subscription=true"],
+                ))
         new_actor_call.assert_not_called()
 
     # -- use_subscription param on run_actor --------------------------------
@@ -598,7 +613,7 @@ class McpToolTests(unittest.TestCase):
         with patch("actor.server._db") as db_fn, \
              patch("actor.server._spawn_background_run") as spawn:
             db_fn.return_value.get_actor.return_value.agent = AgentKind.CLAUDE
-            server.run_actor(name="foo", prompt="do x", **kwargs)
+            _run_async(server.run_actor(name="foo", prompt="do x", **kwargs))
         return spawn.call_args.kwargs["cli_overrides"]
 
     def test_run_actor_use_subscription_true_sets_actor_key(self):
@@ -622,9 +637,9 @@ class McpToolTests(unittest.TestCase):
              patch("actor.server._spawn_background_run") as spawn:
             db_fn.return_value.get_actor.return_value.agent = AgentKind.CLAUDE
             with self.assertRaises(ConfigError):
-                server.run_actor(
+                _run_async(server.run_actor(
                     name="foo", prompt="do x", config=["use-subscription=true"],
-                )
+                ))
         spawn.assert_not_called()
 
 

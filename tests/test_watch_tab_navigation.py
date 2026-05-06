@@ -1,16 +1,30 @@
 from __future__ import annotations
 
+import unittest
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock
-from unittest.mock import patch
-import unittest
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from textual.widgets import Static, TabbedContent, TabPane, Tabs
 
 from actor.types import Actor, ActorConfig, AgentKind, Status
 from actor.watch.app import ActorWatchApp
 from actor.watch.tree import ActorTree
+
+
+def _make_manager(**configure) -> MagicMock:
+    """Build a MagicMock interactive manager whose async-flavored
+    methods (`create`, `close`, `close_all`, `shutdown`) return
+    awaitables. `configure` lets callers override defaults like
+    `has`, `live_names`, `get`, etc."""
+    manager = MagicMock()
+    manager.create = AsyncMock()
+    manager.close = AsyncMock()
+    manager.close_all = AsyncMock()
+    manager.shutdown = AsyncMock()
+    for key, value in configure.items():
+        setattr(manager, key, value)
+    return manager
 
 
 def _actor(
@@ -159,7 +173,7 @@ class TabNavigationFocusTests(unittest.IsolatedAsyncioTestCase):
         app = ActorWatchApp(animate=False)
         fake_terminal = Static("terminal placeholder", id="fake-terminal")
         fake_terminal.can_focus = True
-        manager = MagicMock()
+        manager = _make_manager()
         manager.live_names.return_value = []
         manager.has.return_value = True
         manager.get.return_value = SimpleNamespace(widget=fake_terminal)
@@ -169,7 +183,7 @@ class TabNavigationFocusTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause(0.1)
 
-                app.action_enter_interactive()
+                await app.action_enter_interactive()
                 for _ in range(20):
                     if app.focused is fake_terminal:
                         break
@@ -184,7 +198,7 @@ class TabNavigationFocusTests(unittest.IsolatedAsyncioTestCase):
         app = ActorWatchApp(animate=False)
         fake_terminal = Static("terminal placeholder", id="fake-terminal")
         fake_terminal.can_focus = True
-        manager = MagicMock()
+        manager = _make_manager()
         manager.live_names.return_value = []
         manager.has.return_value = True
         manager.get.return_value = SimpleNamespace(widget=fake_terminal)
@@ -222,7 +236,7 @@ class TabNavigationFocusTests(unittest.IsolatedAsyncioTestCase):
         app = ActorWatchApp(animate=False)
         fake_terminal = Static("terminal placeholder", id="fake-terminal")
         fake_terminal.can_focus = True
-        manager = MagicMock()
+        manager = _make_manager()
         manager.live_names.return_value = []
         manager.has.return_value = True
         manager.get.side_effect = (
@@ -263,7 +277,7 @@ class TabNavigationFocusTests(unittest.IsolatedAsyncioTestCase):
         app = ActorWatchApp(animate=False)
         fake_terminal = Static("terminal placeholder", id="fake-terminal")
         fake_terminal.can_focus = True
-        manager = MagicMock()
+        manager = _make_manager()
         manager.live_names.return_value = []
         manager.has.return_value = True
         manager.get.side_effect = (
@@ -314,7 +328,7 @@ class TabNavigationFocusTests(unittest.IsolatedAsyncioTestCase):
         app = ActorWatchApp(animate=False)
         fake_terminal = Static("terminal placeholder", id="fake-terminal")
         fake_terminal.can_focus = True
-        manager = MagicMock()
+        manager = _make_manager()
         manager.live_names.return_value = []
         manager.has.return_value = True
         manager.get.side_effect = (
@@ -376,7 +390,7 @@ class TabNavigationFocusTests(unittest.IsolatedAsyncioTestCase):
             "alice": SimpleNamespace(widget=alice_terminal),
             "bob": SimpleNamespace(widget=bob_terminal),
         }
-        manager = MagicMock()
+        manager = _make_manager()
         manager.live_names.return_value = []
         manager.has.return_value = True
         manager.get.side_effect = lambda name: sessions.get(name)
@@ -435,7 +449,7 @@ class TabNavigationFocusTests(unittest.IsolatedAsyncioTestCase):
         app = ActorWatchApp(animate=False)
         fake_terminal = Static("terminal placeholder", id="fake-terminal")
         fake_terminal.can_focus = True
-        manager = MagicMock()
+        manager = _make_manager()
         manager.live_names.return_value = []
         manager.has.return_value = True
         manager.get.return_value = SimpleNamespace(widget=fake_terminal)
@@ -462,7 +476,7 @@ class TabNavigationFocusTests(unittest.IsolatedAsyncioTestCase):
         app = ActorWatchApp(animate=False)
         fake_terminal = Static("terminal placeholder", id="fake-terminal")
         fake_terminal.can_focus = True
-        manager = MagicMock()
+        manager = _make_manager()
         manager.live_names.return_value = []
         manager.has.return_value = True
         manager.get.return_value = SimpleNamespace(widget=fake_terminal)
@@ -526,7 +540,7 @@ class TabNavigationFocusTests(unittest.IsolatedAsyncioTestCase):
         app = ActorWatchApp(animate=False)
         fake_terminal = Static("terminal placeholder", id="fake-terminal")
         fake_terminal.can_focus = True
-        manager = MagicMock()
+        manager = _make_manager()
         manager.live_names.return_value = []
         manager.has.side_effect = lambda name: name == "alice"
         manager.get.side_effect = (
@@ -571,7 +585,7 @@ class TabNavigationFocusTests(unittest.IsolatedAsyncioTestCase):
         app = ActorWatchApp(animate=False)
         fake_terminal = Static("terminal placeholder", id="fake-terminal")
         fake_terminal.can_focus = True
-        manager = MagicMock()
+        manager = _make_manager()
         manager.live_names.return_value = []
         manager.has.side_effect = lambda name: name == "alice"
         manager.get.side_effect = (

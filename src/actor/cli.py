@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sys
 from typing import List, Optional
@@ -227,9 +228,8 @@ Examples:
     # -- watch --
     p_watch = sub.add_parser(
         "watch",
-        help="Open real-time dashboard (browser + terminal)",
+        help="Open real-time dashboard (terminal)",
     )
-    p_watch.add_argument("--serve", action="store_true", help="Serve in browser via textual-serve on port 2204")
     p_watch.add_argument("--no-animation", action="store_true", help="Disable splash animation (lighter over SSH/slow links)")
 
     # -- discard --
@@ -329,13 +329,13 @@ def _build_service(app_config=None) -> LocalActorService:
     )
 
 
-def _propagate_run_exit(service: LocalActorService, name: str) -> None:
+async def _propagate_run_exit(service: LocalActorService, name: str) -> None:
     """If the latest run exited non-zero, print an error to stderr and
     exit 2. Mirrors the previous behavior where `actor run` / `actor
     new <name> <prompt>` propagated the agent's exit code.
 
     Guard against MagicMock returns in tests by checking the type."""
-    run_row = service.latest_run(name)
+    run_row = await service.latest_run(name)
     if (
         run_row is not None
         and isinstance(getattr(run_row, "exit_code", None), int)
@@ -349,6 +349,10 @@ def _propagate_run_exit(service: LocalActorService, name: str) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> None:
+    asyncio.run(_amain(argv))
+
+
+async def _amain(argv: Optional[List[str]] = None) -> None:
     effective_argv = sys.argv[1:] if argv is None else argv
     # `actor main ...` execs the agent CLI with the main role's prompt
     # appended as a system prompt and the actor channel enabled.
@@ -401,12 +405,12 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     if args.command == "mcp":
         from .server import main as mcp_main
-        mcp_main(for_host=args.for_host)
+        await mcp_main(for_host=args.for_host)
         return
 
     if args.command == "watch":
         from .watch import run_watch
-        run_watch(serve=args.serve, animate=not args.no_animation)
+        run_watch(animate=not args.no_animation)
         return
 
     if args.command == "setup":
@@ -467,7 +471,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 use_subscription=args.use_subscription,
             )
 
-            actor = service.new_actor(
+            actor = await service.new_actor(
                 name=args.name,
                 dir=args.dir,
                 no_worktree=args.no_worktree,
@@ -488,7 +492,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 sys.exit(1)
             if prompt:
                 try:
-                    result = service.run_actor(
+                    result = await service.run_actor(
                         name=args.name,
                         prompt=prompt,
                         config=ActorConfig(),  # creation flags already saved as defaults
@@ -504,11 +508,11 @@ def main(argv: Optional[List[str]] = None) -> None:
                         file=sys.stderr,
                     )
                     sys.exit(2)
-                _propagate_run_exit(service, args.name)
+                await _propagate_run_exit(service, args.name)
 
         elif args.command == "run":
             if args.interactive:
-                exit_code, msg = service.interactive_actor(name=args.name)
+                exit_code, msg = await service.interactive_actor(name=args.name)
                 print(msg, file=sys.stderr)
                 # POSIX convention for signal termination: 128 + signum.
                 # interactive_actor returns -signum in that case.
@@ -526,10 +530,10 @@ def main(argv: Optional[List[str]] = None) -> None:
                 )
                 sys.exit(1)
 
-            actor_row = service.get_actor(args.name)
+            actor_row = await service.get_actor(args.name)
             agent_cls = agent_class(actor_row.agent)
             cli_overrides = _build_cli_overrides(agent_cls, list(args.config))
-            result = service.run_actor(
+            result = await service.run_actor(
                 name=args.name,
                 prompt=prompt,
                 config=cli_overrides,
@@ -539,48 +543,48 @@ def main(argv: Optional[List[str]] = None) -> None:
                     result.output,
                     end="" if result.output.endswith("\n") else "\n",
                 )
-            _propagate_run_exit(service, args.name)
+            await _propagate_run_exit(service, args.name)
 
         elif args.command == "list":
-            actors = service.list_actors(status_filter=args.status)
-            statuses = {a.name: service.actor_status(a.name) for a in actors}
-            latest_runs = {a.name: service.latest_run(a.name) for a in actors}
+            actors = await service.list_actors(status_filter=args.status)
+            statuses = {a.name: await service.actor_status(a.name) for a in actors}
+            latest_runs = {a.name: await service.latest_run(a.name) for a in actors}
             print(
                 cli_format.format_actor_table(actors, statuses, latest_runs),
                 end="",
             )
 
         elif args.command == "roles":
-            print(cli_format.format_roles(service.list_roles()), end="")
+            print(cli_format.format_roles(await service.list_roles()), end="")
 
         elif args.command == "show":
-            detail = service.show_actor(name=args.name, runs_limit=args.runs)
+            detail = await service.show_actor(name=args.name, runs_limit=args.runs)
             print(cli_format.format_actor_detail(detail), end="")
 
         elif args.command == "logs":
-            logs = service.get_logs(args.name)
+            logs = await service.get_logs(args.name)
             output = cli_format.format_logs(logs, verbose=args.verbose)
             if output:
                 print(output)
 
         elif args.command == "stop":
-            result = service.stop_actor(name=args.name)
+            result = await service.stop_actor(name=args.name)
             print(cli_format.format_stop(result))
 
         elif args.command == "config":
             if args.pairs:
-                service.config_actor(name=args.name, pairs=list(args.pairs))
+                await service.config_actor(name=args.name, pairs=list(args.pairs))
                 # Match the original "no trailing newline" output —
                 # prior tests/users may rely on the exact byte form.
                 print(f"{args.name} config updated", end="")
             else:
-                cfg = service.config_actor(name=args.name)
+                cfg = await service.config_actor(name=args.name)
                 output = cli_format.format_config_view(cfg)
                 if output:
                     print(output, end="")
 
         elif args.command == "discard":
-            result = service.discard_actor(name=args.name, force=args.force)
+            result = await service.discard_actor(name=args.name, force=args.force)
             print(cli_format.format_discard(result))
 
     except ActorError as e:

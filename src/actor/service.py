@@ -12,21 +12,25 @@ Service methods return structured types — `RunResult`, `ActorDetail`,
 `actor.cli_format` so non-CLI callers (MCP, future remote) can reuse
 the data without re-parsing.
 
-Notifications are an in-process pub/sub. Handlers run in whichever
-thread published the event; transports that need an asyncio loop (the
-MCP server's stdio session) own the bridge themselves.
+Notifications are an in-process pub/sub. Sync handlers run inline in
+the publishing task; coroutine handlers are scheduled as tasks on the
+running loop. The MCP-side handler is sync; future async handlers can
+register straight away.
+
+Port 2204 is reserved for actord (issue #35) and intentionally not
+bound here.
 """
 from __future__ import annotations
 
 import abc
+import asyncio
+import inspect
 import os
-import subprocess
 import sys
-import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Literal, Optional, Tuple
+from typing import Awaitable, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 from .agents.claude import ClaudeAgent
 from .agents.codex import CodexAgent
@@ -183,7 +187,7 @@ def create_agent(kind: AgentKind) -> Agent:
 
 
 Cancel = Callable[[], None]
-NotificationHandler = Callable[[Notification], None]
+NotificationHandler = Callable[[Notification], Union[None, Awaitable[None]]]
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +201,7 @@ class ActorService(abc.ABC):
     # -- Lifecycle ---------------------------------------------------------
 
     @abc.abstractmethod
-    def new_actor(
+    async def new_actor(
         self,
         name: str,
         dir: Optional[str],
@@ -209,43 +213,43 @@ class ActorService(abc.ABC):
     ) -> Actor: ...
 
     @abc.abstractmethod
-    def discard_actor(self, name: str, force: bool = False) -> DiscardResult: ...
+    async def discard_actor(self, name: str, force: bool = False) -> DiscardResult: ...
 
     @abc.abstractmethod
-    def config_actor(
+    async def config_actor(
         self, name: str, pairs: Optional[List[str]] = None,
     ) -> ActorConfig: ...
 
     # -- Runs --------------------------------------------------------------
 
     @abc.abstractmethod
-    def start_run(
+    async def start_run(
         self, name: str, prompt: str, config: ActorConfig,
     ) -> RunStartResult: ...
 
     @abc.abstractmethod
-    def wait_for_run(self, run_id: int) -> RunResult: ...
+    async def wait_for_run(self, run_id: int) -> RunResult: ...
 
     @abc.abstractmethod
-    def run_actor(
+    async def run_actor(
         self, name: str, prompt: str, config: ActorConfig,
     ) -> RunResult: ...
 
     @abc.abstractmethod
-    def stop_actor(self, name: str) -> StopResult: ...
+    async def stop_actor(self, name: str) -> StopResult: ...
 
     # -- Interactive -------------------------------------------------------
 
     @abc.abstractmethod
-    def start_interactive_run(
+    async def start_interactive_run(
         self, name: str, *, agent: Optional[Agent] = None,
     ) -> InteractiveRunHandle: ...
 
     @abc.abstractmethod
-    def update_interactive_run_pid(self, run_id: int, pid: int) -> None: ...
+    async def update_interactive_run_pid(self, run_id: int, pid: int) -> None: ...
 
     @abc.abstractmethod
-    def finalize_interactive_run(
+    async def finalize_interactive_run(
         self,
         run_id: int,
         exit_code: int,
@@ -254,7 +258,7 @@ class ActorService(abc.ABC):
     ) -> None: ...
 
     @abc.abstractmethod
-    def interactive_actor(
+    async def interactive_actor(
         self,
         name: str,
         runner: Optional[Callable[[List[str], Path, dict], int]] = None,
@@ -263,39 +267,39 @@ class ActorService(abc.ABC):
     # -- Discovery ---------------------------------------------------------
 
     @abc.abstractmethod
-    def get_actor(self, name: str) -> Actor: ...
+    async def get_actor(self, name: str) -> Actor: ...
 
     @abc.abstractmethod
-    def actor_exists(self, name: str) -> bool: ...
+    async def actor_exists(self, name: str) -> bool: ...
 
     @abc.abstractmethod
-    def list_actors(self, status_filter: Optional[str] = None) -> List[Actor]: ...
+    async def list_actors(self, status_filter: Optional[str] = None) -> List[Actor]: ...
 
     @abc.abstractmethod
-    def actor_status(self, name: str) -> Status: ...
+    async def actor_status(self, name: str) -> Status: ...
 
     @abc.abstractmethod
-    def latest_run(self, actor_name: str) -> Optional[Run]: ...
+    async def latest_run(self, actor_name: str) -> Optional[Run]: ...
 
     @abc.abstractmethod
-    def show_actor(self, name: str, runs_limit: int = 5) -> ActorDetail: ...
+    async def show_actor(self, name: str, runs_limit: int = 5) -> ActorDetail: ...
 
     @abc.abstractmethod
-    def list_runs(self, actor_name: str, limit: int) -> Tuple[List[Run], int]: ...
+    async def list_runs(self, actor_name: str, limit: int) -> Tuple[List[Run], int]: ...
 
     @abc.abstractmethod
-    def get_run(self, run_id: int) -> Optional[Run]: ...
+    async def get_run(self, run_id: int) -> Optional[Run]: ...
 
     @abc.abstractmethod
-    def get_logs(self, actor_name: str) -> LogsResult: ...
+    async def get_logs(self, actor_name: str) -> LogsResult: ...
 
     @abc.abstractmethod
-    def list_roles(self) -> Dict[str, Role]: ...
+    async def list_roles(self) -> Dict[str, Role]: ...
 
     # -- Notifications -----------------------------------------------------
 
     @abc.abstractmethod
-    def publish_notification(self, n: Notification) -> None: ...
+    async def publish_notification(self, n: Notification) -> None: ...
 
     @abc.abstractmethod
     def subscribe_notifications(
@@ -320,6 +324,7 @@ def _worktree_path(name: str) -> Path:
 
 
 def _default_interactive_runner(argv: List[str], cwd: Path, env: dict) -> int:
+    import subprocess
     proc = subprocess.Popen(argv, cwd=str(cwd), env=env)
     try:
         return proc.wait()
@@ -371,34 +376,40 @@ class LocalActorService(ActorService):
         self._app_config = app_config
         self._hook_runner = hook_runner
         self._handlers: List[NotificationHandler] = []
-        self._handler_lock = threading.Lock()
         # Agents carry per-instance state — `ClaudeAgent._children`
-        # tracks subprocess.Popen handles between `start()` and
-        # `wait()`. Splitting the run lifecycle into `start_run` /
-        # `wait_for_run` means both must see the same agent instance,
-        # so we cache one per kind for the lifetime of the service.
+        # tracks subprocess handles between `start()` and `wait()`.
+        # Splitting the run lifecycle into `start_run` / `wait_for_run`
+        # means both must see the same agent instance, so we cache one
+        # per kind for the lifetime of the service.
         self._agent_cache: Dict[AgentKind, Agent] = {}
-        self._agent_cache_lock = threading.Lock()
 
     # -- Internal helpers --------------------------------------------------
 
     def _hooks(self) -> Hooks:
         return self._app_config.hooks if self._app_config is not None else Hooks()
 
-    def _roles(self) -> Dict[str, Role]:
+    def _roles_dict(self) -> Dict[str, Role]:
         return dict(self._app_config.roles) if self._app_config is not None else {}
 
     def _agent(self, kind: AgentKind) -> Agent:
-        with self._agent_cache_lock:
-            inst = self._agent_cache.get(kind)
-            if inst is None:
-                inst = self._agent_factory(kind)
-                self._agent_cache[kind] = inst
-            return inst
+        inst = self._agent_cache.get(kind)
+        if inst is None:
+            inst = self._agent_factory(kind)
+            self._agent_cache[kind] = inst
+        return inst
+
+    async def _db_call(self, fn, /, *args, **kwargs):
+        """Run a sync `Database` method on a worker thread.
+
+        SQLite is sync; the service is async. `to_thread` is the
+        narrowest bridge — it preserves the existing connection
+        (`check_same_thread=False`) without pulling in a separate
+        async-sqlite dependency."""
+        return await asyncio.to_thread(fn, *args, **kwargs)
 
     # -- Lifecycle ---------------------------------------------------------
 
-    def new_actor(
+    async def new_actor(
         self,
         name: str,
         dir: Optional[str],
@@ -412,7 +423,7 @@ class LocalActorService(ActorService):
 
         role = None
         if role_name is not None:
-            roles = self._roles()
+            roles = self._roles_dict()
             if role_name not in roles:
                 available = sorted(roles)
                 hint = (
@@ -508,7 +519,7 @@ class LocalActorService(ActorService):
         else:
             base_dir = Path.cwd()
 
-        use_worktree = (not no_worktree) and self._git.is_repo(base_dir)
+        use_worktree = (not no_worktree) and await self._git.is_repo(base_dir)
 
         if not use_worktree:
             actor_dir = str(base_dir)
@@ -516,9 +527,12 @@ class LocalActorService(ActorService):
             base_branch: Optional[str] = None
             worktree = False
         else:
-            branch_base = base if base is not None else self._git.current_branch(base_dir)
+            branch_base = (
+                base if base is not None
+                else await self._git.current_branch(base_dir)
+            )
             wt_path = _worktree_path(name)
-            self._git.create_worktree(base_dir, wt_path, name, branch_base)
+            await self._git.create_worktree(base_dir, wt_path, name, branch_base)
             actor_dir = str(wt_path)
             source_repo = str(base_dir)
             base_branch = branch_base
@@ -542,12 +556,12 @@ class LocalActorService(ActorService):
         )
 
         try:
-            self._db.insert_actor(actor)
+            await self._db_call(self._db.insert_actor, actor)
         except ActorError:
             if worktree:
                 wt_path = _worktree_path(name)
                 try:
-                    self._git.remove_worktree(Path(source_repo), wt_path)  # type: ignore[arg-type]
+                    await self._git.remove_worktree(Path(source_repo), wt_path)  # type: ignore[arg-type]
                 except Exception as cleanup_err:
                     print(
                         f"warning: failed to clean up worktree at {wt_path}: {cleanup_err}",
@@ -568,13 +582,13 @@ class LocalActorService(ActorService):
                 actor_session_id=None,
             )
             try:
-                run_hook(
+                await run_hook(
                     "on-start", on_start, env, Path(actor_dir),
                     runner=self._hook_runner,
                 )
             except Exception:
                 try:
-                    self._db.delete_actor(name)
+                    await self._db_call(self._db.delete_actor, name)
                 except Exception as rollback_err:
                     print(
                         f"warning: failed to roll back actor row for '{name}' "
@@ -585,7 +599,7 @@ class LocalActorService(ActorService):
                     assert source_repo is not None
                     wt_path = _worktree_path(name)
                     try:
-                        self._git.remove_worktree(Path(source_repo), wt_path)
+                        await self._git.remove_worktree(Path(source_repo), wt_path)
                     except Exception as cleanup_err:
                         print(
                             f"warning: failed to clean up worktree at {wt_path}: {cleanup_err}",
@@ -595,7 +609,7 @@ class LocalActorService(ActorService):
 
         return actor
 
-    def discard_actor(self, name: str, force: bool = False) -> DiscardResult:
+    async def discard_actor(self, name: str, force: bool = False) -> DiscardResult:
         """Discard an actor — stops it if running, runs the on-discard
         hook, removes the worktree, deletes the DB row.
 
@@ -606,10 +620,10 @@ class LocalActorService(ActorService):
         names the actor that broke the chain.
         """
         result = DiscardResult(names=[])
-        self._discard_recursive(name, force=force, visited=set(), result=result)
+        await self._discard_recursive(name, force=force, visited=set(), result=result)
         return result
 
-    def _discard_recursive(
+    async def _discard_recursive(
         self,
         name: str,
         *,
@@ -617,21 +631,23 @@ class LocalActorService(ActorService):
         visited: set,
         result: DiscardResult,
     ) -> None:
-        actor = self._db.get_actor(name)
+        actor = await self._db_call(self._db.get_actor, name)
         visited.add(name)
 
-        children = self._db.list_children(name)
+        children = await self._db_call(self._db.list_children, name)
         for child in children:
             if child.name not in visited:
-                self._discard_recursive(
+                await self._discard_recursive(
                     child.name, force=force, visited=visited, result=result,
                 )
 
         # Stop if running. Has to happen BEFORE the hook so the hook
         # runs against settled working-tree state.
-        status = self._db.resolve_actor_status(name, self._proc_mgr)
+        status = await self._db_call(
+            self._db.resolve_actor_status, name, self._proc_mgr,
+        )
         if status == Status.RUNNING:
-            self._force_stop(name)
+            await self._force_stop(name)
 
         # Default `git diff --quiet` ONLY when an `app_config` was
         # wired in — service constructed without a config (some tests)
@@ -652,7 +668,7 @@ class LocalActorService(ActorService):
                 actor_session_id=actor.agent_session,
             )
             try:
-                run_hook(
+                await run_hook(
                     "on-discard", on_discard, env, hook_cwd,
                     runner=self._hook_runner,
                 )
@@ -690,7 +706,7 @@ class LocalActorService(ActorService):
             wt_path = Path(actor.dir)
             if wt_path.is_dir():
                 try:
-                    self._git.remove_worktree(Path(actor.source_repo), wt_path)
+                    await self._git.remove_worktree(Path(actor.source_repo), wt_path)
                 except Exception as e:
                     if force:
                         print(
@@ -704,16 +720,16 @@ class LocalActorService(ActorService):
                             f"'{name}': {e}"
                         ) from e
 
-        self._db.delete_actor(name)
+        await self._db_call(self._db.delete_actor, name)
         result.names.append(name)
-        self.publish_notification(Notification(
+        await self.publish_notification(Notification(
             actor=name, event="actor_discarded",
         ))
 
-    def config_actor(
+    async def config_actor(
         self, name: str, pairs: Optional[List[str]] = None,
     ) -> ActorConfig:
-        actor = self._db.get_actor(name)
+        actor = await self._db_call(self._db.get_actor, name)
 
         if not pairs:
             return actor.config
@@ -747,17 +763,19 @@ class LocalActorService(ActorService):
             actor_keys=_sorted_config(new_actor_keys),
             agent_args=_sorted_config(new_agent_args),
         )
-        self._db.update_actor_config(name, new_config)
+        await self._db_call(self._db.update_actor_config, name, new_config)
         return new_config
 
     # -- Run lifecycle -----------------------------------------------------
 
-    def start_run(
+    async def start_run(
         self, name: str, prompt: str, config: ActorConfig,
     ) -> RunStartResult:
-        actor = self._db.get_actor(name)
+        actor = await self._db_call(self._db.get_actor, name)
 
-        status = self._db.resolve_actor_status(name, self._proc_mgr)
+        status = await self._db_call(
+            self._db.resolve_actor_status, name, self._proc_mgr,
+        )
         if status == Status.RUNNING:
             raise IsRunningError(name)
 
@@ -782,7 +800,7 @@ class LocalActorService(ActorService):
                 actor_agent=actor.agent.value,
                 actor_session_id=actor.agent_session,
             )
-            run_hook(
+            await run_hook(
                 "before-run", before_run, env, dir_path,
                 runner=self._hook_runner,
             )
@@ -812,8 +830,8 @@ class LocalActorService(ActorService):
             started_at=_now_iso(),
             finished_at=None,
         )
-        run_id = self._db.insert_run(run)
-        self._db.touch_actor(name)
+        run_id = await self._db_call(self._db.insert_run, run)
+        await self._db_call(self._db.touch_actor, name)
 
         # Expose actor name to the agent process (set for child,
         # restored after).
@@ -823,16 +841,18 @@ class LocalActorService(ActorService):
         agent_inst = self._agent(actor.agent)
         try:
             if actor.agent_session is not None:
-                pid = agent_inst.resume(
+                pid = await agent_inst.resume(
                     dir_path, actor.agent_session, prompt, effective_config,
                 )
                 new_session: Optional[str] = None
             else:
-                pid, new_session = agent_inst.start(
+                pid, new_session = await agent_inst.start(
                     dir_path, prompt, effective_config,
                 )
         except Exception:
-            self._db.update_run_status(run_id, Status.ERROR, -1)
+            await self._db_call(
+                self._db.update_run_status, run_id, Status.ERROR, -1,
+            )
             raise
         finally:
             if prev_actor_name is None:
@@ -840,18 +860,18 @@ class LocalActorService(ActorService):
             else:
                 os.environ["ACTOR_NAME"] = prev_actor_name
 
-        self._db.update_run_pid(run_id, pid)
+        await self._db_call(self._db.update_run_pid, run_id, pid)
         if new_session is not None:
-            self._db.update_actor_session(name, new_session)
+            await self._db_call(self._db.update_actor_session, name, new_session)
 
         return RunStartResult(run_id=run_id, pid=pid, status=Status.RUNNING)
 
-    def wait_for_run(self, run_id: int) -> RunResult:
-        run_row = self._db.get_run(run_id)
+    async def wait_for_run(self, run_id: int) -> RunResult:
+        run_row = await self._db_call(self._db.get_run, run_id)
         if run_row is None:
             raise ActorError(f"run {run_id} not found")
         actor_name = run_row.actor_name
-        actor = self._db.get_actor(actor_name)
+        actor = await self._db_call(self._db.get_actor, actor_name)
         agent_inst = self._agent(actor.agent)
 
         pid = run_row.pid
@@ -859,7 +879,9 @@ class LocalActorService(ActorService):
             # `start_run` writes the pid before returning — landing
             # here means start_run failed in a way that didn't raise.
             try:
-                self._db.update_run_status(run_id, Status.ERROR, -1)
+                await self._db_call(
+                    self._db.update_run_status, run_id, Status.ERROR, -1,
+                )
             except ActorError:
                 pass
             return RunResult(
@@ -867,14 +889,14 @@ class LocalActorService(ActorService):
                 status=Status.ERROR, exit_code=-1, output="",
             )
 
-        exit_code, output = agent_inst.wait(pid)
+        exit_code, output = await agent_inst.wait(pid)
 
         # Did the actor get discarded mid-wait? Row deletion cascades
         # to the run. Match the original semantics: emit
         # `actor_discarded` (with run_id) and return without trying
         # to update a row that's no longer there.
-        if not self._db.actor_exists(actor_name):
-            self.publish_notification(Notification(
+        if not await self._db_call(self._db.actor_exists, actor_name):
+            await self.publish_notification(Notification(
                 actor=actor_name,
                 event="actor_discarded",
                 run_id=run_id,
@@ -888,7 +910,7 @@ class LocalActorService(ActorService):
         # Race with `stop_actor`: if the row is already STOPPED, don't
         # overwrite — `stop_actor` writes STOPPED before sending the
         # signal precisely so we can detect it here.
-        current = self._db.latest_run(actor_name)
+        current = await self._db_call(self._db.latest_run, actor_name)
         if (
             current is not None
             and current.id == run_id
@@ -897,7 +919,9 @@ class LocalActorService(ActorService):
             final = Status.STOPPED
         else:
             final = Status.DONE if exit_code == 0 else Status.ERROR
-            self._db.update_run_status(run_id, final, exit_code)
+            await self._db_call(
+                self._db.update_run_status, run_id, final, exit_code,
+            )
 
         # after-run hook fires AFTER the DB has been updated with the
         # final status so a hook that runs `actor show` sees the
@@ -905,7 +929,7 @@ class LocalActorService(ActorService):
         # fail the run — the agent has already finished.
         after_run = self._hooks().after_run
         if after_run is not None:
-            refreshed = self._db.get_actor(actor_name)
+            refreshed = await self._db_call(self._db.get_actor, actor_name)
             start = _parse_iso(run_row.started_at)
             end = _parse_iso(_now_iso())
             duration_ms = None
@@ -922,14 +946,14 @@ class LocalActorService(ActorService):
                 actor_duration_ms=duration_ms,
             )
             try:
-                run_hook(
+                await run_hook(
                     "after-run", after_run, env, Path(actor.dir),
                     runner=self._hook_runner,
                 )
             except HookFailedError as e:
                 print(f"warning: {e}", file=sys.stderr)
 
-        self.publish_notification(Notification(
+        await self.publish_notification(Notification(
             actor=actor_name,
             event="run_completed",
             run_id=run_id,
@@ -942,17 +966,17 @@ class LocalActorService(ActorService):
             status=final, exit_code=exit_code, output=output,
         )
 
-    def run_actor(
+    async def run_actor(
         self, name: str, prompt: str, config: ActorConfig,
     ) -> RunResult:
-        handle = self.start_run(name, prompt, config)
-        return self.wait_for_run(handle.run_id)
+        handle = await self.start_run(name, prompt, config)
+        return await self.wait_for_run(handle.run_id)
 
-    def stop_actor(self, name: str) -> StopResult:
+    async def stop_actor(self, name: str) -> StopResult:
         # Verify the actor exists.
-        self._db.get_actor(name)
+        await self._db_call(self._db.get_actor, name)
 
-        latest = self._db.latest_run(name)
+        latest = await self._db_call(self._db.latest_run, name)
         if latest is None or latest.status != Status.RUNNING:
             raise NotRunningError(name)
 
@@ -961,53 +985,64 @@ class LocalActorService(ActorService):
 
         if not alive:
             # Process already dead — stale run, mark as error.
-            self._db.update_run_status(latest.id, Status.ERROR, -1)
+            await self._db_call(
+                self._db.update_run_status, latest.id, Status.ERROR, -1,
+            )
             return StopResult(name=name, was_alive=False)
 
         # Order matters: write STOPPED to the DB BEFORE sending the
         # signal. `wait_for_run` is blocked in `agent.wait(pid)`; the
         # moment the signal lands, the agent exits and the wait
-        # thread wakes up, reads `db.latest_run`, and re-writes the
+        # task wakes up, reads `db.latest_run`, and re-writes the
         # row based on what it sees. If the DB still showed RUNNING
-        # at that moment, the wait thread's "non-zero -> ERROR"
+        # at that moment, the wait task's "non-zero -> ERROR"
         # branch would overwrite our pending STOPPED with ERROR(-15).
         # Writing STOPPED first lets the wait race-check observe the
         # terminal state and return early instead.
         assert pid is not None  # alive==True implies pid is not None
-        self._db.update_run_status(latest.id, Status.STOPPED, None)
+        await self._db_call(
+            self._db.update_run_status, latest.id, Status.STOPPED, None,
+        )
         try:
-            agent_inst = self._agent(self._db.get_actor(name).agent)
-            agent_inst.stop(pid)
+            actor = await self._db_call(self._db.get_actor, name)
+            agent_inst = self._agent(actor.agent)
+            await agent_inst.stop(pid)
         except Exception:
             # Revert the optimistic write so callers see actual state.
-            self._db.update_run_status(latest.id, Status.RUNNING, None)
+            await self._db_call(
+                self._db.update_run_status, latest.id, Status.RUNNING, None,
+            )
             raise
 
         return StopResult(name=name, was_alive=True)
 
-    def _force_stop(self, name: str) -> None:
+    async def _force_stop(self, name: str) -> None:
         """Force-stop a running actor (used by discard). Skips the
         SIGTERM dance — kills directly via the process manager."""
-        latest = self._db.latest_run(name)
+        latest = await self._db_call(self._db.latest_run, name)
         if latest is None or latest.status != Status.RUNNING:
             return
         pid = latest.pid
         if pid is not None and self._proc_mgr.is_alive(pid):
             self._proc_mgr.kill(pid)
-        self._db.update_run_status(latest.id, Status.STOPPED, None)
+        await self._db_call(
+            self._db.update_run_status, latest.id, Status.STOPPED, None,
+        )
 
     # -- Interactive -------------------------------------------------------
 
-    def start_interactive_run(
+    async def start_interactive_run(
         self, name: str, *, agent: Optional[Agent] = None,
     ) -> InteractiveRunHandle:
         """`agent` lets the watch app's interactive manager hand in
         the per-call agent it already constructed; if omitted we
         derive one through `agent_factory` like every other
         run-lifecycle method."""
-        actor = self._db.get_actor(name)
+        actor = await self._db_call(self._db.get_actor, name)
 
-        status = self._db.resolve_actor_status(name, self._proc_mgr)
+        status = await self._db_call(
+            self._db.resolve_actor_status, name, self._proc_mgr,
+        )
         if status == Status.RUNNING:
             raise IsRunningError(name)
 
@@ -1039,7 +1074,7 @@ class LocalActorService(ActorService):
                 actor_agent=actor.agent.value,
                 actor_session_id=actor.agent_session,
             )
-            run_hook(
+            await run_hook(
                 "before-run", before_run, env, dir_path,
                 runner=self._hook_runner,
             )
@@ -1058,8 +1093,8 @@ class LocalActorService(ActorService):
             started_at=_now_iso(),
             finished_at=None,
         )
-        run_id = self._db.insert_run(run)
-        self._db.touch_actor(name)
+        run_id = await self._db_call(self._db.insert_run, run)
+        await self._db_call(self._db.touch_actor, name)
 
         return InteractiveRunHandle(
             run_id=run_id,
@@ -1068,10 +1103,10 @@ class LocalActorService(ActorService):
             argv=argv,
         )
 
-    def update_interactive_run_pid(self, run_id: int, pid: int) -> None:
-        self._db.update_run_pid(run_id, pid)
+    async def update_interactive_run_pid(self, run_id: int, pid: int) -> None:
+        await self._db_call(self._db.update_run_pid, run_id, pid)
 
-    def finalize_interactive_run(
+    async def finalize_interactive_run(
         self,
         run_id: int,
         exit_code: int,
@@ -1086,7 +1121,7 @@ class LocalActorService(ActorService):
         the watch manager passes `Status.STOPPED` for app-initiated
         teardown so the row distinguishes `quit watch` from a child
         exiting on its own."""
-        run = self._db.get_run(run_id)
+        run = await self._db_call(self._db.get_run, run_id)
         if run is None:
             return
         if run.status in (Status.DONE, Status.ERROR, Status.STOPPED):
@@ -1094,19 +1129,21 @@ class LocalActorService(ActorService):
 
         actor_name = run.actor_name
         try:
-            actor = self._db.get_actor(actor_name)
+            actor = await self._db_call(self._db.get_actor, actor_name)
         except ActorError:
             actor = None
 
         if force_status is not None:
             final = force_status
             try:
-                self._db.update_run_status(run_id, final, exit_code)
+                await self._db_call(
+                    self._db.update_run_status, run_id, final, exit_code,
+                )
             except ActorError:
                 return
         else:
             # Stop race: same logic as `wait_for_run`.
-            current = self._db.latest_run(actor_name)
+            current = await self._db_call(self._db.latest_run, actor_name)
             if (
                 current is not None
                 and current.id == run_id
@@ -1116,7 +1153,9 @@ class LocalActorService(ActorService):
             else:
                 final = Status.DONE if exit_code == 0 else Status.ERROR
                 try:
-                    self._db.update_run_status(run_id, final, exit_code)
+                    await self._db_call(
+                        self._db.update_run_status, run_id, final, exit_code,
+                    )
                 except ActorError:
                     return
 
@@ -1124,7 +1163,7 @@ class LocalActorService(ActorService):
         after_run = self._hooks().after_run
         if after_run is not None and actor is not None:
             try:
-                refreshed = self._db.get_actor(actor_name)
+                refreshed = await self._db_call(self._db.get_actor, actor_name)
             except ActorError:
                 refreshed = actor
             start = _parse_iso(run.started_at)
@@ -1143,121 +1182,151 @@ class LocalActorService(ActorService):
                 actor_duration_ms=duration_ms,
             )
             try:
-                run_hook(
+                await run_hook(
                     "after-run", after_run, env, Path(actor.dir),
                     runner=self._hook_runner,
                 )
             except HookFailedError as e:
                 print(f"warning: {e}", file=sys.stderr)
 
-        self.publish_notification(Notification(
+        await self.publish_notification(Notification(
             actor=actor_name,
             event="run_completed",
             run_id=run_id,
             status=final,
         ))
 
-    def interactive_actor(
+    async def interactive_actor(
         self,
         name: str,
         runner: Optional[Callable[[List[str], Path, dict], int]] = None,
     ) -> Tuple[int, str]:
-        handle = self.start_interactive_run(name)
+        handle = await self.start_interactive_run(name)
 
         env = dict(os.environ)
         env["ACTOR_NAME"] = name
 
+        # The runner is a sync, blocking call (it owns the caller's
+        # TTY). Hand it off to a worker thread so the asyncio loop
+        # stays responsive — though for the CLI path the loop has
+        # nothing else to do anyway.
+        active_runner = runner or _default_interactive_runner
         try:
-            exit_code = (runner or _default_interactive_runner)(
-                handle.argv, handle.dir, env,
+            exit_code = await asyncio.to_thread(
+                active_runner, handle.argv, handle.dir, env,
             )
         except BaseException:
             try:
-                self._db.update_run_status(handle.run_id, Status.ERROR, -1)
+                await self._db_call(
+                    self._db.update_run_status, handle.run_id, Status.ERROR, -1,
+                )
             except ActorError:
                 pass
             raise
 
-        self.finalize_interactive_run(handle.run_id, exit_code)
+        await self.finalize_interactive_run(handle.run_id, exit_code)
 
         # Build the closing message based on whether stop_actor raced
         # us. If the row is STOPPED at this point, finalize honored it;
         # otherwise it's DONE/ERROR per exit_code.
-        run = self._db.get_run(handle.run_id)
+        run = await self._db_call(self._db.get_run, handle.run_id)
         if run is not None and run.status == Status.STOPPED:
             return exit_code, f"Interactive session for '{name}' stopped."
         return exit_code, f"Interactive session for '{name}' ended (exit {exit_code})."
 
     # -- Discovery ---------------------------------------------------------
 
-    def get_actor(self, name: str) -> Actor:
-        return self._db.get_actor(name)
+    async def get_actor(self, name: str) -> Actor:
+        return await self._db_call(self._db.get_actor, name)
 
-    def actor_exists(self, name: str) -> bool:
-        return self._db.actor_exists(name)
+    async def actor_exists(self, name: str) -> bool:
+        return await self._db_call(self._db.actor_exists, name)
 
-    def list_actors(self, status_filter: Optional[str] = None) -> List[Actor]:
-        actors = self._db.list_actors()
+    async def list_actors(self, status_filter: Optional[str] = None) -> List[Actor]:
+        actors = await self._db_call(self._db.list_actors)
         if status_filter is None:
             return actors
         # Validate filter early — `Status.from_str` raises on bogus.
         target = Status.from_str(status_filter)
         kept: List[Actor] = []
         for a in actors:
-            if self._db.resolve_actor_status(a.name, self._proc_mgr) == target:
+            resolved = await self._db_call(
+                self._db.resolve_actor_status, a.name, self._proc_mgr,
+            )
+            if resolved == target:
                 kept.append(a)
         return kept
 
-    def actor_status(self, name: str) -> Status:
-        return self._db.resolve_actor_status(name, self._proc_mgr)
+    async def actor_status(self, name: str) -> Status:
+        return await self._db_call(
+            self._db.resolve_actor_status, name, self._proc_mgr,
+        )
 
-    def latest_run(self, actor_name: str) -> Optional[Run]:
-        return self._db.latest_run(actor_name)
+    async def latest_run(self, actor_name: str) -> Optional[Run]:
+        return await self._db_call(self._db.latest_run, actor_name)
 
-    def show_actor(self, name: str, runs_limit: int = 5) -> ActorDetail:
-        actor = self._db.get_actor(name)
-        status = self._db.resolve_actor_status(name, self._proc_mgr)
+    async def show_actor(self, name: str, runs_limit: int = 5) -> ActorDetail:
+        actor = await self._db_call(self._db.get_actor, name)
+        status = await self._db_call(
+            self._db.resolve_actor_status, name, self._proc_mgr,
+        )
         if runs_limit == 0:
             return ActorDetail(
                 actor=actor, status=status, runs=[],
                 total_runs=0, runs_limit=0,
             )
-        runs, total = self._db.list_runs(name, runs_limit)
+        runs, total = await self._db_call(self._db.list_runs, name, runs_limit)
         return ActorDetail(
             actor=actor, status=status, runs=runs,
             total_runs=total, runs_limit=runs_limit,
         )
 
-    def list_runs(self, actor_name: str, limit: int) -> Tuple[List[Run], int]:
-        return self._db.list_runs(actor_name, limit)
+    async def list_runs(self, actor_name: str, limit: int) -> Tuple[List[Run], int]:
+        return await self._db_call(self._db.list_runs, actor_name, limit)
 
-    def get_run(self, run_id: int) -> Optional[Run]:
-        return self._db.get_run(run_id)
+    async def get_run(self, run_id: int) -> Optional[Run]:
+        return await self._db_call(self._db.get_run, run_id)
 
-    def get_logs(self, actor_name: str) -> LogsResult:
-        actor = self._db.get_actor(actor_name)
+    async def get_logs(self, actor_name: str) -> LogsResult:
+        actor = await self._db_call(self._db.get_actor, actor_name)
         session_id = actor.agent_session
         if session_id is None:
             return LogsResult(session_id=None, entries=[])
         agent_inst = self._agent(actor.agent)
-        entries = agent_inst.read_logs(Path(actor.dir), session_id)
+        entries = await agent_inst.read_logs(Path(actor.dir), session_id)
         return LogsResult(session_id=session_id, entries=entries)
 
-    def list_roles(self) -> Dict[str, Role]:
-        return self._roles()
+    async def list_roles(self) -> Dict[str, Role]:
+        return self._roles_dict()
 
     # -- Notifications -----------------------------------------------------
 
-    def publish_notification(self, n: Notification) -> None:
-        with self._handler_lock:
-            handlers = list(self._handlers)
-        for h in handlers:
+    async def publish_notification(self, n: Notification) -> None:
+        # Snapshot under no lock — handler list mutates only via
+        # subscribe / cancel, both called from the same loop.
+        #
+        # Async handlers are awaited inline (sequentially) rather
+        # than scheduled as background tasks. The caller depends on
+        # all handlers having observed the event by the time
+        # `publish_notification` returns — e.g. the MCP server's
+        # `_spawn_background_run` cancels its subscription right
+        # after `run_actor` returns. Scheduling tasks would race the
+        # cancellation and silently drop the channel notification.
+        for h in list(self._handlers):
             try:
-                h(n)
+                if inspect.iscoroutinefunction(h):
+                    await h(n)
+                else:
+                    result = h(n)
+                    # Defensive: a sync handler that *returns* a
+                    # coroutine (e.g. wraps an async fn) gets
+                    # awaited too.
+                    if asyncio.iscoroutine(result):
+                        await result
             except Exception as e:
                 # Never let a misbehaving handler take down the
-                # publishing thread (especially for run completion
-                # threads in the MCP server).
+                # publishing task (especially for run completion
+                # tasks in the MCP server).
                 print(
                     f"[actor] notification handler raised: {e}",
                     file=sys.stderr,
@@ -1266,14 +1335,12 @@ class LocalActorService(ActorService):
     def subscribe_notifications(
         self, handler: NotificationHandler,
     ) -> Cancel:
-        with self._handler_lock:
-            self._handlers.append(handler)
+        self._handlers.append(handler)
 
         def cancel() -> None:
-            with self._handler_lock:
-                try:
-                    self._handlers.remove(handler)
-                except ValueError:
-                    pass
+            try:
+                self._handlers.remove(handler)
+            except ValueError:
+                pass
 
         return cancel

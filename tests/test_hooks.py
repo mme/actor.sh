@@ -5,6 +5,7 @@ parsing of the `hooks { }` block, and the wiring in cmd_new / cmd_run /
 cmd_interactive / cmd_discard."""
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +18,15 @@ from actor import (
 from actor.config import AppConfig, Hooks, load_config
 from actor.errors import ConfigError, HookFailedError
 from actor.hooks import HookResult, hook_env, merge_env_extra, run_hook
+
+
+def _run_hook_sync(*args, **kwargs):
+    """Drive the now-async ``run_hook`` from a sync test method.
+
+    The hook runtime is async-first after the prep migration; the test
+    bodies for the run_hook unit tests stay synchronous and call this
+    bridge."""
+    return asyncio.run(run_hook(*args, **kwargs))
 
 # Reuse the fakes + cmd_* shims from test_actor.py so we don't
 # duplicate a test harness.
@@ -62,11 +72,11 @@ class TestRunHook(unittest.TestCase):
 
     def test_none_command_is_noop(self):
         # No runner invoked; no error.
-        run_hook("on-start", None, {}, Path("/tmp"))
+        _run_hook_sync("on-start", None, {}, Path("/tmp"))
 
     def test_zero_exit_succeeds(self):
         runner = _RecordingRunner(0)
-        run_hook("on-start", "echo hi", {"K": "V"}, Path("/tmp"), runner=runner)
+        _run_hook_sync("on-start", "echo hi", {"K": "V"}, Path("/tmp"), runner=runner)
         self.assertEqual(len(runner.calls), 1)
         cmd, env, cwd = runner.calls[0]
         self.assertEqual(cmd, "echo hi")
@@ -76,7 +86,7 @@ class TestRunHook(unittest.TestCase):
     def test_nonzero_exit_raises_hook_failed(self):
         runner = _RecordingRunner(2)
         with self.assertRaises(HookFailedError) as ctx:
-            run_hook("on-start", "false", {}, Path("/tmp"), runner=runner)
+            _run_hook_sync("on-start", "false", {}, Path("/tmp"), runner=runner)
         self.assertEqual(ctx.exception.event, "on-start")
         self.assertEqual(ctx.exception.exit_code, 2)
         self.assertEqual(ctx.exception.command, "false")
@@ -84,7 +94,7 @@ class TestRunHook(unittest.TestCase):
     def test_hook_result_stdout_stderr_carried_to_error(self):
         runner = _RecordingRunner([HookResult(exit_code=7, stdout="out", stderr="boom")])
         with self.assertRaises(HookFailedError) as ctx:
-            run_hook("on-discard", "x", {}, Path("/tmp"), runner=runner)
+            _run_hook_sync("on-discard", "x", {}, Path("/tmp"), runner=runner)
         self.assertEqual(ctx.exception.stdout, "out")
         self.assertEqual(ctx.exception.stderr, "boom")
         self.assertIn("boom", str(ctx.exception))
@@ -93,7 +103,7 @@ class TestRunHook(unittest.TestCase):
         def bool_runner(cmd, env, cwd):
             return True  # type: ignore[return-value]
         with self.assertRaises(TypeError):
-            run_hook("on-start", "x", {}, Path("/tmp"), runner=bool_runner)
+            _run_hook_sync("on-start", "x", {}, Path("/tmp"), runner=bool_runner)
 
 
 class TestHookEnv(unittest.TestCase):

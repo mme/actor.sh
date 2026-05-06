@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for actor CLI — ported from the Rust test suite (153 tests)."""
 from __future__ import annotations
+import asyncio
 import json
 import os
 import tempfile
@@ -47,6 +48,15 @@ def _service(db, agent=None, proc_mgr=None, *, git=None,
     )
 
 
+def _run(coro):
+    """Drive a single async service call from a sync test body. The
+    service layer is async after the prep migration; the cmd_* shims
+    keep the sync call shape so the bulk of this test file (3000+
+    lines, mostly synchronous assertions) doesn't need to flip to
+    `IsolatedAsyncioTestCase`."""
+    return asyncio.run(coro)
+
+
 def cmd_new(db, git, *, name, dir, no_worktree, base, agent_name,
             cli_overrides, role_name=None, app_config=None,
             hook_runner=None):
@@ -54,10 +64,10 @@ def cmd_new(db, git, *, name, dir, no_worktree, base, agent_name,
         db=db, git=git, proc_mgr=None,
         app_config=app_config, hook_runner=hook_runner,
     )
-    return svc.new_actor(
+    return _run(svc.new_actor(
         name=name, dir=dir, no_worktree=no_worktree, base=base,
         agent_name=agent_name, config=cli_overrides, role_name=role_name,
-    )
+    ))
 
 
 def cmd_run(db, agent, proc_mgr, *, name, prompt, cli_overrides,
@@ -66,7 +76,9 @@ def cmd_run(db, agent, proc_mgr, *, name, prompt, cli_overrides,
         db=db, agent=agent, proc_mgr=proc_mgr,
         app_config=app_config, hook_runner=hook_runner,
     )
-    return svc.run_actor(name=name, prompt=prompt, config=cli_overrides).output
+    return _run(
+        svc.run_actor(name=name, prompt=prompt, config=cli_overrides),
+    ).output
 
 
 def cmd_interactive(db, agent, proc_mgr, *, name, runner=None,
@@ -75,40 +87,45 @@ def cmd_interactive(db, agent, proc_mgr, *, name, runner=None,
         db=db, agent=agent, proc_mgr=proc_mgr,
         app_config=app_config, hook_runner=hook_runner,
     )
-    return svc.interactive_actor(name=name, runner=runner)
+    return _run(svc.interactive_actor(name=name, runner=runner))
 
 
 def cmd_list(db, pm, *, status_filter):
     svc = _service(db=db, proc_mgr=pm)
-    actors = svc.list_actors(status_filter=status_filter)
-    statuses = {a.name: svc.actor_status(a.name) for a in actors}
-    latest_runs = {a.name: svc.latest_run(a.name) for a in actors}
+
+    async def _go():
+        actors = await svc.list_actors(status_filter=status_filter)
+        statuses = {a.name: await svc.actor_status(a.name) for a in actors}
+        latest_runs = {a.name: await svc.latest_run(a.name) for a in actors}
+        return actors, statuses, latest_runs
+
+    actors, statuses, latest_runs = _run(_go())
     return _fmt.format_actor_table(actors, statuses, latest_runs)
 
 
 def cmd_show(db, pm, *, name, runs_limit):
     svc = _service(db=db, proc_mgr=pm)
     return _fmt.format_actor_detail(
-        svc.show_actor(name=name, runs_limit=runs_limit),
+        _run(svc.show_actor(name=name, runs_limit=runs_limit)),
     )
 
 
 def cmd_stop(db, agent, proc_mgr, *, name):
     svc = _service(db=db, agent=agent, proc_mgr=proc_mgr)
-    return _fmt.format_stop(svc.stop_actor(name=name))
+    return _fmt.format_stop(_run(svc.stop_actor(name=name)))
 
 
 def cmd_config(db, *, name, config_pairs):
     svc = _service(db=db)
     if not config_pairs:
-        return _fmt.format_config_view(svc.config_actor(name=name))
-    svc.config_actor(name=name, pairs=config_pairs)
+        return _fmt.format_config_view(_run(svc.config_actor(name=name)))
+    _run(svc.config_actor(name=name, pairs=config_pairs))
     return f"{name} config updated"
 
 
 def cmd_logs(db, agent, *, name, verbose, watch):
     svc = _service(db=db, agent=agent)
-    return _fmt.format_logs(svc.get_logs(name), verbose=verbose)
+    return _fmt.format_logs(_run(svc.get_logs(name)), verbose=verbose)
 
 
 def cmd_roles(app_config):
@@ -121,7 +138,9 @@ def cmd_discard(db, proc_mgr, *, name, git=None,
         db=db, proc_mgr=proc_mgr, git=git,
         app_config=app_config, hook_runner=hook_runner,
     )
-    return _fmt.format_discard(svc.discard_actor(name=name, force=force))
+    return _fmt.format_discard(
+        _run(svc.discard_actor(name=name, force=force)),
+    )
 
 
 def _cli(*pairs: str, actor_keys: dict | None = None) -> ActorConfig:
@@ -183,7 +202,7 @@ class FakeAgent(Agent):
 
     # -- Agent interface --
 
-    def start(self, dir: str, prompt: str, config: ActorConfig) -> tuple[int, str | None]:
+    async def start(self, dir: str, prompt: str, config: ActorConfig) -> tuple[int, str | None]:
         if self.next_start_error is not None:
             err = self.next_start_error
             self.next_start_error = None
@@ -194,20 +213,20 @@ class FakeAgent(Agent):
         self.calls.append(FakeAgentCall(dir, prompt, config, session_id=None))
         return pid, session_id
 
-    def resume(self, dir: str, session_id: str, prompt: str, config: ActorConfig) -> int:
+    async def resume(self, dir: str, session_id: str, prompt: str, config: ActorConfig) -> int:
         pid = self.next_pid
         self.next_pid += 1
         self.calls.append(FakeAgentCall(dir, prompt, config, session_id=session_id))
         return pid
 
-    def wait(self, pid: int) -> tuple[int, str]:
+    async def wait(self, pid: int) -> tuple[int, str]:
         return (self.next_exit_code, "fake output")
 
-    def read_logs(self, dir: str, session_id: str) -> list[LogEntry]:
+    async def read_logs(self, dir: str, session_id: str) -> list[LogEntry]:
         self.log_calls.append((dir, session_id))
         return list(self.logs)
 
-    def stop(self, pid: int):
+    async def stop(self, pid: int):
         self.stops.append(pid)
         if self.next_stop_error is not None:
             err = self.next_stop_error
@@ -249,35 +268,35 @@ class FakeGit(GitOps):
             self.fail_next = None
             raise GitError(f"fake {op} failure")
 
-    def create_worktree(self, repo: str, target: str, branch: str, base: str):
+    async def create_worktree(self, repo: str, target: str, branch: str, base: str):
         self._check_fail("create_worktree")
         self.calls.append(FakeGitCall("create_worktree", repo=repo, target=target, branch=branch, base=base))
 
-    def remove_worktree(self, repo: str, target: str):
+    async def remove_worktree(self, repo: str, target: str):
         self._check_fail("remove_worktree")
         self.calls.append(FakeGitCall("remove_worktree", repo=repo, target=target))
 
-    def merge_branch(self, repo: str, branch: str, into: str):
+    async def merge_branch(self, repo: str, branch: str, into: str):
         self._check_fail("merge_branch")
         self.calls.append(FakeGitCall("merge_branch", repo=repo, branch=branch, into=into))
 
-    def delete_branch(self, repo: str, branch: str):
+    async def delete_branch(self, repo: str, branch: str):
         self._check_fail("delete_branch")
         self.calls.append(FakeGitCall("delete_branch", repo=repo, branch=branch))
 
-    def push_branch(self, repo: str, branch: str):
+    async def push_branch(self, repo: str, branch: str):
         self._check_fail("push_branch")
         self.calls.append(FakeGitCall("push_branch", repo=repo, branch=branch))
 
-    def create_pr(self, repo: str, branch: str, base: str, title: str, body: str) -> str:
+    async def create_pr(self, repo: str, branch: str, base: str, title: str, body: str) -> str:
         self._check_fail("create_pr")
         self.calls.append(FakeGitCall("create_pr", repo=repo, branch=branch, base=base, title=title, body=body))
         return "https://github.com/test/test/pull/1"
 
-    def current_branch(self, repo: str) -> str:
+    async def current_branch(self, repo: str) -> str:
         return self.current_branch_name
 
-    def is_repo(self, path: str) -> bool:
+    async def is_repo(self, path: str) -> bool:
         return self.is_repo_value
 
 

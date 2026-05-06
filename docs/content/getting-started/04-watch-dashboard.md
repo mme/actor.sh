@@ -5,7 +5,7 @@ weight: 4
 slug: "watch-dashboard"
 ---
 
-`actor watch` opens a live dashboard for everything you have in flight. It's a Textual app — runs in your terminal by default, or in a browser via textual-serve. Most workflows keep it open in one pane while the orchestrator runs in another.
+`actor watch` opens a live dashboard for everything you have in flight. It's a Textual app that runs in your terminal — most workflows keep it open in one pane while the orchestrator runs in another.
 
 ```bash
 actor watch
@@ -65,16 +65,6 @@ A few things to know:
 - **Ctrl+Z** leaves the embedded widget but keeps the subprocess alive — you can navigate around the dashboard, look at other actors, then come back. Selecting a different actor while a session is parked just shows that actor's logs.
 - Quitting watch (`q`) sends SIGTERM to all live subprocesses and marks their runs as `STOPPED`.
 - Each interactive session is recorded as a Run with prompt `*interactive*`, so it shows up in the Runs tab and `actor show` alongside normal runs.
-
-## Browser mode
-
-If you'd rather have the dashboard in a browser tab — easier to keep visible alongside other windows, or to share over SSH port-forwarding — pass `--serve`:
-
-```bash
-actor watch --serve
-```
-
-This starts textual-serve on `localhost:2204` and opens the same Textual app there. Same keys, same layout.
 
 ## SSH-friendly mode
 
