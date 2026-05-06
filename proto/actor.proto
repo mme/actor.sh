@@ -1,0 +1,342 @@
+syntax = "proto3";
+
+// actord wire (issue #35). One protocol — gRPC over a unix socket
+// today, gRPC + mTLS over TCP for cross-host (Phase 6). Schema is
+// the source of truth; regenerate with `make proto` after editing.
+//
+// Per-call context (caller cwd, caller actor name, anything else
+// scoped to "this RPC") rides on gRPC metadata, not message fields.
+// See `src/actor/daemon.py` and `src/actor/service.py` for the
+// header keys.
+
+package actor.v1;
+
+
+// ---------------------------------------------------------------------
+// Domain types — mirror src/actor/types.py 1:1.
+// ---------------------------------------------------------------------
+
+enum AgentKind {
+  AGENT_KIND_UNSPECIFIED = 0;
+  AGENT_KIND_CLAUDE = 1;
+  AGENT_KIND_CODEX = 2;
+}
+
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_IDLE = 1;
+  STATUS_RUNNING = 2;
+  STATUS_DONE = 3;
+  STATUS_ERROR = 4;
+  STATUS_STOPPED = 5;
+  STATUS_INTERACTIVE = 6;
+}
+
+enum LogEntryKind {
+  LOG_ENTRY_KIND_UNSPECIFIED = 0;
+  LOG_ENTRY_KIND_USER = 1;
+  LOG_ENTRY_KIND_ASSISTANT = 2;
+  LOG_ENTRY_KIND_THINKING = 3;
+  LOG_ENTRY_KIND_TOOL_USE = 4;
+  LOG_ENTRY_KIND_TOOL_RESULT = 5;
+}
+
+message ActorConfig {
+  map<string, string> actor_keys = 1;
+  map<string, string> agent_args = 2;
+}
+
+message Actor {
+  string name = 1;
+  AgentKind agent = 2;
+  optional string agent_session = 3;
+  string dir = 4;
+  optional string source_repo = 5;
+  optional string base_branch = 6;
+  bool worktree = 7;
+  optional string parent = 8;
+  ActorConfig config = 9;
+  string created_at = 10;
+  string updated_at = 11;
+}
+
+message Run {
+  int64 id = 1;
+  string actor_name = 2;
+  string prompt = 3;
+  Status status = 4;
+  optional int32 exit_code = 5;
+  optional int32 pid = 6;
+  ActorConfig config = 7;
+  string started_at = 8;
+  optional string finished_at = 9;
+}
+
+message Role {
+  string name = 1;
+  optional string agent = 2;
+  optional string prompt = 3;
+  optional string description = 4;
+  map<string, string> config = 5;
+}
+
+message LogEntry {
+  LogEntryKind kind = 1;
+  optional string timestamp = 2;
+  string text = 3;
+  string name = 4;
+  string input = 5;
+  string content = 6;
+  // Empty map → no usage attached for this entry.
+  map<string, int32> usage = 7;
+  bool has_usage = 8;
+}
+
+
+// ---------------------------------------------------------------------
+// Result types — mirror service.py result dataclasses.
+// ---------------------------------------------------------------------
+
+message DiscardResult {
+  repeated string names = 1;
+}
+
+message RunStartResult {
+  int64 run_id = 1;
+  optional int32 pid = 2;
+  Status status = 3;
+}
+
+message RunResult {
+  int64 run_id = 1;
+  string actor = 2;
+  Status status = 3;
+  optional int32 exit_code = 4;
+  string output = 5;
+}
+
+message StopResult {
+  string name = 1;
+  bool was_alive = 2;
+}
+
+message ActorDetail {
+  Actor actor = 1;
+  Status status = 2;
+  repeated Run runs = 3;
+  int32 total_runs = 4;
+  int32 runs_limit = 5;
+}
+
+message LogsResult {
+  optional string session_id = 1;
+  repeated LogEntry entries = 2;
+}
+
+
+// ---------------------------------------------------------------------
+// Notification (server-streaming + publish_notification).
+// ---------------------------------------------------------------------
+
+message Notification {
+  string actor = 1;
+  // "run_completed" | "actor_discarded"
+  string event = 2;
+  optional int64 run_id = 3;
+  optional Status status = 4;
+  optional string output = 5;
+  double timestamp = 6;
+}
+
+
+// ---------------------------------------------------------------------
+// Request / response messages — one set per RPC.
+// ---------------------------------------------------------------------
+
+message NewActorRequest {
+  string name = 1;
+  optional string dir = 2;
+  bool no_worktree = 3;
+  optional string base = 4;
+  optional string agent_name = 5;
+  ActorConfig config = 6;
+  optional string role_name = 7;
+}
+message NewActorResponse { Actor actor = 1; }
+
+message DiscardActorRequest {
+  string name = 1;
+  bool force = 2;
+}
+message DiscardActorResponse { DiscardResult result = 1; }
+
+message ConfigActorRequest {
+  string name = 1;
+  // Empty `pairs` = view; non-empty = set.
+  repeated string pairs = 2;
+}
+message ConfigActorResponse { ActorConfig config = 1; }
+
+message StartRunRequest {
+  string name = 1;
+  string prompt = 2;
+  ActorConfig config = 3;
+}
+message StartRunResponse { RunStartResult result = 1; }
+
+message WaitForRunRequest { int64 run_id = 1; }
+message WaitForRunResponse { RunResult result = 1; }
+
+message RunActorRequest {
+  string name = 1;
+  string prompt = 2;
+  ActorConfig config = 3;
+}
+message RunActorResponse { RunResult result = 1; }
+
+message StopActorRequest { string name = 1; }
+message StopActorResponse { StopResult result = 1; }
+
+message GetActorRequest { string name = 1; }
+message GetActorResponse { Actor actor = 1; }
+
+message ActorExistsRequest { string name = 1; }
+message ActorExistsResponse { bool exists = 1; }
+
+message ListActorsRequest {
+  optional string status_filter = 1;
+}
+message ListActorsResponse { repeated Actor actors = 1; }
+
+message ActorStatusRequest { string name = 1; }
+message ActorStatusResponse { Status status = 1; }
+
+message LatestRunRequest { string actor_name = 1; }
+message LatestRunResponse {
+  // Unset when there's no run yet.
+  optional Run run = 1;
+}
+
+message ShowActorRequest {
+  string name = 1;
+  int32 runs_limit = 2;
+}
+message ShowActorResponse { ActorDetail detail = 1; }
+
+message ListRunsRequest {
+  string actor_name = 1;
+  int32 limit = 2;
+}
+message ListRunsResponse {
+  repeated Run runs = 1;
+  int32 total = 2;
+}
+
+message GetRunRequest { int64 run_id = 1; }
+message GetRunResponse {
+  optional Run run = 1;
+}
+
+message GetLogsRequest { string actor_name = 1; }
+message GetLogsResponse { LogsResult result = 1; }
+
+message ListRolesRequest {}
+message ListRolesResponse {
+  // Map keyed by role name; values are full role records.
+  map<string, Role> roles = 1;
+}
+
+message PublishNotificationRequest {
+  Notification notification = 1;
+}
+message PublishNotificationResponse {}
+
+message SubscribeNotificationsRequest {}
+
+
+// ---------------------------------------------------------------------
+// Interactive session — bidirectional streaming.
+//
+// The client opens the stream, sends an OpenSession ClientFrame, then
+// streams stdin bytes / resize / signal. The daemon spawns the agent
+// in a PTY and streams stdout/stderr back. ExitInfo is the last
+// ServerFrame; the daemon then closes its half of the stream.
+//
+// On client cancel / disconnect, the daemon SIGTERMs the child and
+// finalizes the run row.
+// ---------------------------------------------------------------------
+
+message OpenSession {
+  string actor_name = 1;
+  optional uint32 cols = 2;
+  optional uint32 rows = 3;
+}
+
+message ResizeRequest {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
+message SignalRequest {
+  // POSIX signal number to forward (e.g. 2 for SIGINT).
+  int32 signal_number = 1;
+}
+
+message ClientFrame {
+  oneof kind {
+    OpenSession open = 1;
+    bytes stdin = 2;
+    ResizeRequest resize = 3;
+    SignalRequest signal = 4;
+  }
+}
+
+message ExitInfo {
+  int32 exit_code = 1;
+  Status final_status = 2;
+}
+
+message ServerFrame {
+  oneof kind {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    ExitInfo exit = 3;
+  }
+}
+
+
+// ---------------------------------------------------------------------
+// Service — every method clients call.
+// ---------------------------------------------------------------------
+
+service ActorService {
+  // -- Lifecycle --
+  rpc NewActor(NewActorRequest) returns (NewActorResponse);
+  rpc DiscardActor(DiscardActorRequest) returns (DiscardActorResponse);
+  rpc ConfigActor(ConfigActorRequest) returns (ConfigActorResponse);
+
+  // -- Run lifecycle --
+  rpc StartRun(StartRunRequest) returns (StartRunResponse);
+  rpc WaitForRun(WaitForRunRequest) returns (WaitForRunResponse);
+  rpc RunActor(RunActorRequest) returns (RunActorResponse);
+  rpc StopActor(StopActorRequest) returns (StopActorResponse);
+
+  // -- Discovery --
+  rpc GetActor(GetActorRequest) returns (GetActorResponse);
+  rpc ActorExists(ActorExistsRequest) returns (ActorExistsResponse);
+  rpc ListActors(ListActorsRequest) returns (ListActorsResponse);
+  rpc ActorStatus(ActorStatusRequest) returns (ActorStatusResponse);
+  rpc LatestRun(LatestRunRequest) returns (LatestRunResponse);
+  rpc ShowActor(ShowActorRequest) returns (ShowActorResponse);
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+  rpc GetRun(GetRunRequest) returns (GetRunResponse);
+  rpc GetLogs(GetLogsRequest) returns (GetLogsResponse);
+  rpc ListRoles(ListRolesRequest) returns (ListRolesResponse);
+
+  // -- Notifications --
+  rpc PublishNotification(PublishNotificationRequest) returns (PublishNotificationResponse);
+  rpc SubscribeNotifications(SubscribeNotificationsRequest) returns (stream Notification);
+
+  // -- Interactive (bidirectional streaming) --
+  rpc InteractiveSession(stream ClientFrame) returns (stream ServerFrame);
+}

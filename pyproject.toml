@@ -17,7 +17,8 @@ dependencies = [
     "mcp>=1.0",
     "pyte>=0.8.1",
     "textual>=1.0",
-    "websockets>=13.0",
+    "grpclib>=0.4.7",
+    "betterproto>=2.0.0b7",
 ]
 keywords = ["cli", "agents", "coding", "parallel", "worktree"]
 classifiers = [
@@ -53,3 +54,11 @@ tag_regex = '^v(?P<version>\d+\.\d+\.\d+.*)$'
 packages = ["src/actor"]
 # Non-Python files inside the package tree (e.g. the bundled skill .md files
 # at src/actor/_skill/*.md) ship automatically with the package.
+
+[dependency-groups]
+# `betterproto[compiler]` brings in the protoc plugin used by the
+# codegen step (regenerate via `make proto`). Keep it dev-only so
+# end-users don't pull in jinja2.
+dev = [
+    "betterproto[compiler]>=2.0.0b7",
+]
