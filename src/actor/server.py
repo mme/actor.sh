@@ -334,7 +334,7 @@ def _spawn_background_run(
         # connections opened with `check_same_thread=False` are still
         # cheaper to keep one-per-task than to add cross-task locking.
         svc = _service()
-        cancel = svc.subscribe_notifications(_dispatch_notification)
+        cancel = await svc.subscribe_notifications(_dispatch_notification)
         try:
             try:
                 await svc.run_actor(name=name, prompt=prompt, config=cli_overrides)

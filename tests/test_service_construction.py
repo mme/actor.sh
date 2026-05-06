@@ -57,7 +57,7 @@ class ConstructAndInvokeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         seen: list[Notification] = []
-        cancel = svc.subscribe_notifications(seen.append)
+        cancel = await svc.subscribe_notifications(seen.append)
         try:
             result = await svc.run_actor("beta", prompt="go", config=ActorConfig())
         finally:
@@ -73,7 +73,7 @@ class ConstructAndInvokeTests(unittest.IsolatedAsyncioTestCase):
     async def test_subscribe_notifications_returns_cancel(self):
         svc = self._service()
         events: list[Notification] = []
-        cancel = svc.subscribe_notifications(events.append)
+        cancel = await svc.subscribe_notifications(events.append)
         # Cancel before publishing — handler must not fire.
         cancel()
         await svc.publish_notification(Notification(actor="x", event="run_completed"))
@@ -86,8 +86,8 @@ class ConstructAndInvokeTests(unittest.IsolatedAsyncioTestCase):
         def bad(_n):
             raise RuntimeError("boom")
 
-        svc.subscribe_notifications(bad)
-        svc.subscribe_notifications(ok_calls.append)
+        await svc.subscribe_notifications(bad)
+        await svc.subscribe_notifications(ok_calls.append)
         await svc.publish_notification(Notification(actor="x", event="run_completed"))
         self.assertEqual(len(ok_calls), 1)
 

@@ -302,7 +302,7 @@ class ActorService(abc.ABC):
     async def publish_notification(self, n: Notification) -> None: ...
 
     @abc.abstractmethod
-    def subscribe_notifications(
+    async def subscribe_notifications(
         self, handler: NotificationHandler,
     ) -> Cancel: ...
 
@@ -1332,7 +1332,7 @@ class LocalActorService(ActorService):
                     file=sys.stderr,
                 )
 
-    def subscribe_notifications(
+    async def subscribe_notifications(
         self, handler: NotificationHandler,
     ) -> Cancel:
         self._handlers.append(handler)
@@ -1494,7 +1494,7 @@ class RemoteActorService(ActorService):
             "publish_notification not yet migrated; see #35 phase 2"
         )
 
-    def subscribe_notifications(self, *args, **kwargs) -> Cancel:
+    async def subscribe_notifications(self, *args, **kwargs) -> Cancel:
         raise NotImplementedError(
             "subscribe_notifications not yet migrated; see #35 phase 2"
         )
