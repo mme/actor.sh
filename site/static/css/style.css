@@ -243,8 +243,9 @@ html[data-nav-open="true"] .nav-backdrop {
   text-transform: uppercase;
   letter-spacing: 0.2em;
   color: var(--fg-muted);
-  padding: 0 1.5rem;
+  padding: 0 1.5rem 0.75rem;
   margin: 0 0 0.5rem;
+  border-bottom: 1px solid var(--border);
 }
 
 .nav-list {
