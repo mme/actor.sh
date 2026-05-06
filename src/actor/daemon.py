@@ -1,304 +1,54 @@
 """actord — daemon process for the actor wire (issue #35).
 
 Runs one `LocalActorService` for the daemon's lifetime and serves
-JSON-RPC 2.0 over WebSockets-on-unix-socket. Phase 2 routes the full
-ActorService surface (except interactive/PTY paths, which stay
-local-only — see service.py and cli.py for the split rationale).
+gRPC over a unix socket (`grpclib` + `betterproto`). Phase 2.5 routes
+the full ActorService surface, including interactive sessions:
+`InteractiveSession` is bidirectional streaming so the daemon can
+spawn the agent in a PTY and stream stdout/stderr back to the client
+while the client streams stdin / resize / signal forward.
 
-The MCP wire (Claude Code ↔ `actor mcp`) is independent and lives
-in `server.py` — `actord` does not import the MCP SDK.
+The MCP wire (Claude Code ↔ `actor mcp`) is independent and lives in
+`server.py` — `actord` does not import the MCP SDK.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import logging
 import os
+import pty
 import signal
-import socket
+import socket as _socket
+import struct
 import sys
+import termios
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Optional, Set
+from typing import AsyncIterator, Awaitable, Callable, Dict, Optional, Set
 
-from websockets.asyncio.server import ServerConnection, unix_serve
+from grpclib.const import Status as GrpcStatus
+from grpclib.exceptions import GRPCError
+from grpclib.server import Server, Stream
 
+from . import wire
+from ._proto.actor import v1 as pb
 from .db import Database
-from .errors import ActorError, ConfigError
+from .errors import ActorError, ConfigError, NotFoundError
 from .git import RealGit
+from .interfaces import binary_exists
 from .process import RealProcessManager
-from .protocol import (
-    APPLICATION_ERROR,
-    INTERNAL_ERROR,
-    INVALID_PARAMS,
-    INVALID_REQUEST,
-    METHOD_NOT_FOUND,
-    JSONRPCError,
-    JSONRPCNotification,
-    JSONRPCRequest,
-    JSONRPCResponse,
-    ProtocolError,
-    actor_config_from_dict,
-    actor_to_dict,
-    decode_message,
-    encode_error,
-    encode_notification,
-    encode_response,
-    error_to_wire,
-    log_entry_to_dict,
-    notification_to_dict,
-    parse_transport_uri,
-    role_to_dict,
-    run_to_dict,
-)
 from .service import (
     ActorService,
+    INTERACTIVE_PROMPT,
     LocalActorService,
     Notification,
     _app_config_override,
     _caller_actor_name,
     create_agent,
 )
-from .types import ActorConfig
+from .types import ActorConfig, AgentKind, Status, _now_iso
 
 log = logging.getLogger("actor.daemon")
-
-
-# ---------------------------------------------------------------------------
-# Method dispatch
-# ---------------------------------------------------------------------------
-
-
-Dispatcher = Callable[[ActorService, Dict[str, Any]], Awaitable[Any]]
-
-
-def _opt_str(params: Dict[str, Any], key: str) -> Optional[str]:
-    v = params.get(key)
-    if v is None:
-        return None
-    if not isinstance(v, str):
-        raise TypeError(f"parameter {key!r} must be a string")
-    return v
-
-
-def _req_str(params: Dict[str, Any], key: str) -> str:
-    v = params.get(key)
-    if not isinstance(v, str):
-        raise TypeError(f"parameter {key!r} must be a string")
-    return v
-
-
-def _req_int(params: Dict[str, Any], key: str) -> int:
-    v = params.get(key)
-    if not isinstance(v, int) or isinstance(v, bool):
-        raise TypeError(f"parameter {key!r} must be an integer")
-    return v
-
-
-def _req_config(params: Dict[str, Any], key: str = "config") -> ActorConfig:
-    raw = params.get(key)
-    if raw is None:
-        return ActorConfig()
-    if not isinstance(raw, dict):
-        raise TypeError(f"parameter {key!r} must be an object")
-    return actor_config_from_dict(raw)
-
-
-# -- Lifecycle --------------------------------------------------------------
-
-
-async def _new_actor(service: ActorService, params: Dict[str, Any]) -> Any:
-    actor = await service.new_actor(
-        name=_req_str(params, "name"),
-        dir=_opt_str(params, "dir"),
-        no_worktree=bool(params.get("no_worktree", False)),
-        base=_opt_str(params, "base"),
-        agent_name=_opt_str(params, "agent_name"),
-        config=_req_config(params),
-        role_name=_opt_str(params, "role_name"),
-    )
-    return actor_to_dict(actor)
-
-
-async def _discard_actor(service: ActorService, params: Dict[str, Any]) -> Any:
-    result = await service.discard_actor(
-        name=_req_str(params, "name"),
-        force=bool(params.get("force", False)),
-    )
-    return {"names": list(result.names)}
-
-
-async def _config_actor(service: ActorService, params: Dict[str, Any]) -> Any:
-    pairs = params.get("pairs")
-    if pairs is not None and not isinstance(pairs, list):
-        raise TypeError("parameter 'pairs' must be a list of strings")
-    cfg = await service.config_actor(
-        name=_req_str(params, "name"),
-        pairs=list(pairs) if pairs else None,
-    )
-    return {
-        "actor_keys": dict(cfg.actor_keys),
-        "agent_args": dict(cfg.agent_args),
-    }
-
-
-# -- Run lifecycle ----------------------------------------------------------
-
-
-async def _start_run(service: ActorService, params: Dict[str, Any]) -> Any:
-    handle = await service.start_run(
-        name=_req_str(params, "name"),
-        prompt=_req_str(params, "prompt"),
-        config=_req_config(params),
-    )
-    return {
-        "run_id": handle.run_id,
-        "pid": handle.pid,
-        "status": handle.status.value,
-    }
-
-
-async def _wait_for_run(service: ActorService, params: Dict[str, Any]) -> Any:
-    result = await service.wait_for_run(_req_int(params, "run_id"))
-    return {
-        "run_id": result.run_id,
-        "actor": result.actor,
-        "status": result.status.value,
-        "exit_code": result.exit_code,
-        "output": result.output,
-    }
-
-
-async def _run_actor(service: ActorService, params: Dict[str, Any]) -> Any:
-    result = await service.run_actor(
-        name=_req_str(params, "name"),
-        prompt=_req_str(params, "prompt"),
-        config=_req_config(params),
-    )
-    return {
-        "run_id": result.run_id,
-        "actor": result.actor,
-        "status": result.status.value,
-        "exit_code": result.exit_code,
-        "output": result.output,
-    }
-
-
-async def _stop_actor(service: ActorService, params: Dict[str, Any]) -> Any:
-    result = await service.stop_actor(name=_req_str(params, "name"))
-    return {"name": result.name, "was_alive": result.was_alive}
-
-
-# -- Discovery --------------------------------------------------------------
-
-
-async def _get_actor(service: ActorService, params: Dict[str, Any]) -> Any:
-    return actor_to_dict(await service.get_actor(_req_str(params, "name")))
-
-
-async def _actor_exists(service: ActorService, params: Dict[str, Any]) -> Any:
-    return await service.actor_exists(_req_str(params, "name"))
-
-
-async def _list_actors(service: ActorService, params: Dict[str, Any]) -> Any:
-    actors = await service.list_actors(status_filter=_opt_str(params, "status_filter"))
-    return [actor_to_dict(a) for a in actors]
-
-
-async def _actor_status(service: ActorService, params: Dict[str, Any]) -> Any:
-    status = await service.actor_status(_req_str(params, "name"))
-    return status.value
-
-
-async def _latest_run(service: ActorService, params: Dict[str, Any]) -> Any:
-    run = await service.latest_run(_req_str(params, "actor_name"))
-    return run_to_dict(run) if run is not None else None
-
-
-async def _show_actor(service: ActorService, params: Dict[str, Any]) -> Any:
-    runs_limit = params.get("runs_limit", 5)
-    if not isinstance(runs_limit, int) or isinstance(runs_limit, bool):
-        raise TypeError("parameter 'runs_limit' must be an integer")
-    detail = await service.show_actor(
-        name=_req_str(params, "name"),
-        runs_limit=runs_limit,
-    )
-    return {
-        "actor": actor_to_dict(detail.actor),
-        "status": detail.status.value,
-        "runs": [run_to_dict(r) for r in detail.runs],
-        "total_runs": detail.total_runs,
-        "runs_limit": detail.runs_limit,
-    }
-
-
-async def _list_runs(service: ActorService, params: Dict[str, Any]) -> Any:
-    runs, total = await service.list_runs(
-        actor_name=_req_str(params, "actor_name"),
-        limit=_req_int(params, "limit"),
-    )
-    return {
-        "runs": [run_to_dict(r) for r in runs],
-        "total": total,
-    }
-
-
-async def _get_run(service: ActorService, params: Dict[str, Any]) -> Any:
-    run = await service.get_run(_req_int(params, "run_id"))
-    return run_to_dict(run) if run is not None else None
-
-
-async def _get_logs(service: ActorService, params: Dict[str, Any]) -> Any:
-    result = await service.get_logs(_req_str(params, "actor_name"))
-    return {
-        "session_id": result.session_id,
-        "entries": [log_entry_to_dict(e) for e in result.entries],
-    }
-
-
-async def _list_roles(service: ActorService, params: Dict[str, Any]) -> Any:
-    roles = await service.list_roles()
-    return {name: role_to_dict(role) for name, role in roles.items()}
-
-
-# -- Notifications ----------------------------------------------------------
-
-
-async def _publish_notification(service: ActorService, params: Dict[str, Any]) -> Any:
-    raw = params.get("notification")
-    if not isinstance(raw, dict):
-        raise TypeError("parameter 'notification' must be an object")
-    from .protocol import notification_from_dict
-    await service.publish_notification(notification_from_dict(raw))
-    return None
-
-
-# `subscribe_notifications` is the one method that does NOT go through
-# this table — it needs the raw connection to push notifications back.
-# The handler intercepts it; see _handle below.
-METHODS: Dict[str, Dispatcher] = {
-    "new_actor": _new_actor,
-    "discard_actor": _discard_actor,
-    "config_actor": _config_actor,
-    "start_run": _start_run,
-    "wait_for_run": _wait_for_run,
-    "run_actor": _run_actor,
-    "stop_actor": _stop_actor,
-    "get_actor": _get_actor,
-    "actor_exists": _actor_exists,
-    "list_actors": _list_actors,
-    "actor_status": _actor_status,
-    "latest_run": _latest_run,
-    "show_actor": _show_actor,
-    "list_runs": _list_runs,
-    "get_run": _get_run,
-    "get_logs": _get_logs,
-    "list_roles": _list_roles,
-    "publish_notification": _publish_notification,
-}
-
-# Subscription is method-name-only here; handled inline.
-SUBSCRIBE_METHOD = "subscribe_notifications"
-NOTIFICATION_METHOD = "channel.notification"
 
 
 # ---------------------------------------------------------------------------
@@ -307,44 +57,592 @@ NOTIFICATION_METHOD = "channel.notification"
 
 
 class _SubscriberRegistry:
-    """Per-daemon set of WebSocket connections that have asked to
-    receive `Notification` events. Each connection registers exactly
-    once via the `subscribe_notifications` request; closing the
-    connection (or sending the same method a second time as an
-    unsubscribe — rejected for now) removes it.
-
-    Notifications are sent as JSON-RPC notifications (no `id`) on the
-    method `channel.notification` with the serialized `Notification`
-    dict in `params`.
-    """
+    """In-memory set of `asyncio.Queue[Notification]` instances, one
+    per active `SubscribeNotifications` stream. Each per-call handler
+    pushes onto a fresh queue while it's running and pops itself off
+    when the stream ends. The daemon-side `LocalActorService` is
+    subscribed once at startup; `fan_out` snapshots the queue list
+    and pushes the notification to every subscriber."""
 
     def __init__(self) -> None:
-        self._subscribers: Set[ServerConnection] = set()
+        self._queues: Set[asyncio.Queue[Notification]] = set()
 
-    def add(self, ws: ServerConnection) -> None:
-        self._subscribers.add(ws)
+    def add(self, q: asyncio.Queue[Notification]) -> None:
+        self._queues.add(q)
 
-    def remove(self, ws: ServerConnection) -> None:
-        self._subscribers.discard(ws)
+    def remove(self, q: asyncio.Queue[Notification]) -> None:
+        self._queues.discard(q)
 
     async def fan_out(self, n: Notification) -> None:
-        if not self._subscribers:
-            return
-        frame = encode_notification(JSONRPCNotification(
-            method=NOTIFICATION_METHOD,
-            params=notification_to_dict(n),
-        ))
-        # Snapshot — a slow subscriber that fails mid-send shouldn't
-        # block the others.
-        dead: list[ServerConnection] = []
-        for ws in list(self._subscribers):
+        for q in list(self._queues):
             try:
-                await ws.send(frame)
+                q.put_nowait(n)
+            except asyncio.QueueFull:
+                # Drop on overflow rather than block the publisher.
+                # The pre-Phase-2.5 design didn't have a queue depth
+                # cap — keep this loud so we notice if it ever fires.
+                log.warning("subscriber queue full; dropping notification")
+
+
+# ---------------------------------------------------------------------------
+# Per-call context binding
+# ---------------------------------------------------------------------------
+
+
+class _CallContext:
+    """Sets `_app_config_override` + `_caller_actor_name` from the
+    incoming gRPC metadata for the duration of the call. Use as a
+    context manager — restores the contextvars on exit."""
+
+    def __init__(self, metadata: Optional[dict]) -> None:
+        self.metadata = metadata or {}
+        self._cfg_token = None
+        self._name_token = None
+
+    def __enter__(self) -> "_CallContext":
+        cwd = self.metadata.get(wire.META_CALLER_CWD)
+        if cwd:
+            try:
+                from .config import load_config
+                cfg = load_config(cwd=Path(cwd))
+                self._cfg_token = _app_config_override.set(cfg)
             except Exception as e:
-                log.warning("subscriber send failed; dropping: %s", e)
-                dead.append(ws)
-        for ws in dead:
-            self._subscribers.discard(ws)
+                log.warning(
+                    "failed to load AppConfig from caller cwd=%s: %s", cwd, e,
+                )
+        caller_name = self.metadata.get(wire.META_CALLER_ACTOR_NAME)
+        if caller_name:
+            self._name_token = _caller_actor_name.set(caller_name)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._cfg_token is not None:
+            _app_config_override.reset(self._cfg_token)
+        if self._name_token is not None:
+            _caller_actor_name.reset(self._name_token)
+
+
+def _trailing_error_metadata(exc: BaseException) -> Dict[str, str]:
+    """Trailing metadata to attach to a GRPCError so the client can
+    recover the original ActorError subclass."""
+    return {wire.META_ERROR_TYPE: type(exc).__name__}
+
+
+# ---------------------------------------------------------------------------
+# Service implementation
+# ---------------------------------------------------------------------------
+
+
+class ActorServiceServicer(pb.ActorServiceBase):
+    """Glue between gRPC handlers and the in-process
+    `LocalActorService`. Each unary handler:
+
+    1. Reads the request off the stream.
+    2. Binds caller metadata into contextvars (`_CallContext`).
+    3. Awaits `LocalActorService.<method>(...)`.
+    4. Sends the matching protobuf response.
+
+    Streaming methods (`subscribe_notifications`, `interactive_session`)
+    keep the stream open and drive their own loops.
+
+    `ActorError` subclasses bubble out as `GRPCError` (status code per
+    `wire._STATUS_BY_TYPE`) plus a trailing-metadata header naming the
+    original class so the client can re-raise the same type.
+
+    We override `__mapping__` from the betterproto-generated
+    `ActorServiceBase` so each handler receives the raw `Stream`
+    object and can read `stream.metadata`. The default generated
+    dispatchers hide the metadata from the user code.
+    """
+
+    def __init__(
+        self,
+        service: LocalActorService,
+        subscribers: _SubscriberRegistry,
+    ) -> None:
+        self._service = service
+        self._subs = subscribers
+
+    # -- unary handlers (each receives a raw Stream) ------------------
+
+    async def _new_actor(self, stream: Stream) -> None:
+        await _unary(stream, pb.NewActorRequest, self._do_new_actor)
+
+    async def _do_new_actor(self, req: pb.NewActorRequest) -> pb.NewActorResponse:
+        actor = await self._service.new_actor(
+            name=req.name, dir=req.dir, no_worktree=req.no_worktree,
+            base=req.base, agent_name=req.agent_name,
+            config=wire.actor_config_from_pb(req.config),
+            role_name=req.role_name,
+        )
+        return pb.NewActorResponse(actor=wire.actor_to_pb(actor))
+
+    async def _discard_actor(self, stream: Stream) -> None:
+        await _unary(stream, pb.DiscardActorRequest, self._do_discard_actor)
+
+    async def _do_discard_actor(self, req: pb.DiscardActorRequest) -> pb.DiscardActorResponse:
+        result = await self._service.discard_actor(name=req.name, force=req.force)
+        return pb.DiscardActorResponse(result=wire.discard_result_to_pb(result))
+
+    async def _config_actor(self, stream: Stream) -> None:
+        await _unary(stream, pb.ConfigActorRequest, self._do_config_actor)
+
+    async def _do_config_actor(self, req: pb.ConfigActorRequest) -> pb.ConfigActorResponse:
+        cfg = await self._service.config_actor(
+            name=req.name,
+            pairs=list(req.pairs) if req.pairs else None,
+        )
+        return pb.ConfigActorResponse(config=wire.actor_config_to_pb(cfg))
+
+    async def _start_run(self, stream: Stream) -> None:
+        await _unary(stream, pb.StartRunRequest, self._do_start_run)
+
+    async def _do_start_run(self, req: pb.StartRunRequest) -> pb.StartRunResponse:
+        result = await self._service.start_run(
+            name=req.name, prompt=req.prompt,
+            config=wire.actor_config_from_pb(req.config),
+        )
+        return pb.StartRunResponse(result=wire.run_start_result_to_pb(result))
+
+    async def _wait_for_run(self, stream: Stream) -> None:
+        await _unary(stream, pb.WaitForRunRequest, self._do_wait_for_run)
+
+    async def _do_wait_for_run(self, req: pb.WaitForRunRequest) -> pb.WaitForRunResponse:
+        result = await self._service.wait_for_run(req.run_id)
+        return pb.WaitForRunResponse(result=wire.run_result_to_pb(result))
+
+    async def _run_actor(self, stream: Stream) -> None:
+        await _unary(stream, pb.RunActorRequest, self._do_run_actor)
+
+    async def _do_run_actor(self, req: pb.RunActorRequest) -> pb.RunActorResponse:
+        result = await self._service.run_actor(
+            name=req.name, prompt=req.prompt,
+            config=wire.actor_config_from_pb(req.config),
+        )
+        return pb.RunActorResponse(result=wire.run_result_to_pb(result))
+
+    async def _stop_actor(self, stream: Stream) -> None:
+        await _unary(stream, pb.StopActorRequest, self._do_stop_actor)
+
+    async def _do_stop_actor(self, req: pb.StopActorRequest) -> pb.StopActorResponse:
+        result = await self._service.stop_actor(name=req.name)
+        return pb.StopActorResponse(result=wire.stop_result_to_pb(result))
+
+    async def _get_actor(self, stream: Stream) -> None:
+        await _unary(stream, pb.GetActorRequest, self._do_get_actor)
+
+    async def _do_get_actor(self, req: pb.GetActorRequest) -> pb.GetActorResponse:
+        actor = await self._service.get_actor(req.name)
+        return pb.GetActorResponse(actor=wire.actor_to_pb(actor))
+
+    async def _actor_exists(self, stream: Stream) -> None:
+        await _unary(stream, pb.ActorExistsRequest, self._do_actor_exists)
+
+    async def _do_actor_exists(self, req: pb.ActorExistsRequest) -> pb.ActorExistsResponse:
+        exists = await self._service.actor_exists(req.name)
+        return pb.ActorExistsResponse(exists=exists)
+
+    async def _list_actors(self, stream: Stream) -> None:
+        await _unary(stream, pb.ListActorsRequest, self._do_list_actors)
+
+    async def _do_list_actors(self, req: pb.ListActorsRequest) -> pb.ListActorsResponse:
+        actors = await self._service.list_actors(status_filter=req.status_filter)
+        return pb.ListActorsResponse(
+            actors=[wire.actor_to_pb(a) for a in actors],
+        )
+
+    async def _actor_status(self, stream: Stream) -> None:
+        await _unary(stream, pb.ActorStatusRequest, self._do_actor_status)
+
+    async def _do_actor_status(self, req: pb.ActorStatusRequest) -> pb.ActorStatusResponse:
+        status = await self._service.actor_status(req.name)
+        return pb.ActorStatusResponse(status=wire.status_to_pb(status))
+
+    async def _latest_run(self, stream: Stream) -> None:
+        await _unary(stream, pb.LatestRunRequest, self._do_latest_run)
+
+    async def _do_latest_run(self, req: pb.LatestRunRequest) -> pb.LatestRunResponse:
+        run = await self._service.latest_run(req.actor_name)
+        return pb.LatestRunResponse(
+            run=wire.run_to_pb(run) if run is not None else None,
+        )
+
+    async def _show_actor(self, stream: Stream) -> None:
+        await _unary(stream, pb.ShowActorRequest, self._do_show_actor)
+
+    async def _do_show_actor(self, req: pb.ShowActorRequest) -> pb.ShowActorResponse:
+        detail = await self._service.show_actor(
+            name=req.name, runs_limit=req.runs_limit,
+        )
+        return pb.ShowActorResponse(detail=wire.actor_detail_to_pb(detail))
+
+    async def _list_runs(self, stream: Stream) -> None:
+        await _unary(stream, pb.ListRunsRequest, self._do_list_runs)
+
+    async def _do_list_runs(self, req: pb.ListRunsRequest) -> pb.ListRunsResponse:
+        runs, total = await self._service.list_runs(
+            actor_name=req.actor_name, limit=req.limit,
+        )
+        return pb.ListRunsResponse(
+            runs=[wire.run_to_pb(r) for r in runs], total=total,
+        )
+
+    async def _get_run(self, stream: Stream) -> None:
+        await _unary(stream, pb.GetRunRequest, self._do_get_run)
+
+    async def _do_get_run(self, req: pb.GetRunRequest) -> pb.GetRunResponse:
+        run = await self._service.get_run(req.run_id)
+        return pb.GetRunResponse(
+            run=wire.run_to_pb(run) if run is not None else None,
+        )
+
+    async def _get_logs(self, stream: Stream) -> None:
+        await _unary(stream, pb.GetLogsRequest, self._do_get_logs)
+
+    async def _do_get_logs(self, req: pb.GetLogsRequest) -> pb.GetLogsResponse:
+        result = await self._service.get_logs(req.actor_name)
+        return pb.GetLogsResponse(result=wire.logs_result_to_pb(result))
+
+    async def _list_roles(self, stream: Stream) -> None:
+        await _unary(stream, pb.ListRolesRequest, self._do_list_roles)
+
+    async def _do_list_roles(self, req: pb.ListRolesRequest) -> pb.ListRolesResponse:
+        roles = await self._service.list_roles()
+        return pb.ListRolesResponse(
+            roles={name: wire.role_to_pb(r) for name, r in roles.items()},
+        )
+
+    async def _publish_notification(self, stream: Stream) -> None:
+        await _unary(stream, pb.PublishNotificationRequest, self._do_publish_notification)
+
+    async def _do_publish_notification(
+        self, req: pb.PublishNotificationRequest,
+    ) -> pb.PublishNotificationResponse:
+        await self._service.publish_notification(
+            wire.notification_from_pb(req.notification),
+        )
+        return pb.PublishNotificationResponse()
+
+    # -- streaming handlers -------------------------------------------
+
+    async def _subscribe_notifications(self, stream: Stream) -> None:
+        request = await stream.recv_message()
+        assert request is not None
+        with _CallContext(stream.metadata):
+            queue: asyncio.Queue[Notification] = asyncio.Queue(maxsize=256)
+            self._subs.add(queue)
+            try:
+                while True:
+                    n = await queue.get()
+                    await stream.send_message(wire.notification_to_pb(n))
+            except asyncio.CancelledError:
+                raise
+            finally:
+                self._subs.remove(queue)
+
+    async def _interactive_session(self, stream: Stream) -> None:
+        with _CallContext(stream.metadata):
+            try:
+                await _run_interactive(self._service, stream)
+            except GRPCError:
+                raise
+            except ActorError as exc:
+                raise wire.actor_error_to_grpc(exc)
+            except Exception as exc:
+                log.exception("interactive_session failed")
+                raise wire.actor_error_to_grpc(exc)
+
+    # -- mapping override ---------------------------------------------
+
+    def __mapping__(self):
+        # Bypass the betterproto-generated request-only handlers; we
+        # need the raw `Stream` to read incoming metadata.
+        from grpclib import const as _const
+        return {
+            "/actor.v1.ActorService/NewActor": _const.Handler(
+                self._new_actor, _const.Cardinality.UNARY_UNARY,
+                pb.NewActorRequest, pb.NewActorResponse,
+            ),
+            "/actor.v1.ActorService/DiscardActor": _const.Handler(
+                self._discard_actor, _const.Cardinality.UNARY_UNARY,
+                pb.DiscardActorRequest, pb.DiscardActorResponse,
+            ),
+            "/actor.v1.ActorService/ConfigActor": _const.Handler(
+                self._config_actor, _const.Cardinality.UNARY_UNARY,
+                pb.ConfigActorRequest, pb.ConfigActorResponse,
+            ),
+            "/actor.v1.ActorService/StartRun": _const.Handler(
+                self._start_run, _const.Cardinality.UNARY_UNARY,
+                pb.StartRunRequest, pb.StartRunResponse,
+            ),
+            "/actor.v1.ActorService/WaitForRun": _const.Handler(
+                self._wait_for_run, _const.Cardinality.UNARY_UNARY,
+                pb.WaitForRunRequest, pb.WaitForRunResponse,
+            ),
+            "/actor.v1.ActorService/RunActor": _const.Handler(
+                self._run_actor, _const.Cardinality.UNARY_UNARY,
+                pb.RunActorRequest, pb.RunActorResponse,
+            ),
+            "/actor.v1.ActorService/StopActor": _const.Handler(
+                self._stop_actor, _const.Cardinality.UNARY_UNARY,
+                pb.StopActorRequest, pb.StopActorResponse,
+            ),
+            "/actor.v1.ActorService/GetActor": _const.Handler(
+                self._get_actor, _const.Cardinality.UNARY_UNARY,
+                pb.GetActorRequest, pb.GetActorResponse,
+            ),
+            "/actor.v1.ActorService/ActorExists": _const.Handler(
+                self._actor_exists, _const.Cardinality.UNARY_UNARY,
+                pb.ActorExistsRequest, pb.ActorExistsResponse,
+            ),
+            "/actor.v1.ActorService/ListActors": _const.Handler(
+                self._list_actors, _const.Cardinality.UNARY_UNARY,
+                pb.ListActorsRequest, pb.ListActorsResponse,
+            ),
+            "/actor.v1.ActorService/ActorStatus": _const.Handler(
+                self._actor_status, _const.Cardinality.UNARY_UNARY,
+                pb.ActorStatusRequest, pb.ActorStatusResponse,
+            ),
+            "/actor.v1.ActorService/LatestRun": _const.Handler(
+                self._latest_run, _const.Cardinality.UNARY_UNARY,
+                pb.LatestRunRequest, pb.LatestRunResponse,
+            ),
+            "/actor.v1.ActorService/ShowActor": _const.Handler(
+                self._show_actor, _const.Cardinality.UNARY_UNARY,
+                pb.ShowActorRequest, pb.ShowActorResponse,
+            ),
+            "/actor.v1.ActorService/ListRuns": _const.Handler(
+                self._list_runs, _const.Cardinality.UNARY_UNARY,
+                pb.ListRunsRequest, pb.ListRunsResponse,
+            ),
+            "/actor.v1.ActorService/GetRun": _const.Handler(
+                self._get_run, _const.Cardinality.UNARY_UNARY,
+                pb.GetRunRequest, pb.GetRunResponse,
+            ),
+            "/actor.v1.ActorService/GetLogs": _const.Handler(
+                self._get_logs, _const.Cardinality.UNARY_UNARY,
+                pb.GetLogsRequest, pb.GetLogsResponse,
+            ),
+            "/actor.v1.ActorService/ListRoles": _const.Handler(
+                self._list_roles, _const.Cardinality.UNARY_UNARY,
+                pb.ListRolesRequest, pb.ListRolesResponse,
+            ),
+            "/actor.v1.ActorService/PublishNotification": _const.Handler(
+                self._publish_notification, _const.Cardinality.UNARY_UNARY,
+                pb.PublishNotificationRequest, pb.PublishNotificationResponse,
+            ),
+            "/actor.v1.ActorService/SubscribeNotifications": _const.Handler(
+                self._subscribe_notifications, _const.Cardinality.UNARY_STREAM,
+                pb.SubscribeNotificationsRequest, pb.Notification,
+            ),
+            "/actor.v1.ActorService/InteractiveSession": _const.Handler(
+                self._interactive_session, _const.Cardinality.STREAM_STREAM,
+                pb.ClientFrame, pb.ServerFrame,
+            ),
+        }
+
+
+async def _unary(
+    stream: Stream,
+    request_type: type,
+    body: Callable[[Any], Awaitable[Any]],
+) -> None:
+    """Common boilerplate for the 18 unary methods: read the
+    request, bind context, dispatch, translate exceptions to
+    `GRPCError` + trailing metadata."""
+    request = await stream.recv_message()
+    assert request is not None
+    with _CallContext(stream.metadata):
+        try:
+            response = await body(request)
+            await stream.send_message(response)
+        except GRPCError:
+            raise
+        except ActorError as exc:
+            err = wire.actor_error_to_grpc(exc)
+            raise GRPCError(err.status, err.message, _trailing_error_metadata(exc))
+        except TypeError as exc:
+            raise GRPCError(GrpcStatus.INVALID_ARGUMENT, str(exc))
+        except Exception as exc:
+            log.exception("unary handler raised")
+            err = wire.actor_error_to_grpc(exc)
+            raise GRPCError(err.status, err.message, _trailing_error_metadata(exc))
+
+
+# ---------------------------------------------------------------------------
+# Interactive session
+# ---------------------------------------------------------------------------
+
+
+async def _run_interactive(
+    service: LocalActorService,
+    stream: "Stream",
+) -> None:
+    """Bidi-streaming InteractiveSession handler.
+
+    Wire shape:
+      1. Client sends one ClientFrame{open=OpenSession{actor_name, cols, rows}}.
+      2. Daemon spawns the agent in a PTY, streams stdout/stderr as
+         ServerFrames, accepts further ClientFrames for stdin / resize
+         / signal until the child exits or the client cancels.
+      3. Daemon sends a final ServerFrame{exit=ExitInfo{exit_code}} and
+         finalizes the run row.
+
+    The PTY master fd lives in this handler; if the client cancels
+    (HTTP/2 RST_STREAM), the surrounding `recv_loop` task gets
+    cancelled, which flows down to `_finalize_session` — SIGTERM the
+    child, close the PTY, mark the run STOPPED.
+    """
+    # 1. Open
+    first = await stream.recv_message()
+    if first is None or first.open is None:
+        raise GRPCError(
+            GrpcStatus.INVALID_ARGUMENT,
+            "first ClientFrame must carry an OpenSession",
+        )
+    open_msg: pb.OpenSession = first.open
+    actor_name = open_msg.actor_name
+    cols = open_msg.cols or 80
+    rows = open_msg.rows or 24
+
+    # 2. Reserve the run row + agent argv via the standard service path.
+    handle = await service.start_interactive_run(actor_name)
+
+    # 3. Spawn the agent in a PTY.
+    master_fd, slave_fd = pty.openpty()
+    _set_winsize(master_fd, rows, cols)
+
+    pid = os.fork()
+    if pid == 0:  # child
+        try:
+            os.setsid()
+            try:
+                fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+            except OSError:
+                pass
+            os.dup2(slave_fd, 0)
+            os.dup2(slave_fd, 1)
+            os.dup2(slave_fd, 2)
+            if slave_fd > 2:
+                os.close(slave_fd)
+            os.close(master_fd)
+            env = dict(os.environ)
+            env["ACTOR_NAME"] = actor_name
+            os.chdir(handle.dir)
+            os.execvpe(handle.argv[0], handle.argv, env)
+        except Exception:
+            os._exit(127)
+
+    os.close(slave_fd)
+    await service.update_interactive_run_pid(handle.run_id, pid)
+
+    loop = asyncio.get_running_loop()
+    stdout_q: asyncio.Queue[Optional[bytes]] = asyncio.Queue(maxsize=256)
+
+    def _on_master_readable() -> None:
+        try:
+            data = os.read(master_fd, 4096)
+        except OSError:
+            data = b""
+        if not data:
+            loop.remove_reader(master_fd)
+            stdout_q.put_nowait(None)
+            return
+        stdout_q.put_nowait(data)
+
+    loop.add_reader(master_fd, _on_master_readable)
+
+    async def _writer() -> None:
+        """Pull stdout chunks off the queue and forward as ServerFrames."""
+        while True:
+            chunk = await stdout_q.get()
+            if chunk is None:
+                return
+            await stream.send_message(pb.ServerFrame(stdout=chunk))
+
+    async def _reader() -> None:
+        """Read ClientFrames; forward stdin / resize / signal to the
+        child until the client closes the stream or sends a signal
+        that ends the session."""
+        while True:
+            try:
+                frame: Optional[pb.ClientFrame] = await stream.recv_message()
+            except Exception:
+                return
+            if frame is None:
+                return  # client closed its half
+            if frame.stdin:
+                try:
+                    os.write(master_fd, frame.stdin)
+                except OSError:
+                    return
+            elif frame.resize is not None:
+                _set_winsize(master_fd, frame.resize.rows, frame.resize.cols)
+            elif frame.signal is not None:
+                try:
+                    os.kill(pid, frame.signal.signal_number)
+                except ProcessLookupError:
+                    pass
+
+    writer_task = asyncio.create_task(_writer())
+    reader_task = asyncio.create_task(_reader())
+
+    exit_code = 0
+    try:
+        # Reap the child process. asyncio.to_thread keeps the loop
+        # responsive while waitpid blocks.
+        _, status = await asyncio.to_thread(os.waitpid, pid, 0)
+        if os.WIFEXITED(status):
+            exit_code = os.WEXITSTATUS(status)
+        elif os.WIFSIGNALED(status):
+            exit_code = -os.WTERMSIG(status)
+    except ChildProcessError:
+        exit_code = -1
+    finally:
+        # Drain remaining stdout, then tear down the readers.
+        try:
+            loop.remove_reader(master_fd)
+        except (ValueError, OSError):
+            pass
+        try:
+            tail = os.read(master_fd, 65536)
+            if tail:
+                stdout_q.put_nowait(tail)
+        except OSError:
+            pass
+        stdout_q.put_nowait(None)
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+        # Drain writer cleanly so all bytes hit the wire before exit.
+        try:
+            await asyncio.wait_for(writer_task, timeout=5)
+        except asyncio.TimeoutError:
+            writer_task.cancel()
+        if not reader_task.done():
+            reader_task.cancel()
+        try:
+            await reader_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    await service.finalize_interactive_run(handle.run_id, exit_code)
+    refreshed = await service.get_run(handle.run_id)
+    final_status = (
+        wire.status_to_pb(refreshed.status)
+        if refreshed is not None else pb.Status.DONE
+    )
+    await stream.send_message(pb.ServerFrame(
+        exit=pb.ExitInfo(exit_code=exit_code, final_status=final_status),
+    ))
+
+
+def _set_winsize(fd: int, rows: int, cols: int) -> None:
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -371,14 +669,11 @@ def _pid_alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        # The pid exists; we just can't signal it. Treat as alive.
         return True
     return True
 
 
 def _check_pidfile(pidfile: Path) -> None:
-    """Inspect an existing pidfile. Raise if a live daemon owns it;
-    unlink + log if it's stale."""
     if not pidfile.exists():
         return
     pid = _read_pid(pidfile)
@@ -392,11 +687,9 @@ def _check_pidfile(pidfile: Path) -> None:
 
 
 def _check_socket(socket_path: Path) -> None:
-    """If a unix socket file exists at the path, probe it. Live
-    listener → abort. Refused connection → unlink and continue."""
     if not socket_path.exists():
         return
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
     sock.settimeout(0.2)
     try:
         sock.connect(str(socket_path))
@@ -413,120 +706,12 @@ def _check_socket(socket_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Connection handler
-# ---------------------------------------------------------------------------
-
-
-def _make_handler(
-    service: ActorService,
-    subscribers: _SubscriberRegistry,
-) -> Callable[[ServerConnection], Awaitable[None]]:
-    async def handler(websocket: ServerConnection) -> None:
-        try:
-            async for raw in websocket:
-                if isinstance(raw, bytes):
-                    raw = raw.decode("utf-8", errors="replace")
-                try:
-                    msg = decode_message(raw)
-                except ProtocolError as e:
-                    await websocket.send(encode_error(JSONRPCError(
-                        id=None, code=INVALID_REQUEST, message=str(e),
-                    )))
-                    continue
-
-                if not isinstance(msg, JSONRPCRequest):
-                    # Phase 2 ignores client-sent responses /
-                    # notifications / errors.
-                    continue
-
-                params = msg.params or {}
-
-                if msg.method == SUBSCRIBE_METHOD:
-                    subscribers.add(websocket)
-                    await websocket.send(encode_response(JSONRPCResponse(
-                        id=msg.id, result={"subscribed": True},
-                    )))
-                    continue
-
-                fn = METHODS.get(msg.method)
-                if fn is None:
-                    await websocket.send(encode_error(JSONRPCError(
-                        id=msg.id, code=METHOD_NOT_FOUND,
-                        message=f"method not found: {msg.method}",
-                    )))
-                    continue
-
-                # Per-call AppConfig: load from the caller's cwd so
-                # project-level `<cwd>/.actor/settings.kdl` is honored
-                # even though the daemon's own cwd is wherever it was
-                # launched from. Falls back to the daemon-startup
-                # config if the caller didn't pass `_caller_cwd`.
-                cfg_token = _set_caller_config(params.pop("_caller_cwd", None))
-                caller_name = params.pop("_caller_actor_name", None)
-                name_token = (
-                    _caller_actor_name.set(caller_name) if caller_name else None
-                )
-
-                try:
-                    result = await fn(service, params)
-                    await websocket.send(encode_response(JSONRPCResponse(
-                        id=msg.id, result=result,
-                    )))
-                except TypeError as e:
-                    await websocket.send(encode_error(JSONRPCError(
-                        id=msg.id, code=INVALID_PARAMS, message=str(e),
-                    )))
-                except KeyError as e:
-                    await websocket.send(encode_error(JSONRPCError(
-                        id=msg.id, code=INVALID_PARAMS,
-                        message=f"missing parameter: {e}",
-                    )))
-                except ActorError as exc:
-                    code, message, data = error_to_wire(exc)
-                    await websocket.send(encode_error(JSONRPCError(
-                        id=msg.id, code=code, message=message, data=data,
-                    )))
-                except Exception as exc:
-                    log.exception("dispatch error for %s", msg.method)
-                    code, message, data = error_to_wire(exc)
-                    await websocket.send(encode_error(JSONRPCError(
-                        id=msg.id, code=code, message=message, data=data,
-                    )))
-                finally:
-                    if cfg_token is not None:
-                        _app_config_override.reset(cfg_token)
-                    if name_token is not None:
-                        _caller_actor_name.reset(name_token)
-        finally:
-            subscribers.remove(websocket)
-
-    return handler
-
-
-def _set_caller_config(cwd: Optional[str]):
-    """Load `AppConfig` from the caller's cwd and bind it as the
-    per-call override. Returns the contextvar token (or None if no
-    cwd was provided / load failed) so the caller can `reset()` after
-    the handler returns."""
-    if not cwd:
-        return None
-    try:
-        from .config import load_config
-        cfg = load_config(cwd=Path(cwd))
-    except Exception as e:
-        log.warning("failed to load AppConfig from cwd=%s: %s", cwd, e)
-        return None
-    return _app_config_override.set(cfg)
-
-
-# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
 
 def _configure_logging(log_file: Optional[Path]) -> None:
     root = logging.getLogger()
-    # Idempotent across re-entries (tests may import + re-run).
     for h in list(root.handlers):
         root.removeHandler(h)
     fmt = logging.Formatter(
@@ -567,6 +752,32 @@ def _build_service(db_path: str) -> LocalActorService:
 
 
 # ---------------------------------------------------------------------------
+# Transport URI parsing
+# ---------------------------------------------------------------------------
+
+
+def parse_transport_uri(uri: str) -> "tuple[str, str]":
+    """Parse `unix:/path/to/sock` or `unix:~/...sock`.
+
+    `tcp:host:port` raises NotImplementedError until Phase 4 wires up
+    the inter-daemon listener.
+    """
+    if ":" not in uri:
+        raise ValueError(f"transport URI missing scheme: {uri!r}")
+    scheme, _, target = uri.partition(":")
+    if scheme == "unix":
+        if not target:
+            raise ValueError(f"unix transport URI missing path: {uri!r}")
+        return ("unix", os.path.expanduser(target))
+    if scheme == "tcp":
+        raise NotImplementedError(
+            f"tcp transport not yet supported (URI: {uri!r}); "
+            f"see issue #35 phase 4"
+        )
+    raise ValueError(f"unknown transport scheme: {scheme!r}")
+
+
+# ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
 
@@ -596,14 +807,12 @@ async def main(
 
     service = _build_service(db_path)
     subscribers = _SubscriberRegistry()
-
-    # Bridge service-side notifications to subscriber connections.
     await service.subscribe_notifications(subscribers.fan_out)
 
-    handler = _make_handler(service, subscribers)
+    servicer = ActorServiceServicer(service, subscribers)
+    server = Server([servicer])
 
-    server = await unix_serve(handler, str(socket_path))
-    # Tighten permissions to owner-only — the kernel is our auth.
+    await server.start(path=str(socket_path))
     try:
         os.chmod(socket_path, 0o600)
     except OSError as e:
@@ -626,7 +835,6 @@ async def main(
         try:
             loop.add_signal_handler(sig, _request_stop, name)
         except NotImplementedError:
-            # Some platforms (e.g. Windows) don't support add_signal_handler.
             signal.signal(sig, lambda *_args, n=name: _request_stop(n))
 
     try:
@@ -649,26 +857,22 @@ async def main(
 def _build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="actor.daemon",
-        description="actord — JSON-RPC daemon for the actor wire",
+        description="actord — gRPC daemon for the actor wire",
     )
     parser.add_argument(
-        "--listen",
-        default="unix:~/.actor/daemon.sock",
+        "--listen", default="unix:~/.actor/daemon.sock",
         help="Transport URI (default: unix:~/.actor/daemon.sock)",
     )
     parser.add_argument(
-        "--db-path",
-        default=None,
+        "--db-path", default=None,
         help="Path to actor.db (default: ~/.actor/actor.db)",
     )
     parser.add_argument(
-        "--pidfile",
-        default=None,
+        "--pidfile", default=None,
         help="Path to pidfile (default: ~/.actor/daemon.pid)",
     )
     parser.add_argument(
-        "--log-file",
-        default="~/.actor/daemon.log",
+        "--log-file", default="~/.actor/daemon.log",
         help="Path to log file (default: ~/.actor/daemon.log; pass empty to disable)",
     )
     return parser

@@ -47,6 +47,33 @@ from typing import Optional
 _FAKES_BIN = (Path(__file__).resolve().parent.parent / "fakes" / "bin").resolve()
 
 
+def _grpc_probe(socket_path: str) -> bool:
+    """Quick `actor_exists` RPC against the daemon to confirm both
+    the listener AND the gRPC handshake are ready. Returns True on
+    success, False on any failure (the harness keeps polling)."""
+    import asyncio as _asyncio
+
+    async def _attempt() -> bool:
+        from grpclib.client import Channel
+        from actor._proto.actor.v1 import ActorExistsRequest, ActorServiceStub
+        chan = Channel(path=socket_path)
+        try:
+            stub = ActorServiceStub(chan)
+            await stub.actor_exists(
+                ActorExistsRequest(name="__probe__"), timeout=0.5,
+            )
+            return True
+        except Exception:
+            return False
+        finally:
+            chan.close()
+
+    try:
+        return _asyncio.run(_attempt())
+    except Exception:
+        return False
+
+
 @dataclass
 class IsolatedHome:
     home: Path
@@ -163,18 +190,16 @@ class IsolatedHome:
                     f"log tail:\n{tail}"
                 )
             if sock.exists():
-                # Probe with a real websocket handshake. A raw AF_UNIX
-                # connect is enough for "listener is up" but the daemon
-                # logs an ERROR on the failed handshake — noisy enough
-                # that tests grepping the log get false positives.
-                try:
-                    from websockets.sync.client import unix_connect as _ws_unix
-                    with _ws_unix(str(sock), open_timeout=0.5):
-                        pass
+                # Probe with an actual gRPC unary call against a known
+                # cheap method. A raw AF_UNIX connect is enough for
+                # "listener is up" on a TCP socket, but gRPC needs the
+                # HTTP/2 handshake to settle before the daemon will
+                # accept RPCs. `actor_exists` is the cheapest method —
+                # no DB writes, no agent spawn — and probes the entire
+                # stack end-to-end.
+                if _grpc_probe(str(sock)):
                     self._daemon = proc
                     return
-                except Exception:
-                    pass
             time.sleep(0.02)
         proc.terminate()
         try:

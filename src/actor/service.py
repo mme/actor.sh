@@ -29,6 +29,7 @@ import inspect
 import os
 import sys
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Literal, Optional, Tuple, Union
@@ -264,32 +265,6 @@ class ActorService(abc.ABC):
 
     @abc.abstractmethod
     async def stop_actor(self, name: str) -> StopResult: ...
-
-    # -- Interactive -------------------------------------------------------
-
-    @abc.abstractmethod
-    async def start_interactive_run(
-        self, name: str, *, agent: Optional[Agent] = None,
-    ) -> InteractiveRunHandle: ...
-
-    @abc.abstractmethod
-    async def update_interactive_run_pid(self, run_id: int, pid: int) -> None: ...
-
-    @abc.abstractmethod
-    async def finalize_interactive_run(
-        self,
-        run_id: int,
-        exit_code: int,
-        *,
-        force_status: Optional[Status] = None,
-    ) -> None: ...
-
-    @abc.abstractmethod
-    async def interactive_actor(
-        self,
-        name: str,
-        runner: Optional[Callable[[List[str], Path, dict], int]] = None,
-    ) -> Tuple[int, str]: ...
 
     # -- Discovery ---------------------------------------------------------
 
@@ -1386,82 +1361,76 @@ class LocalActorService(ActorService):
 
 
 class RemoteActorService(ActorService):
-    """Forwards `ActorService` calls to a running `actord` over the
-    daemon wire (issue #35).
+    """gRPC client for actord (issue #35, Phase 2.5).
 
-    Non-streaming methods open a short-lived WebSocket connection per
-    call — simple, with a clean lifetime per operation.
-    `subscribe_notifications` keeps a long-lived connection so the
-    daemon can push channel events; the returned `Cancel` closes that
-    connection.
+    Wraps the betterproto-generated `ActorServiceStub` and translates
+    its protobuf messages back into the same domain types
+    `LocalActorService` returns. Per-call short-lived `Channel`s for
+    unary methods (matches the Phase 1+2 pattern); `subscribe_notifications`
+    keeps a long-lived channel for server-streaming; `interactive_session`
+    keeps a long-lived channel for bidi streaming.
 
-    The four interactive methods (`start_interactive_run`,
-    `update_interactive_run_pid`, `finalize_interactive_run`,
-    `interactive_actor`) are deliberately NOT implemented — opening a
-    PTY across a JSON-RPC wire is overkill for v1. Callers that need
-    interactive sessions construct a `LocalActorService` for that one
-    path and share the SQLite DB with the daemon (WAL mode handles
-    concurrent writers). See `cli.py` and the watch app for the
-    boundary.
+    Per-call context (caller cwd, parent actor name) rides on gRPC
+    metadata, not on every request body. See `actor.wire` for the
+    header keys.
     """
 
     def __init__(self, transport_uri: str) -> None:
-        from .protocol import parse_transport_uri
-
-        self._uri = transport_uri
-        scheme, target = parse_transport_uri(transport_uri)
+        scheme, target = _parse_transport_uri(transport_uri)
         if scheme != "unix":
             raise NotImplementedError(
                 f"transport {scheme!r} not yet supported; see #35 phase 4"
             )
+        self._uri = transport_uri
         self._socket_path = target
-        self._next_id = 0
 
-    def _alloc_id(self) -> int:
-        self._next_id += 1
-        return self._next_id
+    def _metadata(self) -> Dict[str, str]:
+        from . import wire
+        meta: Dict[str, str] = {wire.META_CALLER_CWD: str(Path.cwd())}
+        caller = os.environ.get("ACTOR_NAME")
+        if caller:
+            meta[wire.META_CALLER_ACTOR_NAME] = caller
+        return meta
 
-    async def _call(self, method: str, params: Dict[str, object]) -> object:
-        from websockets.asyncio.client import unix_connect
-
-        from .protocol import (
-            JSONRPCError,
-            JSONRPCRequest,
-            JSONRPCResponse,
-            decode_message,
-            encode_request,
-            raise_from_wire,
-        )
-
-        # Forward the caller's cwd so the daemon can load
-        # `<cwd>/.actor/settings.kdl` for this RPC. Reserved key —
-        # the dispatcher pops it before passing params to handlers.
-        # `_caller_actor_name` carries the CLI / MCP-bridge process's
-        # ACTOR_NAME so the daemon can record sub-actor parent
-        # relationships without reading its own env.
-        params = dict(params)
-        params.setdefault("_caller_cwd", str(Path.cwd()))
-        caller_name = os.environ.get("ACTOR_NAME")
-        if caller_name:
-            params.setdefault("_caller_actor_name", caller_name)
-
-        req_id = self._alloc_id()
+    @asynccontextmanager
+    async def _channel(self):
+        """Open a unix-socket gRPC channel. The pair of `host="."`,
+        `port=None`, `path=...` tells grpclib's `Channel` to use
+        AF_UNIX. Closes the channel on exit."""
+        from grpclib.client import Channel
         try:
-            async with unix_connect(self._socket_path) as ws:
-                await ws.send(encode_request(JSONRPCRequest(
-                    id=req_id, method=method, params=params,
-                )))
-                raw = await ws.recv()
-                if isinstance(raw, bytes):
-                    raw = raw.decode("utf-8", errors="replace")
-                msg = decode_message(raw)
+            chan = Channel(path=self._socket_path)
         except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
             raise DaemonUnreachableError(self._socket_path, e) from e
-        if isinstance(msg, JSONRPCError):
-            raise_from_wire(msg.code, msg.message, msg.data)
-        if not isinstance(msg, JSONRPCResponse) or msg.id != req_id:
-            raise ActorError(f"unexpected response: {msg!r}")
-        return msg.result
+        try:
+            yield chan
+        finally:
+            chan.close()
+
+    async def _stub_call(self, method_name: str, *args, **kwargs):
+        """Run a unary RPC against a fresh channel; translate
+        connection errors and `GRPCError`s back to their typed
+        ActorError counterparts."""
+        from grpclib.exceptions import GRPCError, StreamTerminatedError
+        from . import wire
+        from ._proto.actor.v1 import ActorServiceStub
+
+        async with self._channel() as chan:
+            stub = ActorServiceStub(chan)
+            try:
+                return await getattr(stub, method_name)(
+                    *args, metadata=self._metadata(), **kwargs,
+                )
+            except GRPCError as exc:
+                type_name = None
+                if exc.details and isinstance(exc.details, dict):
+                    type_name = exc.details.get(wire.META_ERROR_TYPE)
+                wire.raise_from_grpc(exc, type_name)
+                raise  # unreachable; raise_from_grpc always raises
+            except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
+                raise DaemonUnreachableError(self._socket_path, e) from e
+            except StreamTerminatedError as e:
+                raise DaemonUnreachableError(self._socket_path, e) from e
 
     # -- Lifecycle ---------------------------------------------------------
 
@@ -1475,299 +1444,260 @@ class RemoteActorService(ActorService):
         config: ActorConfig,
         role_name: Optional[str] = None,
     ) -> Actor:
-        from .protocol import actor_config_to_dict, actor_from_dict
-        result = await self._call("new_actor", {
-            "name": name,
-            "dir": dir,
-            "no_worktree": no_worktree,
-            "base": base,
-            "agent_name": agent_name,
-            "config": actor_config_to_dict(config),
-            "role_name": role_name,
-        })
-        return actor_from_dict(result)
+        from . import wire
+        from ._proto.actor.v1 import NewActorRequest
+        resp = await self._stub_call("new_actor", NewActorRequest(
+            name=name, dir=dir, no_worktree=no_worktree, base=base,
+            agent_name=agent_name,
+            config=wire.actor_config_to_pb(config),
+            role_name=role_name,
+        ))
+        return wire.actor_from_pb(resp.actor)
 
     async def discard_actor(self, name: str, force: bool = False) -> DiscardResult:
-        result = await self._call("discard_actor", {"name": name, "force": force})
-        return DiscardResult(names=list(result["names"]))
+        from . import wire
+        from ._proto.actor.v1 import DiscardActorRequest
+        resp = await self._stub_call("discard_actor", DiscardActorRequest(
+            name=name, force=force,
+        ))
+        return wire.discard_result_from_pb(resp.result)
 
     async def config_actor(
         self, name: str, pairs: Optional[List[str]] = None,
     ) -> ActorConfig:
-        from .protocol import actor_config_from_dict
-        result = await self._call("config_actor", {
-            "name": name,
-            "pairs": list(pairs) if pairs else None,
-        })
-        return actor_config_from_dict(result)
+        from . import wire
+        from ._proto.actor.v1 import ConfigActorRequest
+        resp = await self._stub_call("config_actor", ConfigActorRequest(
+            name=name, pairs=list(pairs) if pairs else [],
+        ))
+        return wire.actor_config_from_pb(resp.config)
 
     # -- Run lifecycle -----------------------------------------------------
 
     async def start_run(
         self, name: str, prompt: str, config: ActorConfig,
     ) -> RunStartResult:
-        from .protocol import actor_config_to_dict
-        result = await self._call("start_run", {
-            "name": name,
-            "prompt": prompt,
-            "config": actor_config_to_dict(config),
-        })
-        return RunStartResult(
-            run_id=result["run_id"],
-            pid=result.get("pid"),
-            status=Status.from_str(result["status"]),
-        )
+        from . import wire
+        from ._proto.actor.v1 import StartRunRequest
+        resp = await self._stub_call("start_run", StartRunRequest(
+            name=name, prompt=prompt,
+            config=wire.actor_config_to_pb(config),
+        ))
+        return wire.run_start_result_from_pb(resp.result)
 
     async def wait_for_run(self, run_id: int) -> RunResult:
-        result = await self._call("wait_for_run", {"run_id": run_id})
-        return RunResult(
-            run_id=result["run_id"],
-            actor=result["actor"],
-            status=Status.from_str(result["status"]),
-            exit_code=result.get("exit_code"),
-            output=result.get("output", ""),
-        )
+        from . import wire
+        from ._proto.actor.v1 import WaitForRunRequest
+        resp = await self._stub_call("wait_for_run", WaitForRunRequest(run_id=run_id))
+        return wire.run_result_from_pb(resp.result)
 
     async def run_actor(
         self, name: str, prompt: str, config: ActorConfig,
     ) -> RunResult:
-        from .protocol import actor_config_to_dict
-        result = await self._call("run_actor", {
-            "name": name,
-            "prompt": prompt,
-            "config": actor_config_to_dict(config),
-        })
-        return RunResult(
-            run_id=result["run_id"],
-            actor=result["actor"],
-            status=Status.from_str(result["status"]),
-            exit_code=result.get("exit_code"),
-            output=result.get("output", ""),
-        )
+        from . import wire
+        from ._proto.actor.v1 import RunActorRequest
+        resp = await self._stub_call("run_actor", RunActorRequest(
+            name=name, prompt=prompt,
+            config=wire.actor_config_to_pb(config),
+        ))
+        return wire.run_result_from_pb(resp.result)
 
     async def stop_actor(self, name: str) -> StopResult:
-        result = await self._call("stop_actor", {"name": name})
-        return StopResult(name=result["name"], was_alive=bool(result["was_alive"]))
-
-    # -- Interactive (intentionally NOT remoted) ---------------------------
-
-    async def start_interactive_run(
-        self, name: str, *, agent: Optional[Agent] = None,
-    ) -> InteractiveRunHandle:
-        raise NotImplementedError(
-            "interactive sessions are not routed through actord; "
-            "use a LocalActorService for the PTY path"
-        )
-
-    async def update_interactive_run_pid(self, run_id: int, pid: int) -> None:
-        raise NotImplementedError(
-            "interactive sessions are not routed through actord; "
-            "use a LocalActorService for the PTY path"
-        )
-
-    async def finalize_interactive_run(
-        self,
-        run_id: int,
-        exit_code: int,
-        *,
-        force_status: Optional[Status] = None,
-    ) -> None:
-        raise NotImplementedError(
-            "interactive sessions are not routed through actord; "
-            "use a LocalActorService for the PTY path"
-        )
-
-    async def interactive_actor(
-        self,
-        name: str,
-        runner: Optional[Callable[[List[str], Path, dict], int]] = None,
-    ) -> Tuple[int, str]:
-        raise NotImplementedError(
-            "interactive sessions are not routed through actord; "
-            "use a LocalActorService for the PTY path"
-        )
+        from . import wire
+        from ._proto.actor.v1 import StopActorRequest
+        resp = await self._stub_call("stop_actor", StopActorRequest(name=name))
+        return wire.stop_result_from_pb(resp.result)
 
     # -- Discovery ---------------------------------------------------------
 
     async def get_actor(self, name: str) -> Actor:
-        from .protocol import actor_from_dict
-        return actor_from_dict(await self._call("get_actor", {"name": name}))
+        from . import wire
+        from ._proto.actor.v1 import GetActorRequest
+        resp = await self._stub_call("get_actor", GetActorRequest(name=name))
+        return wire.actor_from_pb(resp.actor)
 
     async def actor_exists(self, name: str) -> bool:
-        return bool(await self._call("actor_exists", {"name": name}))
+        from ._proto.actor.v1 import ActorExistsRequest
+        resp = await self._stub_call("actor_exists", ActorExistsRequest(name=name))
+        return bool(resp.exists)
 
     async def list_actors(self, status_filter: Optional[str] = None) -> List[Actor]:
-        from .protocol import actor_from_dict
-        result = await self._call(
-            "list_actors", {"status_filter": status_filter},
+        from . import wire
+        from ._proto.actor.v1 import ListActorsRequest
+        resp = await self._stub_call(
+            "list_actors", ListActorsRequest(status_filter=status_filter),
         )
-        if not isinstance(result, list):
-            raise ActorError(f"daemon returned non-list result: {result!r}")
-        return [actor_from_dict(d) for d in result]
+        return [wire.actor_from_pb(a) for a in resp.actors]
 
     async def actor_status(self, name: str) -> Status:
-        return Status.from_str(await self._call("actor_status", {"name": name}))
+        from . import wire
+        from ._proto.actor.v1 import ActorStatusRequest
+        resp = await self._stub_call(
+            "actor_status", ActorStatusRequest(name=name),
+        )
+        return wire.status_from_pb(resp.status)
 
     async def latest_run(self, actor_name: str) -> Optional[Run]:
-        from .protocol import run_from_dict
-        result = await self._call("latest_run", {"actor_name": actor_name})
-        return run_from_dict(result) if result is not None else None
+        from . import wire
+        from ._proto.actor.v1 import LatestRunRequest
+        resp = await self._stub_call(
+            "latest_run", LatestRunRequest(actor_name=actor_name),
+        )
+        return wire.run_from_pb(resp.run) if resp.run is not None else None
 
     async def show_actor(self, name: str, runs_limit: int = 5) -> ActorDetail:
-        from .protocol import actor_from_dict, run_from_dict
-        result = await self._call("show_actor", {
-            "name": name, "runs_limit": runs_limit,
-        })
-        return ActorDetail(
-            actor=actor_from_dict(result["actor"]),
-            status=Status.from_str(result["status"]),
-            runs=[run_from_dict(r) for r in result["runs"]],
-            total_runs=result["total_runs"],
-            runs_limit=result["runs_limit"],
+        from . import wire
+        from ._proto.actor.v1 import ShowActorRequest
+        resp = await self._stub_call(
+            "show_actor", ShowActorRequest(name=name, runs_limit=runs_limit),
         )
+        return wire.actor_detail_from_pb(resp.detail)
 
     async def list_runs(self, actor_name: str, limit: int) -> Tuple[List[Run], int]:
-        from .protocol import run_from_dict
-        result = await self._call("list_runs", {
-            "actor_name": actor_name, "limit": limit,
-        })
-        return [run_from_dict(r) for r in result["runs"]], result["total"]
+        from . import wire
+        from ._proto.actor.v1 import ListRunsRequest
+        resp = await self._stub_call(
+            "list_runs", ListRunsRequest(actor_name=actor_name, limit=limit),
+        )
+        return [wire.run_from_pb(r) for r in resp.runs], resp.total
 
     async def get_run(self, run_id: int) -> Optional[Run]:
-        from .protocol import run_from_dict
-        result = await self._call("get_run", {"run_id": run_id})
-        return run_from_dict(result) if result is not None else None
+        from . import wire
+        from ._proto.actor.v1 import GetRunRequest
+        resp = await self._stub_call("get_run", GetRunRequest(run_id=run_id))
+        return wire.run_from_pb(resp.run) if resp.run is not None else None
 
     async def get_logs(self, actor_name: str) -> LogsResult:
-        from .interfaces import LogEntry
-        from .protocol import log_entry_from_dict
-        result = await self._call("get_logs", {"actor_name": actor_name})
-        entries: List[LogEntry] = [
-            log_entry_from_dict(e) for e in result.get("entries", [])
-        ]
-        return LogsResult(session_id=result.get("session_id"), entries=entries)
+        from . import wire
+        from ._proto.actor.v1 import GetLogsRequest
+        resp = await self._stub_call(
+            "get_logs", GetLogsRequest(actor_name=actor_name),
+        )
+        return wire.logs_result_from_pb(resp.result)
 
     async def list_roles(self) -> Dict[str, Role]:
-        from .protocol import role_from_dict
-        result = await self._call("list_roles", {})
-        return {name: role_from_dict(r) for name, r in result.items()}
+        from . import wire
+        from ._proto.actor.v1 import ListRolesRequest
+        resp = await self._stub_call("list_roles", ListRolesRequest())
+        return {name: wire.role_from_pb(r) for name, r in resp.roles.items()}
 
     # -- Notifications -----------------------------------------------------
 
     async def publish_notification(self, n: Notification) -> None:
-        from .protocol import notification_to_dict
-        await self._call(
+        from . import wire
+        from ._proto.actor.v1 import PublishNotificationRequest
+        await self._stub_call(
             "publish_notification",
-            {"notification": notification_to_dict(n)},
+            PublishNotificationRequest(notification=wire.notification_to_pb(n)),
         )
 
     async def subscribe_notifications(
         self, handler: NotificationHandler,
     ) -> Cancel:
-        """Open a long-lived connection, send `subscribe_notifications`,
-        and spawn a reader task that decodes incoming
-        `channel.notification` frames and forwards them to `handler`.
+        """Open a long-lived gRPC server-streaming call and forward
+        each `Notification` to `handler` until cancel.
 
-        The returned `Cancel` closes the connection (which makes the
-        daemon drop the subscription) and cancels the reader task.
-        Cancel is sync to match the existing contract; the actual
-        teardown happens on the running loop in fire-and-forget tasks
-        that the caller doesn't need to await.
-        """
-        from websockets.asyncio.client import unix_connect
-
-        from .protocol import (
-            JSONRPCError,
-            JSONRPCNotification,
-            JSONRPCRequest,
-            JSONRPCResponse,
-            decode_message,
-            encode_request,
-            notification_from_dict,
-            raise_from_wire,
+        The returned `Cancel` closes the channel (which the daemon
+        notices via the half-closed stream and drops the subscription).
+        Cancel is sync to match the existing contract; teardown
+        happens on the running loop as a fire-and-forget task."""
+        from grpclib.client import Channel
+        from grpclib.exceptions import GRPCError, StreamTerminatedError
+        from . import wire
+        from ._proto.actor.v1 import (
+            ActorServiceStub,
+            SubscribeNotificationsRequest,
         )
 
         try:
-            ws = await unix_connect(self._socket_path)
+            chan = Channel(path=self._socket_path)
         except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
             raise DaemonUnreachableError(self._socket_path, e) from e
 
-        req_id = self._alloc_id()
-        await ws.send(encode_request(JSONRPCRequest(
-            id=req_id, method="subscribe_notifications", params={},
-        )))
-        raw = await ws.recv()
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8", errors="replace")
-        ack = decode_message(raw)
-        if isinstance(ack, JSONRPCError):
-            await ws.close()
-            raise_from_wire(ack.code, ack.message, ack.data)
-        if not isinstance(ack, JSONRPCResponse) or ack.id != req_id:
-            await ws.close()
-            raise ActorError(f"unexpected subscribe ack: {ack!r}")
+        try:
+            stub = ActorServiceStub(chan)
+            # `subscribe_notifications` is a server-streaming RPC; the
+            # generated stub returns an async-iterator. Wrapping the
+            # await-iterator dance lets us probe for a connection
+            # failure right away.
+            stream_cm = stub.subscribe_notifications.open(metadata=self._metadata())
+        except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
+            chan.close()
+            raise DaemonUnreachableError(self._socket_path, e) from e
 
         async def _reader() -> None:
             try:
-                async for raw in ws:
-                    if isinstance(raw, bytes):
-                        raw = raw.decode("utf-8", errors="replace")
-                    try:
-                        msg = decode_message(raw)
-                    except Exception as e:
-                        print(
-                            f"[actor] subscriber decode error: {e}",
-                            file=sys.stderr,
-                        )
-                        continue
-                    if not isinstance(msg, JSONRPCNotification):
-                        continue
-                    if msg.method != "channel.notification":
-                        continue
-                    if not isinstance(msg.params, dict):
-                        continue
-                    try:
-                        n = notification_from_dict(msg.params)
-                    except Exception as e:
-                        print(
-                            f"[actor] subscriber payload decode error: {e}",
-                            file=sys.stderr,
-                        )
-                        continue
-                    try:
-                        if inspect.iscoroutinefunction(handler):
-                            await handler(n)
-                        else:
-                            result = handler(n)
-                            if asyncio.iscoroutine(result):
-                                await result
-                    except Exception as e:
-                        print(
-                            f"[actor] subscriber handler raised: {e}",
-                            file=sys.stderr,
-                        )
-            except Exception:
-                # Connection closed (cancel) or daemon went away.
-                # Either way, the reader is done.
+                async with stream_cm as stream:
+                    await stream.send_message(
+                        SubscribeNotificationsRequest(), end=True,
+                    )
+                    async for pb_n in stream:
+                        n = wire.notification_from_pb(pb_n)
+                        try:
+                            if inspect.iscoroutinefunction(handler):
+                                await handler(n)
+                            else:
+                                result = handler(n)
+                                if asyncio.iscoroutine(result):
+                                    await result
+                        except Exception as e:
+                            print(
+                                f"[actor] subscriber handler raised: {e}",
+                                file=sys.stderr,
+                            )
+            except (asyncio.CancelledError, GRPCError, StreamTerminatedError):
                 pass
+            except Exception as e:
+                print(
+                    f"[actor] subscribe stream error: {e}",
+                    file=sys.stderr,
+                )
+            finally:
+                chan.close()
 
         task = asyncio.create_task(_reader())
 
         def cancel() -> None:
-            # Schedule close + cancel on the running loop. The caller
-            # gets sync semantics; teardown happens asynchronously.
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 return
-            loop.create_task(_teardown(ws, task))
+            loop.create_task(_subscribe_teardown(chan, task))
 
         return cancel
 
+    # -- Interactive (gRPC bidi) -------------------------------------------
 
-async def _teardown(ws, task) -> None:
+    def interactive_session(
+        self,
+        actor_name: str,
+        *,
+        cols: Optional[int] = None,
+        rows: Optional[int] = None,
+    ) -> "InteractiveSession":
+        """Return an `InteractiveSession` handle. Use as an async
+        context manager:
+
+            async with svc.interactive_session("alice", cols=80, rows=24) as s:
+                # spawn tasks that:
+                #   - await s.recv() and write bytes to local stdout/stderr
+                #   - read local stdin and call s.send_stdin(data)
+                #   - call s.send_resize(...) on SIGWINCH
+                #   - call s.send_signal(...) on Ctrl-C
+                # then await s.exit_code() to learn the child's status
+        """
+        return InteractiveSession(
+            socket_path=self._socket_path,
+            metadata=self._metadata(),
+            actor_name=actor_name,
+            cols=cols,
+            rows=rows,
+        )
+
+
+async def _subscribe_teardown(chan, task) -> None:
     try:
-        await ws.close()
+        chan.close()
     except Exception:
         pass
     task.cancel()
@@ -1775,3 +1705,158 @@ async def _teardown(ws, task) -> None:
         await task
     except (asyncio.CancelledError, Exception):
         pass
+
+
+def _parse_transport_uri(uri: str) -> Tuple[str, str]:
+    """Parse `unix:/path/to/sock` or `unix:~/...sock`. Mirrors
+    `daemon.parse_transport_uri` so client + daemon agree."""
+    if ":" not in uri:
+        raise ValueError(f"transport URI missing scheme: {uri!r}")
+    scheme, _, target = uri.partition(":")
+    if scheme == "unix":
+        if not target:
+            raise ValueError(f"unix transport URI missing path: {uri!r}")
+        return ("unix", os.path.expanduser(target))
+    if scheme == "tcp":
+        raise NotImplementedError(
+            f"tcp transport not yet supported (URI: {uri!r}); "
+            f"see issue #35 phase 4"
+        )
+    raise ValueError(f"unknown transport scheme: {scheme!r}")
+
+
+# ---------------------------------------------------------------------------
+# Interactive session client handle
+# ---------------------------------------------------------------------------
+
+
+class InteractiveSession:
+    """Client-side handle for the bidirectional `InteractiveSession`
+    RPC. Hides the gRPC stream plumbing behind four send methods +
+    one recv iterator, so CLI's `-i` and watch's interactive widget
+    can drive it identically.
+
+    Lifecycle:
+      __aenter__ → opens the channel + stream, sends OpenSession.
+      send_stdin / send_resize / send_signal → push ClientFrames.
+      recv() → await next ServerFrame; returns None on stream end.
+      exit_code() → resolves to the child's exit code once the
+        ExitInfo ServerFrame arrives.
+      __aexit__ → cancels outstanding work and closes the channel.
+    """
+
+    def __init__(
+        self,
+        *,
+        socket_path: str,
+        metadata: Dict[str, str],
+        actor_name: str,
+        cols: Optional[int],
+        rows: Optional[int],
+    ) -> None:
+        self._socket_path = socket_path
+        self._metadata = metadata
+        self._actor_name = actor_name
+        self._cols = cols
+        self._rows = rows
+        self._chan = None
+        self._stream_cm = None
+        self._stream = None
+        self._exit_code: Optional[int] = None
+        self._final_status: Optional[Status] = None
+        self._exit_event = asyncio.Event()
+
+    async def __aenter__(self) -> "InteractiveSession":
+        from grpclib.client import Channel
+        from ._proto.actor.v1 import (
+            ActorServiceStub,
+            ClientFrame,
+            OpenSession,
+        )
+
+        try:
+            self._chan = Channel(path=self._socket_path)
+        except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
+            raise DaemonUnreachableError(self._socket_path, e) from e
+
+        stub = ActorServiceStub(self._chan)
+        self._stream_cm = stub.interactive_session.open(metadata=self._metadata)
+        self._stream = await self._stream_cm.__aenter__()
+        await self._stream.send_message(ClientFrame(open=OpenSession(
+            actor_name=self._actor_name,
+            cols=self._cols, rows=self._rows,
+        )))
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        try:
+            if self._stream_cm is not None:
+                await self._stream_cm.__aexit__(exc_type, exc, tb)
+        except Exception:
+            pass
+        finally:
+            if self._chan is not None:
+                try:
+                    self._chan.close()
+                except Exception:
+                    pass
+
+    async def send_stdin(self, data: bytes) -> None:
+        from ._proto.actor.v1 import ClientFrame
+        if not self._stream:
+            raise RuntimeError("session not opened")
+        await self._stream.send_message(ClientFrame(stdin=data))
+
+    async def send_resize(self, cols: int, rows: int) -> None:
+        from ._proto.actor.v1 import ClientFrame, ResizeRequest
+        if not self._stream:
+            raise RuntimeError("session not opened")
+        await self._stream.send_message(ClientFrame(
+            resize=ResizeRequest(cols=cols, rows=rows),
+        ))
+
+    async def send_signal(self, signal_number: int) -> None:
+        from ._proto.actor.v1 import ClientFrame, SignalRequest
+        if not self._stream:
+            raise RuntimeError("session not opened")
+        await self._stream.send_message(ClientFrame(
+            signal=SignalRequest(signal_number=signal_number),
+        ))
+
+    async def end_input(self) -> None:
+        """Half-close the client side. Call once the local stdin
+        readers detect EOF (e.g. pipe closure)."""
+        if self._stream is not None:
+            try:
+                await self._stream.end()
+            except Exception:
+                pass
+
+    async def recv(self):
+        """Yield the next ServerFrame, or None when the stream ends.
+        Captures ExitInfo internally so callers can rely on
+        `exit_code()` after the iterator finishes."""
+        from ._proto.actor.v1 import ServerFrame
+        if not self._stream:
+            return None
+        msg = await self._stream.recv_message()
+        if msg is None:
+            return None
+        if msg.exit is not None:
+            self._exit_code = msg.exit.exit_code
+            from . import wire
+            try:
+                self._final_status = wire.status_from_pb(msg.exit.final_status)
+            except Exception:
+                self._final_status = None
+            self._exit_event.set()
+        return msg
+
+    async def exit_code(self) -> int:
+        await self._exit_event.wait()
+        assert self._exit_code is not None
+        return self._exit_code
+
+    @property
+    def final_status(self) -> Optional[Status]:
+        return self._final_status
