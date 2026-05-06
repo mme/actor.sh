@@ -1353,26 +1353,32 @@ class LocalActorService(ActorService):
 
 class RemoteActorService(ActorService):
     """Forwards `ActorService` calls to a running `actord` over the
-    daemon wire (issue #35). Phase 1 covers `list_actors` only;
-    every other method raises `NotImplementedError` until phase 2
-    fills it in.
+    daemon wire (issue #35).
 
-    One short-lived WebSocket connection per call — keeps the client
-    side trivial and gives the daemon a clean lifetime per operation.
-    Phase 2 may move to a connection pool once channel notifications
-    fan out over the same wire."""
+    Non-streaming methods open a short-lived WebSocket connection per
+    call — simple, with a clean lifetime per operation.
+    `subscribe_notifications` keeps a long-lived connection so the
+    daemon can push channel events; the returned `Cancel` closes that
+    connection.
+
+    The four interactive methods (`start_interactive_run`,
+    `update_interactive_run_pid`, `finalize_interactive_run`,
+    `interactive_actor`) are deliberately NOT implemented — opening a
+    PTY across a JSON-RPC wire is overkill for v1. Callers that need
+    interactive sessions construct a `LocalActorService` for that one
+    path and share the SQLite DB with the daemon (WAL mode handles
+    concurrent writers). See `cli.py` and the watch app for the
+    boundary.
+    """
 
     def __init__(self, transport_uri: str) -> None:
-        # Imported lazily so importing `service.py` doesn't pull in
-        # the websockets stack unless someone actually constructs a
-        # `RemoteActorService`.
         from .protocol import parse_transport_uri
 
         self._uri = transport_uri
         scheme, target = parse_transport_uri(transport_uri)
         if scheme != "unix":
             raise NotImplementedError(
-                f"transport {scheme!r} not yet supported; see #35 phase 2"
+                f"transport {scheme!r} not yet supported; see #35 phase 4"
             )
         self._socket_path = target
         self._next_id = 0
@@ -1390,6 +1396,7 @@ class RemoteActorService(ActorService):
             JSONRPCResponse,
             decode_message,
             encode_request,
+            raise_from_wire,
         )
 
         req_id = self._alloc_id()
@@ -1402,16 +1409,146 @@ class RemoteActorService(ActorService):
                 raw = raw.decode("utf-8", errors="replace")
             msg = decode_message(raw)
         if isinstance(msg, JSONRPCError):
-            raise ActorError(f"daemon error: {msg.message}")
+            raise_from_wire(msg.code, msg.message, msg.data)
         if not isinstance(msg, JSONRPCResponse) or msg.id != req_id:
             raise ActorError(f"unexpected response: {msg!r}")
         return msg.result
 
+    # -- Lifecycle ---------------------------------------------------------
+
+    async def new_actor(
+        self,
+        name: str,
+        dir: Optional[str],
+        no_worktree: bool,
+        base: Optional[str],
+        agent_name: Optional[str],
+        config: ActorConfig,
+        role_name: Optional[str] = None,
+    ) -> Actor:
+        from .protocol import actor_config_to_dict, actor_from_dict
+        result = await self._call("new_actor", {
+            "name": name,
+            "dir": dir,
+            "no_worktree": no_worktree,
+            "base": base,
+            "agent_name": agent_name,
+            "config": actor_config_to_dict(config),
+            "role_name": role_name,
+        })
+        return actor_from_dict(result)
+
+    async def discard_actor(self, name: str, force: bool = False) -> DiscardResult:
+        result = await self._call("discard_actor", {"name": name, "force": force})
+        return DiscardResult(names=list(result["names"]))
+
+    async def config_actor(
+        self, name: str, pairs: Optional[List[str]] = None,
+    ) -> ActorConfig:
+        from .protocol import actor_config_from_dict
+        result = await self._call("config_actor", {
+            "name": name,
+            "pairs": list(pairs) if pairs else None,
+        })
+        return actor_config_from_dict(result)
+
+    # -- Run lifecycle -----------------------------------------------------
+
+    async def start_run(
+        self, name: str, prompt: str, config: ActorConfig,
+    ) -> RunStartResult:
+        from .protocol import actor_config_to_dict
+        result = await self._call("start_run", {
+            "name": name,
+            "prompt": prompt,
+            "config": actor_config_to_dict(config),
+        })
+        return RunStartResult(
+            run_id=result["run_id"],
+            pid=result.get("pid"),
+            status=Status.from_str(result["status"]),
+        )
+
+    async def wait_for_run(self, run_id: int) -> RunResult:
+        result = await self._call("wait_for_run", {"run_id": run_id})
+        return RunResult(
+            run_id=result["run_id"],
+            actor=result["actor"],
+            status=Status.from_str(result["status"]),
+            exit_code=result.get("exit_code"),
+            output=result.get("output", ""),
+        )
+
+    async def run_actor(
+        self, name: str, prompt: str, config: ActorConfig,
+    ) -> RunResult:
+        from .protocol import actor_config_to_dict
+        result = await self._call("run_actor", {
+            "name": name,
+            "prompt": prompt,
+            "config": actor_config_to_dict(config),
+        })
+        return RunResult(
+            run_id=result["run_id"],
+            actor=result["actor"],
+            status=Status.from_str(result["status"]),
+            exit_code=result.get("exit_code"),
+            output=result.get("output", ""),
+        )
+
+    async def stop_actor(self, name: str) -> StopResult:
+        result = await self._call("stop_actor", {"name": name})
+        return StopResult(name=result["name"], was_alive=bool(result["was_alive"]))
+
+    # -- Interactive (intentionally NOT remoted) ---------------------------
+
+    async def start_interactive_run(
+        self, name: str, *, agent: Optional[Agent] = None,
+    ) -> InteractiveRunHandle:
+        raise NotImplementedError(
+            "interactive sessions are not routed through actord; "
+            "use a LocalActorService for the PTY path"
+        )
+
+    async def update_interactive_run_pid(self, run_id: int, pid: int) -> None:
+        raise NotImplementedError(
+            "interactive sessions are not routed through actord; "
+            "use a LocalActorService for the PTY path"
+        )
+
+    async def finalize_interactive_run(
+        self,
+        run_id: int,
+        exit_code: int,
+        *,
+        force_status: Optional[Status] = None,
+    ) -> None:
+        raise NotImplementedError(
+            "interactive sessions are not routed through actord; "
+            "use a LocalActorService for the PTY path"
+        )
+
+    async def interactive_actor(
+        self,
+        name: str,
+        runner: Optional[Callable[[List[str], Path, dict], int]] = None,
+    ) -> Tuple[int, str]:
+        raise NotImplementedError(
+            "interactive sessions are not routed through actord; "
+            "use a LocalActorService for the PTY path"
+        )
+
     # -- Discovery ---------------------------------------------------------
+
+    async def get_actor(self, name: str) -> Actor:
+        from .protocol import actor_from_dict
+        return actor_from_dict(await self._call("get_actor", {"name": name}))
+
+    async def actor_exists(self, name: str) -> bool:
+        return bool(await self._call("actor_exists", {"name": name}))
 
     async def list_actors(self, status_filter: Optional[str] = None) -> List[Actor]:
         from .protocol import actor_from_dict
-
         result = await self._call(
             "list_actors", {"status_filter": status_filter},
         )
@@ -1419,82 +1556,170 @@ class RemoteActorService(ActorService):
             raise ActorError(f"daemon returned non-list result: {result!r}")
         return [actor_from_dict(d) for d in result]
 
-    # -- Stubs (filled in by Phase 2 of #35) -------------------------------
+    async def actor_status(self, name: str) -> Status:
+        return Status.from_str(await self._call("actor_status", {"name": name}))
 
-    async def new_actor(self, *args, **kwargs) -> Actor:
-        raise NotImplementedError("new_actor not yet migrated; see #35 phase 2")
+    async def latest_run(self, actor_name: str) -> Optional[Run]:
+        from .protocol import run_from_dict
+        result = await self._call("latest_run", {"actor_name": actor_name})
+        return run_from_dict(result) if result is not None else None
 
-    async def discard_actor(self, *args, **kwargs) -> DiscardResult:
-        raise NotImplementedError("discard_actor not yet migrated; see #35 phase 2")
-
-    async def config_actor(self, *args, **kwargs) -> ActorConfig:
-        raise NotImplementedError("config_actor not yet migrated; see #35 phase 2")
-
-    async def start_run(self, *args, **kwargs) -> RunStartResult:
-        raise NotImplementedError("start_run not yet migrated; see #35 phase 2")
-
-    async def wait_for_run(self, *args, **kwargs) -> RunResult:
-        raise NotImplementedError("wait_for_run not yet migrated; see #35 phase 2")
-
-    async def run_actor(self, *args, **kwargs) -> RunResult:
-        raise NotImplementedError("run_actor not yet migrated; see #35 phase 2")
-
-    async def stop_actor(self, *args, **kwargs) -> StopResult:
-        raise NotImplementedError("stop_actor not yet migrated; see #35 phase 2")
-
-    async def start_interactive_run(self, *args, **kwargs) -> InteractiveRunHandle:
-        raise NotImplementedError(
-            "start_interactive_run not yet migrated; see #35 phase 2"
+    async def show_actor(self, name: str, runs_limit: int = 5) -> ActorDetail:
+        from .protocol import actor_from_dict, run_from_dict
+        result = await self._call("show_actor", {
+            "name": name, "runs_limit": runs_limit,
+        })
+        return ActorDetail(
+            actor=actor_from_dict(result["actor"]),
+            status=Status.from_str(result["status"]),
+            runs=[run_from_dict(r) for r in result["runs"]],
+            total_runs=result["total_runs"],
+            runs_limit=result["runs_limit"],
         )
 
-    async def update_interactive_run_pid(self, *args, **kwargs) -> None:
-        raise NotImplementedError(
-            "update_interactive_run_pid not yet migrated; see #35 phase 2"
+    async def list_runs(self, actor_name: str, limit: int) -> Tuple[List[Run], int]:
+        from .protocol import run_from_dict
+        result = await self._call("list_runs", {
+            "actor_name": actor_name, "limit": limit,
+        })
+        return [run_from_dict(r) for r in result["runs"]], result["total"]
+
+    async def get_run(self, run_id: int) -> Optional[Run]:
+        from .protocol import run_from_dict
+        result = await self._call("get_run", {"run_id": run_id})
+        return run_from_dict(result) if result is not None else None
+
+    async def get_logs(self, actor_name: str) -> LogsResult:
+        from .interfaces import LogEntry
+        from .protocol import log_entry_from_dict
+        result = await self._call("get_logs", {"actor_name": actor_name})
+        entries: List[LogEntry] = [
+            log_entry_from_dict(e) for e in result.get("entries", [])
+        ]
+        return LogsResult(session_id=result.get("session_id"), entries=entries)
+
+    async def list_roles(self) -> Dict[str, Role]:
+        from .protocol import role_from_dict
+        result = await self._call("list_roles", {})
+        return {name: role_from_dict(r) for name, r in result.items()}
+
+    # -- Notifications -----------------------------------------------------
+
+    async def publish_notification(self, n: Notification) -> None:
+        from .protocol import notification_to_dict
+        await self._call(
+            "publish_notification",
+            {"notification": notification_to_dict(n)},
         )
 
-    async def finalize_interactive_run(self, *args, **kwargs) -> None:
-        raise NotImplementedError(
-            "finalize_interactive_run not yet migrated; see #35 phase 2"
+    async def subscribe_notifications(
+        self, handler: NotificationHandler,
+    ) -> Cancel:
+        """Open a long-lived connection, send `subscribe_notifications`,
+        and spawn a reader task that decodes incoming
+        `channel.notification` frames and forwards them to `handler`.
+
+        The returned `Cancel` closes the connection (which makes the
+        daemon drop the subscription) and cancels the reader task.
+        Cancel is sync to match the existing contract; the actual
+        teardown happens on the running loop in fire-and-forget tasks
+        that the caller doesn't need to await.
+        """
+        from websockets.asyncio.client import unix_connect
+
+        from .protocol import (
+            JSONRPCError,
+            JSONRPCNotification,
+            JSONRPCRequest,
+            JSONRPCResponse,
+            decode_message,
+            encode_request,
+            notification_from_dict,
+            raise_from_wire,
         )
 
-    async def interactive_actor(self, *args, **kwargs) -> Tuple[int, str]:
-        raise NotImplementedError(
-            "interactive_actor not yet migrated; see #35 phase 2"
-        )
+        ws = await unix_connect(self._socket_path)
 
-    async def get_actor(self, *args, **kwargs) -> Actor:
-        raise NotImplementedError("get_actor not yet migrated; see #35 phase 2")
+        req_id = self._alloc_id()
+        await ws.send(encode_request(JSONRPCRequest(
+            id=req_id, method="subscribe_notifications", params={},
+        )))
+        raw = await ws.recv()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        ack = decode_message(raw)
+        if isinstance(ack, JSONRPCError):
+            await ws.close()
+            raise_from_wire(ack.code, ack.message, ack.data)
+        if not isinstance(ack, JSONRPCResponse) or ack.id != req_id:
+            await ws.close()
+            raise ActorError(f"unexpected subscribe ack: {ack!r}")
 
-    async def actor_exists(self, *args, **kwargs) -> bool:
-        raise NotImplementedError("actor_exists not yet migrated; see #35 phase 2")
+        async def _reader() -> None:
+            try:
+                async for raw in ws:
+                    if isinstance(raw, bytes):
+                        raw = raw.decode("utf-8", errors="replace")
+                    try:
+                        msg = decode_message(raw)
+                    except Exception as e:
+                        print(
+                            f"[actor] subscriber decode error: {e}",
+                            file=sys.stderr,
+                        )
+                        continue
+                    if not isinstance(msg, JSONRPCNotification):
+                        continue
+                    if msg.method != "channel.notification":
+                        continue
+                    if not isinstance(msg.params, dict):
+                        continue
+                    try:
+                        n = notification_from_dict(msg.params)
+                    except Exception as e:
+                        print(
+                            f"[actor] subscriber payload decode error: {e}",
+                            file=sys.stderr,
+                        )
+                        continue
+                    try:
+                        if inspect.iscoroutinefunction(handler):
+                            await handler(n)
+                        else:
+                            result = handler(n)
+                            if asyncio.iscoroutine(result):
+                                await result
+                    except Exception as e:
+                        print(
+                            f"[actor] subscriber handler raised: {e}",
+                            file=sys.stderr,
+                        )
+            except Exception:
+                # Connection closed (cancel) or daemon went away.
+                # Either way, the reader is done.
+                pass
 
-    async def actor_status(self, *args, **kwargs) -> Status:
-        raise NotImplementedError("actor_status not yet migrated; see #35 phase 2")
+        task = asyncio.create_task(_reader())
 
-    async def latest_run(self, *args, **kwargs) -> Optional[Run]:
-        raise NotImplementedError("latest_run not yet migrated; see #35 phase 2")
+        def cancel() -> None:
+            # Schedule close + cancel on the running loop. The caller
+            # gets sync semantics; teardown happens asynchronously.
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            loop.create_task(_teardown(ws, task))
 
-    async def show_actor(self, *args, **kwargs) -> ActorDetail:
-        raise NotImplementedError("show_actor not yet migrated; see #35 phase 2")
+        return cancel
 
-    async def list_runs(self, *args, **kwargs) -> Tuple[List[Run], int]:
-        raise NotImplementedError("list_runs not yet migrated; see #35 phase 2")
 
-    async def get_run(self, *args, **kwargs) -> Optional[Run]:
-        raise NotImplementedError("get_run not yet migrated; see #35 phase 2")
-
-    async def get_logs(self, *args, **kwargs) -> LogsResult:
-        raise NotImplementedError("get_logs not yet migrated; see #35 phase 2")
-
-    async def list_roles(self, *args, **kwargs) -> Dict[str, Role]:
-        raise NotImplementedError("list_roles not yet migrated; see #35 phase 2")
-
-    async def publish_notification(self, *args, **kwargs) -> None:
-        raise NotImplementedError(
-            "publish_notification not yet migrated; see #35 phase 2"
-        )
-
-    async def subscribe_notifications(self, *args, **kwargs) -> Cancel:
-        raise NotImplementedError(
-            "subscribe_notifications not yet migrated; see #35 phase 2"
-        )
+async def _teardown(ws, task) -> None:
+    try:
+        await ws.close()
+    except Exception:
+        pass
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
