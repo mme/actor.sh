@@ -1895,12 +1895,22 @@ class ActorWatchApp(App):
         if renderables is None:
             # Cancelled mid-build; the newer worker owns the apply.
             return
-        self.call_from_thread(
-            self._apply_log_build,
-            token, actor_name, entries, renderables, width, at_bottom,
+        # Schedule the chunked apply on the main event loop. `run_worker`
+        # is thread-safe (it routes through `call_from_thread` when
+        # called off the main thread) and `exclusive=True` cancels any
+        # in-flight apply for the prior token — belt to the per-batch
+        # token check's suspenders.
+        self.run_worker(
+            self._apply_log_build(
+                token, actor_name, entries, renderables, width, at_bottom,
+            ),
+            name="log_apply",
+            group="log_apply",
+            exclusive=True,
+            exit_on_error=False,
         )
 
-    def _apply_log_build(
+    async def _apply_log_build(
         self,
         token: int,
         actor_name: str,
@@ -1919,7 +1929,17 @@ class ActorWatchApp(App):
         except Exception:
             self._log_build_pending = False
             return
-        apply_log_renderables(log, renderables)
+
+        def is_cancelled() -> bool:
+            return token != self._log_build_token
+
+        applied = await apply_log_renderables(
+            log, renderables, is_cancelled=is_cancelled,
+        )
+        if not applied:
+            # Newer build superseded us mid-apply; leave the pending
+            # flag for the newer apply to clear.
+            return
         self._log_build_pending = False
         self._last_log_actor = actor_name
         self._last_log_count = len(entries)

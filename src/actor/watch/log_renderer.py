@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Callable
 
 from rich.padding import Padding
@@ -22,21 +23,33 @@ from .types import ThemeColors
 CancelCheck = Callable[[], bool]
 
 
+# Empirical: ~50 renderables/batch keeps each tick well under 16ms for
+# our typical mix (markdown blocks, tables, plain text), which leaves
+# the event loop running at >60Hz mid-apply. Adjust if the renderable
+# mix shifts; the build path's per-entry cost is far heavier than the
+# apply's per-renderable cost, so this lever rarely needs to move.
+DEFAULT_APPLY_BATCH = 50
+
+
 def _never_cancelled() -> bool:
     return False
 
 
 def render_log_entries(log: RichLog, entries: list, colors: ThemeColors) -> None:
     """Synchronous full rerender — kept for tests and any caller that
-    doesn't want to deal with the two-phase build/apply dance.
+    doesn't want to deal with the two-phase build/apply dance or the
+    chunked async apply.
 
     The watch app uses `build_log_renderables` + `apply_log_renderables`
     directly so the expensive markdown/table construction runs off the
-    main thread."""
+    main thread and the apply yields to the event loop between batches."""
     renderables = build_log_renderables(entries, colors)
     if renderables is None:
         return  # unreachable with the default never-cancel check
-    apply_log_renderables(log, renderables)
+    log.clear()
+    padded = _RightPaddedLog(log)
+    for content, kwargs in renderables:
+        padded.write(content, **kwargs)
 
 
 class _BufferingLog:
@@ -113,16 +126,35 @@ class _RightPaddedLog:
         return getattr(self._inner, name)
 
 
-def apply_log_renderables(
-    log: RichLog, renderables: list[tuple[object, dict]],
-) -> None:
+async def apply_log_renderables(
+    log: RichLog,
+    renderables: list[tuple[object, dict]],
+    *,
+    batch: int = DEFAULT_APPLY_BATCH,
+    is_cancelled: CancelCheck = _never_cancelled,
+) -> bool:
     """Commit buffered renderables from `build_log_renderables` onto a
-    real RichLog. Must run on the main thread — `clear` and `write`
-    mutate widget state that the compositor reads."""
+    real RichLog, yielding to the event loop between batches so input
+    and scroll events still process while a long apply is in flight.
+
+    Must run on the main thread — `clear` and `write` mutate widget
+    state that the compositor reads.
+
+    Returns True when the apply finished, False when `is_cancelled()`
+    flipped True between batches. The caller should only commit
+    "what we just rendered" state (last_log_count etc.) on True; on
+    False a newer apply owns the widget and will land its own state."""
+    if is_cancelled():
+        return False
     log.clear()
     padded = _RightPaddedLog(log)
-    for content, kwargs in renderables:
-        padded.write(content, **kwargs)
+    for i in range(0, len(renderables), batch):
+        if is_cancelled():
+            return False
+        for content, kwargs in renderables[i : i + batch]:
+            padded.write(content, **kwargs)
+        await asyncio.sleep(0)
+    return True
 
 
 def append_log_entries(
