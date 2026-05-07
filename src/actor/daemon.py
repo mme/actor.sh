@@ -76,30 +76,50 @@ class _ConnectionCounter:
 
 
 class _SubscriberRegistry:
-    """Per-daemon set of subscriber send-callbacks, one per active
-    `SubscribeNotifications` stream. Each handler registers a
-    coroutine that knows how to send a `Notification` on its own
-    stream, and unregisters when the stream ends. The daemon-side
-    `LocalActorService` is subscribed once at startup; `fan_out`
-    awaits each subscriber's send so `publish_notification` doesn't
-    return until every wire frame has been written.
+    """Per-daemon set of subscriber send-callbacks + stop-events,
+    one per active `SubscribeNotifications` stream. Each handler
+    registers a coroutine that knows how to send a `Notification`
+    on its own stream and an `asyncio.Event` it parks on while
+    waiting for events; the registry sets the event when the
+    daemon shuts down so handlers can exit cleanly without leaving
+    the gRPC server's `wait_closed()` blocked.
 
-    Awaiting inline (rather than queueing + draining in a separate
-    task) keeps notification delivery in lockstep with run-completion:
-    by the time `wait_for_run` returns to the caller, every
-    subscriber has the event. Otherwise a caller that subscribes,
-    runs, and immediately cancels can race the fan-out and lose
-    its event.
+    The daemon-side `LocalActorService` is subscribed once at
+    startup; `fan_out` awaits each subscriber's send so
+    `publish_notification` doesn't return until every wire frame
+    has been written. Awaiting inline (rather than queueing +
+    draining in a separate task) keeps notification delivery in
+    lockstep with run-completion.
     """
 
     def __init__(self) -> None:
         self._senders: Set[Callable[[Notification], Awaitable[None]]] = set()
+        self._stops: Set[asyncio.Event] = set()
 
-    def add(self, sender: Callable[[Notification], Awaitable[None]]) -> None:
+    def add(
+        self,
+        sender: Callable[[Notification], Awaitable[None]],
+        stop: Optional[asyncio.Event] = None,
+    ) -> None:
         self._senders.add(sender)
+        if stop is not None:
+            self._stops.add(stop)
 
-    def remove(self, sender: Callable[[Notification], Awaitable[None]]) -> None:
+    def remove(
+        self,
+        sender: Callable[[Notification], Awaitable[None]],
+        stop: Optional[asyncio.Event] = None,
+    ) -> None:
         self._senders.discard(sender)
+        if stop is not None:
+            self._stops.discard(stop)
+
+    def shutdown(self) -> None:
+        """Signal every active subscriber to exit. Called from the
+        daemon's main shutdown path so `server.wait_closed()` doesn't
+        park on parked subscriber handlers."""
+        for stop in list(self._stops):
+            stop.set()
 
     async def fan_out(self, n: Notification) -> None:
         for sender in list(self._senders):
@@ -384,7 +404,7 @@ class ActorServiceServicer(pb.ActorServiceBase):
                 async with send_lock:
                     await stream.send_message(wire.notification_to_pb(n))
 
-            self._subs.add(_send)
+            self._subs.add(_send, stop)
             # Send initial metadata eagerly so clients can synchronize
             # on "subscribe registered" before publishing — without
             # this ack, a publisher that fires immediately after
@@ -394,15 +414,16 @@ class ActorServiceServicer(pb.ActorServiceBase):
                 await stream.send_initial_metadata()
             except Exception:
                 pass
-            # Park here until the client closes the stream. We don't
-            # actually need to read more from it — the only client
-            # message was the SubscribeNotificationsRequest.
+            # Park until either the client closes the stream
+            # (CancelledError flows in) or the daemon's shutdown
+            # path signals our stop event. Both paths exit cleanly
+            # without leaving `server.wait_closed()` blocked.
             try:
                 await stop.wait()
             except asyncio.CancelledError:
                 raise
             finally:
-                self._subs.remove(_send)
+                self._subs.remove(_send, stop)
 
     async def _interactive_session(self, stream: Stream) -> None:
         with _CallContext(stream.metadata), _ConnectionCounter():
@@ -987,6 +1008,9 @@ async def main(
     try:
         await stop_event.wait()
     finally:
+        # Signal every parked subscriber so their handlers exit
+        # before we ask the gRPC server to drain.
+        subscribers.shutdown()
         server.close()
         try:
             await asyncio.wait_for(server.wait_closed(), timeout=5)
