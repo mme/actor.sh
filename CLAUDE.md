@@ -119,6 +119,31 @@ uv run python -m unittest tests.test_actor    # single module
 
 Tests use in-memory SQLite and fake implementations (FakeAgent, FakeGit, FakeProcessManager) — no real processes or git repos needed.
 
+### Soak test (pre-release / pre-merge confidence check)
+
+`tests/test_soak.py` exercises the daemon under sustained simulated load
+and asserts memory / FD / log-rotation behaviour at the end. It does NOT
+run as part of the default suite — `unittest discover` skips it.
+
+```bash
+ACTOR_RUN_SOAK=1 uv run python -m unittest tests.test_soak  # ~30 min
+SOAK_DURATION=86400 ACTOR_RUN_SOAK=1 \
+  uv run python -m unittest tests.test_soak                  # 24h
+```
+
+Knobs (env vars, all optional):
+- `SOAK_DURATION` — seconds (default 1800 = 30 min).
+- `SOAK_ACTOR_COUNT` — concurrent actors per cycle (default 5).
+- `SOAK_METRICS_PATH` — CSV destination (default `/tmp/actord-soak-metrics.csv`).
+
+Each cycle creates `SOAK_ACTOR_COUNT` actors with a fake-claude run, lists,
+shows, and discards them; a separate subscriber receives notifications and
+periodically simulates a network blip to exercise auto-reconnect. Metrics
+land in the CSV every minute (RSS / FD count / connection count / log size /
+db size). Final assertions: daemon alive, RSS within 50MB of warmup,
+FD count within ±10% of post-warmup, every notification delivered, log
+rotated correctly when it crosses 10MB.
+
 ### End-to-end TUI tests with Textual's Pilot
 
 **Default to writing real e2e tests for any user-visible behavior.** A
