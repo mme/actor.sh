@@ -13,7 +13,7 @@ proto:
 check-proto:
 	@tmpdir=$$(mktemp -d); \
 	uv run protoc -I proto --python_betterproto_out=$$tmpdir proto/actor.proto && \
-	diff -ruN src/actor/_proto $$tmpdir; rc=$$?; \
+	diff -ruN --exclude=__pycache__ src/actor/_proto $$tmpdir; rc=$$?; \
 	rm -rf $$tmpdir; \
 	if [ $$rc -ne 0 ]; then \
 		echo "ERROR: generated code is stale; run 'make proto' and commit"; \

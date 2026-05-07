@@ -13,15 +13,11 @@ from .errors import ActorError, ConfigError, DaemonUnreachableError
 from .interfaces import Agent
 from .service import (
     ActorService,
-    LocalActorService,
     RemoteActorService,
     agent_class,
     create_agent,
 )
 from .types import ActorConfig, AgentKind, parse_config
-from .db import Database
-from .git import RealGit
-from .process import RealProcessManager
 
 
 def _create_agent(kind: AgentKind) -> Agent:
@@ -353,30 +349,6 @@ def _build_remote_service() -> RemoteActorService:
     user-wide daemon socket. The daemon must be running; the CLI does
     NOT auto-spawn it (Phase 3)."""
     return RemoteActorService(_daemon_socket_uri())
-
-
-def _build_local_service(app_config=None) -> LocalActorService:
-    """Construct a `LocalActorService` — used only for the interactive
-    PTY path (`actor run -i`). Phase 2 intentionally keeps interactive
-    sessions local; the rest of the CLI goes through `actord`.
-
-    Both services share the SQLite DB at `~/.actor/actor.db`; SQLite's
-    WAL mode handles the local-and-daemon concurrent writers. The
-    interactive run's state changes (run row insert / pid update /
-    finalize) become visible to the daemon-side service through the
-    shared DB on the next read."""
-    try:
-        db = Database.open(_db_path())
-    except Exception as e:
-        print(f"error: failed to open database: {e}", file=sys.stderr)
-        sys.exit(1)
-    return LocalActorService(
-        db=db,
-        git=RealGit(),
-        proc_mgr=RealProcessManager(),
-        agent_factory=_create_agent,
-        app_config=app_config,
-    )
 
 
 async def _propagate_run_exit(service: ActorService, name: str) -> None:

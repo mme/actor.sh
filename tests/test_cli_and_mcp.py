@@ -86,9 +86,7 @@ class NewCommandTests(unittest.TestCase):
              patch("actor.service.RemoteActorService.run_actor", run_actor), \
              patch("actor.service.RemoteActorService.latest_run", new=AsyncMock(return_value=latest_run)), \
              patch("actor.config.load_config", return_value=cfg), \
-             patch("actor.cli.Database") as db_cls, \
              patch("sys.stdin", stdin):
-            db_cls.open.return_value = MagicMock()
             try:
                 main(argv)
                 exit_code = 0
@@ -236,9 +234,7 @@ class NewCommandTests(unittest.TestCase):
 
         with patch("actor.service.RemoteActorService.new_actor", new_actor), \
              patch("actor.service.RemoteActorService.run_actor", run_actor), \
-             patch("actor.config.load_config", return_value=AppConfig()), \
-             patch("actor.cli.Database") as db_cls:
-            db_cls.open.return_value = MagicMock()
+             patch("actor.config.load_config", return_value=AppConfig()):
             stderr = io.StringIO()
             with patch("sys.stderr", stderr):
                 try:
@@ -262,9 +258,7 @@ class RunCommandTests(unittest.TestCase):
         with patch("actor.service.RemoteActorService.run_actor", run_actor), \
              patch("actor.service.RemoteActorService.get_actor", get_actor), \
              patch("actor.service.RemoteActorService.latest_run", new=AsyncMock(return_value=latest_run)), \
-             patch("actor.config.load_config", return_value=AppConfig()), \
-             patch("actor.cli.Database") as db_cls:
-            db_cls.open.return_value = MagicMock()
+             patch("actor.config.load_config", return_value=AppConfig()):
             stdin = io.StringIO("")
             stdin.isatty = lambda: True  # type: ignore[assignment]
             with patch("sys.stdin", stdin):
@@ -305,9 +299,7 @@ class RunCommandTests(unittest.TestCase):
 
     def test_run_without_prompt_and_tty_exits_nonzero(self):
         from actor import AppConfig
-        with patch("actor.config.load_config", return_value=AppConfig()), \
-             patch("actor.cli.Database") as db_cls:
-            db_cls.open.return_value = MagicMock()
+        with patch("actor.config.load_config", return_value=AppConfig()):
             stdin = io.StringIO("")
             stdin.isatty = lambda: True  # type: ignore[assignment]
             with patch("sys.stdin", stdin), patch("sys.stderr", io.StringIO()):
