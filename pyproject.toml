@@ -19,6 +19,8 @@ dependencies = [
     "textual>=1.0",
     "grpclib>=0.4.7",
     "betterproto>=2.0.0b7",
+    "cryptography>=42",
+    "zeroconf>=0.131",
 ]
 keywords = ["cli", "agents", "coding", "parallel", "worktree"]
 classifiers = [

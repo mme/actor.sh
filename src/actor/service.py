@@ -163,6 +163,8 @@ class ServerInfo:
     started_at: str
     version: str
     connection_count: int
+    fingerprint: str = ""
+    instance_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -1413,6 +1415,7 @@ def _build_rpc_paths():
         "list_roles": ("/actor.v1.ActorService/ListRoles", pb.ListRolesResponse),
         "publish_notification": ("/actor.v1.ActorService/PublishNotification", pb.PublishNotificationResponse),
         "get_server_info": ("/actor.v1.ActorService/GetServerInfo", pb.GetServerInfoResponse),
+        "list_servers": ("/actor.v1.ActorService/ListServers", pb.ListServersResponse),
     }
 
 
@@ -1774,7 +1777,19 @@ class RemoteActorService(ActorService):
             started_at=resp.started_at,
             version=resp.version,
             connection_count=resp.connection_count,
+            fingerprint=resp.fingerprint,
+            instance_name=resp.instance_name,
         )
+
+    async def list_servers(self) -> List["ServerRecord"]:
+        """Return the daemon's current zeroconf snapshot — the local
+        self-record first, then every discovered peer. Empty (i.e.
+        just self) when nothing else is on the network."""
+        from . import wire
+        from ._proto.actor.v1 import ListServersRequest
+        from .discovery import ServerRecord
+        resp = await self._stub_call("list_servers", ListServersRequest())
+        return [wire.server_record_from_pb(r) for r in resp.servers]
 
     async def subscribe_notifications(
         self, handler: NotificationHandler,

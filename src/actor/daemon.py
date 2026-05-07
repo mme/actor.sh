@@ -33,8 +33,10 @@ from grpclib.server import Server, Stream
 from . import wire
 from ._proto.actor import v1 as pb
 from .db import Database
+from .discovery import DiscoveryService
 from .errors import ActorError, ConfigError, NotFoundError
 from .git import RealGit
+from .identity import Identity, load_or_create_identity
 from .interfaces import binary_exists
 from .process import RealProcessManager
 from .service import (
@@ -208,10 +210,14 @@ class ActorServiceServicer(pb.ActorServiceBase):
         subscribers: _SubscriberRegistry,
         *,
         started_at: str,
+        identity: Optional[Identity] = None,
+        discovery: Optional[DiscoveryService] = None,
     ) -> None:
         self._service = service
         self._subs = subscribers
         self._started_at = started_at
+        self._identity = identity
+        self._discovery = discovery
 
     # -- unary handlers (each receives a raw Stream) ------------------
 
@@ -371,11 +377,49 @@ class ActorServiceServicer(pb.ActorServiceBase):
         from . import __version__ as _ver
         # Subtract 1 for the ongoing GetServerInfo handler itself.
         active = max(0, _active_handlers - 1)
+        fingerprint = self._identity.fingerprint if self._identity else ""
+        if self._discovery is not None and self._discovery.published:
+            instance = self._discovery.instance_name
+        else:
+            instance = ""
         return pb.GetServerInfoResponse(
             pid=os.getpid(),
             started_at=self._started_at,
             version=_ver,
             connection_count=active,
+            fingerprint=fingerprint,
+            instance_name=instance,
+        )
+
+    async def _list_servers(self, stream: Stream) -> None:
+        await _unary(stream, pb.ListServersRequest, self._do_list_servers)
+
+    async def _do_list_servers(
+        self, req: pb.ListServersRequest,
+    ) -> pb.ListServersResponse:
+        if self._discovery is None:
+            # Discovery never started — synthesize a minimal self-record
+            # so callers always see at least the local daemon.
+            from . import __version__ as _ver
+            from .discovery import ADVERTISED_PORT
+            host = _socket.gethostname()
+            host = host if host.endswith(".local") else f"{host}.local"
+            return pb.ListServersResponse(servers=[
+                pb.ServerRecord(
+                    instance_name=host.rsplit(".local", 1)[0] or "actord",
+                    host=host,
+                    port=ADVERTISED_PORT,
+                    fingerprint=self._identity.fingerprint if self._identity else "",
+                    version=_ver,
+                    user=os.environ.get("USER") or "unknown",
+                    pid=os.getpid(),
+                    is_self=True,
+                    last_seen=0.0,
+                ),
+            ])
+        servers = self._discovery.snapshot()
+        return pb.ListServersResponse(
+            servers=[wire.server_record_to_pb(r) for r in servers],
         )
 
     async def _publish_notification(self, stream: Stream) -> None:
@@ -529,6 +573,10 @@ class ActorServiceServicer(pb.ActorServiceBase):
             "/actor.v1.ActorService/GetServerInfo": _const.Handler(
                 self._get_server_info, _const.Cardinality.UNARY_UNARY,
                 pb.GetServerInfoRequest, pb.GetServerInfoResponse,
+            ),
+            "/actor.v1.ActorService/ListServers": _const.Handler(
+                self._list_servers, _const.Cardinality.UNARY_UNARY,
+                pb.ListServersRequest, pb.ListServersResponse,
             ),
             "/actor.v1.ActorService/SubscribeNotifications": _const.Handler(
                 self._subscribe_notifications, _const.Cardinality.UNARY_STREAM,
@@ -976,8 +1024,54 @@ async def main(
     subscribers = _SubscriberRegistry()
     await service.subscribe_notifications(subscribers.fan_out)
 
+    # Identity (Phase 4): generate the daemon's keypair + cert if
+    # absent. The fingerprint goes into the zeroconf TXT record + the
+    # GetServerInfo response so peers can pin against us in Phase 6.
+    try:
+        identity = load_or_create_identity()
+    except Exception as e:
+        log.warning("identity load/generate failed; running unidentified: %s", e)
+        identity = None
+
     started_at = _now_iso()
-    servicer = ActorServiceServicer(service, subscribers, started_at=started_at)
+
+    # Discovery (Phase 4): spin up zeroconf publishing + browsing.
+    # Instance name comes from settings.kdl `daemon { name "..." }`,
+    # falling back to the system hostname.
+    discovery: Optional[DiscoveryService] = None
+    if identity is not None:
+        from . import __version__ as _ver
+        from .discovery import ADVERTISED_PORT
+        configured_name = None
+        try:
+            from .config import load_config
+            cfg = load_config()
+            configured_name = cfg.daemon.name
+        except Exception as e:
+            log.debug("daemon config load failed for discovery name: %s", e)
+        instance_name = configured_name or _socket.gethostname() or "actord"
+        # Sanitize via the helper rather than letting zeroconf reject
+        # a hostname with dots.
+        from .discovery import _safe_instance_name
+        instance_name = _safe_instance_name(instance_name)
+        discovery = DiscoveryService(
+            instance_name=instance_name,
+            fingerprint=identity.fingerprint,
+            version=_ver,
+            pid=os.getpid(),
+            port=ADVERTISED_PORT,
+        )
+        try:
+            await discovery.start()
+        except Exception as e:
+            log.warning("zeroconf start failed; continuing without discovery: %s", e)
+
+    servicer = ActorServiceServicer(
+        service, subscribers,
+        started_at=started_at,
+        identity=identity,
+        discovery=discovery,
+    )
     server = Server([servicer])
 
     await server.start(path=str(socket_path))
@@ -1011,6 +1105,13 @@ async def main(
         # Signal every parked subscriber so their handlers exit
         # before we ask the gRPC server to drain.
         subscribers.shutdown()
+        if discovery is not None:
+            try:
+                await asyncio.wait_for(discovery.stop(), timeout=3)
+            except asyncio.TimeoutError:
+                log.warning("zeroconf shutdown timed out; continuing")
+            except Exception as e:
+                log.warning("zeroconf shutdown failed: %s", e)
         server.close()
         try:
             await asyncio.wait_for(server.wait_closed(), timeout=5)

@@ -34,6 +34,7 @@ from .errors import (
     NotRunningError,
 )
 from .interfaces import LogEntry, LogEntryKind
+from .discovery import ServerRecord
 from .service import (
     ActorDetail,
     DiscardResult,
@@ -355,6 +356,34 @@ def notification_from_pb(n: pb.Notification) -> Notification:
     )
 
 
+def server_record_to_pb(r: ServerRecord) -> pb.ServerRecord:
+    return pb.ServerRecord(
+        instance_name=r.instance_name,
+        host=r.host,
+        port=r.port,
+        fingerprint=r.fingerprint,
+        version=r.version,
+        user=r.user,
+        pid=r.pid,
+        is_self=r.is_self,
+        last_seen=float(r.last_seen),
+    )
+
+
+def server_record_from_pb(r: pb.ServerRecord) -> ServerRecord:
+    return ServerRecord(
+        instance_name=r.instance_name,
+        host=r.host,
+        port=r.port,
+        fingerprint=r.fingerprint,
+        version=r.version,
+        user=r.user,
+        pid=r.pid,
+        is_self=r.is_self,
+        last_seen=r.last_seen,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Error mapping
 # ---------------------------------------------------------------------------
@@ -473,6 +502,8 @@ __all__ = [
     "logs_result_from_pb",
     "notification_to_pb",
     "notification_from_pb",
+    "server_record_to_pb",
+    "server_record_from_pb",
     "actor_error_to_grpc",
     "raise_from_grpc",
 ]

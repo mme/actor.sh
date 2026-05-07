@@ -351,6 +351,30 @@ Examples:
         help="Stream new log lines as they arrive (Ctrl-C to exit)",
     )
 
+    # -- servers --
+    p_servers = sub.add_parser(
+        "servers",
+        help="List actord daemons discovered on the LAN (zeroconf, Phase 4)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Each running actord advertises itself via mDNS as `_actor._tcp.local.`.
+This command queries the local daemon for its in-memory peer set and
+prints a table; the local daemon always appears first, marked with `*`.
+
+Examples:
+  actor servers                  Plain table (compact fingerprint)
+  actor servers --verbose        Show full sha256 fingerprints
+  actor servers --json           Machine-readable output""",
+    )
+    p_servers.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Show full sha256 fingerprints instead of the short prefix",
+    )
+    p_servers.add_argument(
+        "--json", action="store_true",
+        help="Print the records as JSON instead of a table",
+    )
+
     # -- main --
     p_main = sub.add_parser(
         "main",
@@ -669,6 +693,30 @@ async def _amain(argv: Optional[List[str]] = None) -> None:
         elif args.command == "discard":
             result = await service.discard_actor(name=args.name, force=args.force)
             print(cli_format.format_discard(result))
+
+        elif args.command == "servers":
+            servers = await service.list_servers()
+            if args.json:
+                import json
+                print(json.dumps(
+                    [
+                        {
+                            "instance_name": s.instance_name,
+                            "host": s.host,
+                            "port": s.port,
+                            "fingerprint": s.fingerprint,
+                            "version": s.version,
+                            "user": s.user,
+                            "pid": s.pid,
+                            "is_self": s.is_self,
+                            "last_seen": s.last_seen,
+                        }
+                        for s in servers
+                    ],
+                    indent=2,
+                ))
+            else:
+                print(cli_format.format_servers(servers, verbose=args.verbose), end="")
 
     except DaemonUnreachableError as e:
         # Same exit code as other ActorErrors but a friendlier message.

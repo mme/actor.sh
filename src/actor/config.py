@@ -96,11 +96,22 @@ class Ask:
 
 
 @dataclass
+class DaemonConfig:
+    """Settings for the actord process itself.
+
+    Phase 4 introduces a single key (`name`) used as the zeroconf
+    service-instance name; future fields land here. `None` means
+    "use the system hostname"."""
+    name: Optional[str] = None
+
+
+@dataclass
 class AppConfig:
     roles: Dict[str, Role] = field(default_factory=dict)
     agent_defaults: Dict[str, AgentDefaults] = field(default_factory=dict)
     hooks: Hooks = field(default_factory=Hooks)
     ask: Ask = field(default_factory=Ask)
+    daemon: DaemonConfig = field(default_factory=DaemonConfig)
 
 
 _HOOK_KEYS = {
@@ -504,6 +515,62 @@ def _parse_ask_block(node, source: Path) -> Ask:
     return ask
 
 
+_DAEMON_KEYS: Tuple[str, ...] = ("name",)
+
+
+def _parse_daemon_block(node, source: Path) -> DaemonConfig:
+    """Parse a top-level `daemon { ... }` block (Phase 4).
+
+    Currently one key: `name "<instance>"` — the mDNS service-instance
+    name. Future daemon-scoped settings will join this block.
+    """
+    if node.args:
+        raise ConfigError(
+            f"daemon block in {source} does not accept positional args"
+        )
+    if getattr(node, "props", None):
+        raise ConfigError(
+            f"daemon block in {source} does not accept properties"
+        )
+    out = DaemonConfig()
+    seen: set[str] = set()
+    for child in node.nodes:
+        key = child.name
+        if key not in _DAEMON_KEYS:
+            raise ConfigError(
+                f"daemon block in {source}: unknown key '{key}' "
+                f"(valid: {', '.join(_DAEMON_KEYS)})"
+            )
+        if key in seen:
+            raise ConfigError(
+                f"daemon block in {source}: duplicate key '{key}'"
+            )
+        seen.add(key)
+        if not child.args:
+            raise ConfigError(
+                f"daemon block in {source}: '{key}' needs a value"
+            )
+        if len(child.args) > 1:
+            raise ConfigError(
+                f"daemon block in {source}: '{key}' has extra args"
+            )
+        if getattr(child, "props", None):
+            raise ConfigError(
+                f"daemon block in {source}: '{key}' does not accept properties"
+            )
+        raw = child.args[0]
+        if raw is None:
+            out.name = None
+            continue
+        if not isinstance(raw, str):
+            raise ConfigError(
+                f"daemon block in {source}: '{key}' must be a string"
+            )
+        if key == "name":
+            out.name = raw
+    return out
+
+
 def _parse_kdl_file(path: Path) -> AppConfig:
     try:
         text = path.read_text()
@@ -516,6 +583,7 @@ def _parse_kdl_file(path: Path) -> AppConfig:
     cfg = AppConfig()
     hooks_seen = False
     ask_seen = False
+    daemon_seen = False
     for node in doc.nodes:
         if node.name == "role":
             role = _parse_role(node, path)
@@ -545,6 +613,13 @@ def _parse_kdl_file(path: Path) -> AppConfig:
                 )
             ask_seen = True
             cfg.ask = _parse_ask_block(node, path)
+        elif node.name == "daemon":
+            if daemon_seen:
+                raise ConfigError(
+                    f"duplicate daemon block in {path}"
+                )
+            daemon_seen = True
+            cfg.daemon = _parse_daemon_block(node, path)
         # Silently ignore alias — follow-up ticket (#33) — to keep the
         # parser lenient for forward compat with future top-level blocks.
     return cfg
@@ -597,11 +672,15 @@ def _merge(base: AppConfig, over: AppConfig) -> AppConfig:
     # in `over` means "didn't mention it", so the base value (or ultimately
     # the hardcoded default) is preserved.
     merged_ask = Ask(values={**base.ask.values, **over.ask.values})
+    merged_daemon = DaemonConfig(
+        name=over.daemon.name if over.daemon.name is not None else base.daemon.name,
+    )
     return AppConfig(
         roles=merged_roles,
         agent_defaults=merged_defaults,
         hooks=merged_hooks,
         ask=merged_ask,
+        daemon=merged_daemon,
     )
 
 

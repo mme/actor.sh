@@ -386,6 +386,52 @@ class GetServerInfoResponse(betterproto.Message):
     connection_count: int = betterproto.int32_field(4)
     """Number of currently-active client streams (rough load gauge)."""
 
+    fingerprint: str = betterproto.string_field(5)
+    """
+    Per-daemon identity fingerprint, "sha256:<hex>". Phase 4: used as
+     the published TXT record + shown by `actor servers`. Phase 6: same
+     string drives mTLS pinning.
+    """
+
+    instance_name: str = betterproto.string_field(6)
+    """
+    Service-instance name advertised over zeroconf (defaults to
+     hostname). Empty when zeroconf publishing failed.
+    """
+
+
+@dataclass(eq=False, repr=False)
+class ServerRecord(betterproto.Message):
+    """
+    One discovered (or local) actord on the network. The local daemon
+     is included with `is_self=true` so `actor servers` can confirm
+     "yes, I am advertising" with no special-casing.
+    """
+
+    instance_name: str = betterproto.string_field(1)
+    host: str = betterproto.string_field(2)
+    port: int = betterproto.int32_field(3)
+    fingerprint: str = betterproto.string_field(4)
+    version: str = betterproto.string_field(5)
+    user: str = betterproto.string_field(6)
+    pid: int = betterproto.int32_field(7)
+    is_self: bool = betterproto.bool_field(8)
+    last_seen: float = betterproto.double_field(9)
+    """
+    Unix epoch seconds. Set when the record was first seen / last
+     refreshed by zeroconf. 0 for the local self record.
+    """
+
+
+@dataclass(eq=False, repr=False)
+class ListServersRequest(betterproto.Message):
+    pass
+
+
+@dataclass(eq=False, repr=False)
+class ListServersResponse(betterproto.Message):
+    servers: List["ServerRecord"] = betterproto.message_field(1)
+
 
 @dataclass(eq=False, repr=False)
 class SubscribeNotificationsRequest(betterproto.Message):
@@ -774,6 +820,23 @@ class ActorServiceStub(betterproto.ServiceStub):
             metadata=metadata,
         )
 
+    async def list_servers(
+        self,
+        list_servers_request: "ListServersRequest",
+        *,
+        timeout: Optional[float] = None,
+        deadline: Optional["Deadline"] = None,
+        metadata: Optional["MetadataLike"] = None
+    ) -> "ListServersResponse":
+        return await self._unary_unary(
+            "/actor.v1.ActorService/ListServers",
+            list_servers_request,
+            ListServersResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
     async def interactive_session(
         self,
         client_frame_iterator: Union[AsyncIterable[ClientFrame], Iterable[ClientFrame]],
@@ -891,6 +954,11 @@ class ActorServiceBase(ServiceBase):
     async def get_server_info(
         self, get_server_info_request: "GetServerInfoRequest"
     ) -> "GetServerInfoResponse":
+        raise grpclib.GRPCError(grpclib.const.Status.UNIMPLEMENTED)
+
+    async def list_servers(
+        self, list_servers_request: "ListServersRequest"
+    ) -> "ListServersResponse":
         raise grpclib.GRPCError(grpclib.const.Status.UNIMPLEMENTED)
 
     async def interactive_session(
@@ -1045,6 +1113,13 @@ class ActorServiceBase(ServiceBase):
         response = await self.get_server_info(request)
         await stream.send_message(response)
 
+    async def __rpc_list_servers(
+        self, stream: "grpclib.server.Stream[ListServersRequest, ListServersResponse]"
+    ) -> None:
+        request = await stream.recv_message()
+        response = await self.list_servers(request)
+        await stream.send_message(response)
+
     async def __rpc_interactive_session(
         self, stream: "grpclib.server.Stream[ClientFrame, ServerFrame]"
     ) -> None:
@@ -1176,6 +1251,12 @@ class ActorServiceBase(ServiceBase):
                 grpclib.const.Cardinality.UNARY_UNARY,
                 GetServerInfoRequest,
                 GetServerInfoResponse,
+            ),
+            "/actor.v1.ActorService/ListServers": grpclib.const.Handler(
+                self.__rpc_list_servers,
+                grpclib.const.Cardinality.UNARY_UNARY,
+                ListServersRequest,
+                ListServersResponse,
             ),
             "/actor.v1.ActorService/InteractiveSession": grpclib.const.Handler(
                 self.__rpc_interactive_session,

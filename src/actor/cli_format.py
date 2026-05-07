@@ -291,3 +291,49 @@ def format_config_view(config) -> str:
     for key, value in sorted(flat.items()):
         output += f"{key}={value}\n"
     return output
+
+
+def format_servers(servers, verbose: bool = False) -> str:
+    """Render the table for `actor servers`.
+
+    Columns: NAME, HOST, PORT, FINGERPRINT, VERSION, STATUS. The local
+    daemon (`is_self=True`) is appended with a `*` after its name and
+    sorted first; remaining records keep their daemon-supplied order
+    (alphabetical-by-instance).
+
+    `verbose=True` renders the full sha256 fingerprint; otherwise we
+    show the short `sha256:abcd1234` prefix used in tables. When the
+    fingerprint is empty (degraded daemon, identity load failed),
+    print `—` so the column doesn't collapse.
+    """
+    rows = []
+    for s in servers:
+        name = s.instance_name + ("*" if s.is_self else "")
+        if not s.fingerprint:
+            fp = "—"
+        elif verbose:
+            fp = s.fingerprint
+        else:
+            prefix, _, rest = s.fingerprint.partition(":")
+            fp = f"{prefix}:{rest[:8]}" if rest else s.fingerprint
+        status = "self" if s.is_self else "discovered"
+        rows.append((
+            name,
+            s.host or "—",
+            str(s.port) if s.port else "—",
+            fp,
+            s.version or "—",
+            status,
+        ))
+
+    headers = ("NAME", "HOST", "PORT", "FINGERPRINT", "VERSION", "STATUS")
+    widths = [
+        max(len(h), max((len(r[i]) for r in rows), default=0))
+        for i, h in enumerate(headers)
+    ]
+    out = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)).rstrip() + "\n"
+    for row in rows:
+        out += "  ".join(
+            row[i].ljust(widths[i]) for i in range(len(headers))
+        ).rstrip() + "\n"
+    return out

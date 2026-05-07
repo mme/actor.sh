@@ -260,6 +260,35 @@ message GetServerInfoResponse {
   string version = 3;
   // Number of currently-active client streams (rough load gauge).
   int32 connection_count = 4;
+  // Per-daemon identity fingerprint, "sha256:<hex>". Phase 4: used as
+  // the published TXT record + shown by `actor servers`. Phase 6: same
+  // string drives mTLS pinning.
+  string fingerprint = 5;
+  // Service-instance name advertised over zeroconf (defaults to
+  // hostname). Empty when zeroconf publishing failed.
+  string instance_name = 6;
+}
+
+// One discovered (or local) actord on the network. The local daemon
+// is included with `is_self=true` so `actor servers` can confirm
+// "yes, I am advertising" with no special-casing.
+message ServerRecord {
+  string instance_name = 1;
+  string host = 2;
+  int32 port = 3;
+  string fingerprint = 4;
+  string version = 5;
+  string user = 6;
+  int32 pid = 7;
+  bool is_self = 8;
+  // Unix epoch seconds. Set when the record was first seen / last
+  // refreshed by zeroconf. 0 for the local self record.
+  double last_seen = 9;
+}
+
+message ListServersRequest {}
+message ListServersResponse {
+  repeated ServerRecord servers = 1;
 }
 
 message SubscribeNotificationsRequest {}
@@ -350,6 +379,9 @@ service ActorService {
 
   // -- Server introspection (Phase 3 / `actor daemon status`) --
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+
+  // -- Discovery (Phase 4 / `actor servers`) --
+  rpc ListServers(ListServersRequest) returns (ListServersResponse);
 
   // -- Interactive (bidirectional streaming) --
   rpc InteractiveSession(stream ClientFrame) returns (stream ServerFrame);
