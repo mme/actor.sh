@@ -91,9 +91,11 @@ async def running_daemon(
         await proc.wait()
         raise RuntimeError("actord did not bind in time")
 
+    service = RemoteActorService(f"unix:{sock}", auto_spawn=False)
     try:
-        yield RemoteActorService(f"unix:{sock}"), sock
+        yield service, sock
     finally:
+        await service.aclose()
         proc.terminate()
         try:
             await asyncio.wait_for(proc.wait(), timeout=5)

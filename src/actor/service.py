@@ -1401,21 +1401,31 @@ def _ensure_rpc_paths():
 
 
 class RemoteActorService(ActorService):
-    """gRPC client for actord (issue #35, Phase 2.5).
+    """gRPC client for actord (issue #35, Phase 3).
 
-    Wraps the betterproto-generated `ActorServiceStub` and translates
-    its protobuf messages back into the same domain types
-    `LocalActorService` returns. Per-call short-lived `Channel`s for
-    unary methods (matches the Phase 1+2 pattern); `subscribe_notifications`
-    keeps a long-lived channel for server-streaming; `interactive_session`
-    keeps a long-lived channel for bidi streaming.
+    One persistent `grpclib.client.Channel` per service instance,
+    multiplexing unary and streaming RPCs over one HTTP/2 connection
+    to the daemon. The channel reconnects implicitly when the daemon
+    bounces — `grpclib` opens a new TCP connection on the next
+    request — so transient daemon restarts surface only as a single
+    failed RPC, retried once via `_unary_call`.
+
+    Phase 3 wires auto-spawn into `__aenter__` (and lazily into the
+    first call): if the daemon socket isn't reachable, the service
+    Popens `actor daemon start` and polls until ready. The MCP bridge
+    sets `quiet=True`; the CLI prints a one-line stderr notice.
 
     Per-call context (caller cwd, parent actor name) rides on gRPC
-    metadata, not on every request body. See `actor.wire` for the
-    header keys.
+    metadata. See `actor.wire` for the header keys.
     """
 
-    def __init__(self, transport_uri: str) -> None:
+    def __init__(
+        self,
+        transport_uri: str,
+        *,
+        auto_spawn: bool = True,
+        quiet_spawn: bool = False,
+    ) -> None:
         scheme, target = _parse_transport_uri(transport_uri)
         if scheme != "unix":
             raise NotImplementedError(
@@ -1423,6 +1433,35 @@ class RemoteActorService(ActorService):
             )
         self._uri = transport_uri
         self._socket_path = target
+        self._auto_spawn = auto_spawn
+        self._quiet_spawn = quiet_spawn
+        self._chan = None
+        self._chan_lock = asyncio.Lock()
+        self._closed = False
+        # Set after the first auto-spawn attempt so we don't re-spawn
+        # on every reconnect; the daemon only needs to come up once
+        # per client lifetime.
+        self._spawned = False
+
+    async def __aenter__(self) -> "RemoteActorService":
+        await self._ensure_channel()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Close the underlying channel. Idempotent; safe to call from
+        any task. Subsequent RPCs raise `RuntimeError`."""
+        self._closed = True
+        async with self._chan_lock:
+            chan = self._chan
+            self._chan = None
+        if chan is not None:
+            try:
+                chan.close()
+            except Exception:
+                pass
 
     def _metadata(self) -> Dict[str, str]:
         from . import wire
@@ -1432,20 +1471,39 @@ class RemoteActorService(ActorService):
             meta[wire.META_CALLER_ACTOR_NAME] = caller
         return meta
 
-    @asynccontextmanager
-    async def _channel(self):
-        """Open a unix-socket gRPC channel. The pair of `host="."`,
-        `port=None`, `path=...` tells grpclib's `Channel` to use
-        AF_UNIX. Closes the channel on exit."""
-        from grpclib.client import Channel
-        try:
-            chan = Channel(path=self._socket_path)
-        except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
-            raise DaemonUnreachableError(self._socket_path, e) from e
-        try:
-            yield chan
-        finally:
-            chan.close()
+    async def _ensure_channel(self):
+        """Return the live `Channel`, creating it (and auto-spawning
+        the daemon if requested) on first use or after `_reset_channel`.
+        Concurrent callers serialize on `_chan_lock` so only one
+        spawn / channel-open happens."""
+        if self._closed:
+            raise RuntimeError("RemoteActorService is closed")
+        if self._chan is not None:
+            return self._chan
+        async with self._chan_lock:
+            if self._chan is not None:
+                return self._chan
+            if self._auto_spawn and not self._spawned:
+                from .bootstrap import ensure_daemon_running
+                await ensure_daemon_running(
+                    self._socket_path, quiet=self._quiet_spawn,
+                )
+                self._spawned = True
+            from grpclib.client import Channel
+            self._chan = Channel(path=self._socket_path)
+            return self._chan
+
+    async def _reset_channel(self) -> None:
+        """Close the current channel so the next call opens a fresh
+        connection. Used by the auto-reconnect path on `UNAVAILABLE`."""
+        async with self._chan_lock:
+            chan = self._chan
+            self._chan = None
+        if chan is not None:
+            try:
+                chan.close()
+            except Exception:
+                pass
 
     async def _unary_call(
         self,
@@ -1454,42 +1512,58 @@ class RemoteActorService(ActorService):
         request_type: type,
         response_type: type,
     ):
-        """Run a unary RPC against a fresh channel using the
-        lower-level grpclib API. We bypass the betterproto stub here
-        so we can read trailing metadata after the call — the stub
-        wraps the stream and only exposes the response message,
-        which loses our typed-error class name."""
-        from grpclib.const import Cardinality
+        """Run a unary RPC against the persistent channel. On
+        `UNAVAILABLE` (daemon bounced, socket gone, stream reset)
+        reset the channel and retry once. Errors carry the typed
+        ActorError class name in trailing metadata."""
+        from grpclib.const import Cardinality, Status as GrpcStatus
         from grpclib.exceptions import GRPCError, StreamTerminatedError
         from . import wire
 
-        async with self._channel() as chan:
+        last_error: Optional[BaseException] = None
+        for attempt in range(2):
             try:
-                async with chan.request(
-                    rpc_path,
-                    Cardinality.UNARY_UNARY,
-                    request_type,
-                    response_type,
-                    metadata=self._metadata(),
-                ) as stream:
+                chan = await self._ensure_channel()
+            except DaemonUnreachableError:
+                raise
+            stream_cm = chan.request(
+                rpc_path,
+                Cardinality.UNARY_UNARY,
+                request_type,
+                response_type,
+                metadata=self._metadata(),
+            )
+            stream = None
+            try:
+                async with stream_cm as _stream:
+                    stream = _stream
                     await stream.send_message(request, end=True)
                     response = await stream.recv_message()
                     await stream.recv_trailing_metadata()
                     return response
             except GRPCError as exc:
+                if exc.status == GrpcStatus.UNAVAILABLE and attempt == 0:
+                    await self._reset_channel()
+                    last_error = exc
+                    continue
                 type_name = None
-                # `stream.trailing_metadata` is set even when the
-                # server sends a non-OK status. Pull our typed-error
-                # marker from there.
-                trailers = getattr(stream, "trailing_metadata", None)
+                trailers = getattr(stream, "trailing_metadata", None) if stream else None
                 if trailers is not None:
                     type_name = trailers.get(wire.META_ERROR_TYPE)
                 wire.raise_from_grpc(exc, type_name)
-                raise  # unreachable; raise_from_grpc always raises
-            except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
+                raise  # unreachable
+            except (
+                ConnectionRefusedError, FileNotFoundError, OSError,
+                StreamTerminatedError,
+            ) as e:
+                if attempt == 0:
+                    await self._reset_channel()
+                    last_error = e
+                    continue
                 raise DaemonUnreachableError(self._socket_path, e) from e
-            except StreamTerminatedError as e:
-                raise DaemonUnreachableError(self._socket_path, e) from e
+        # Both attempts failed.
+        assert last_error is not None
+        raise DaemonUnreachableError(self._socket_path, last_error) from last_error
 
     async def _stub_call(self, method_name: str, request):
         """Map a service method name + request to the unary call
@@ -1663,13 +1737,14 @@ class RemoteActorService(ActorService):
         self, handler: NotificationHandler,
     ) -> Cancel:
         """Open a long-lived gRPC server-streaming call and forward
-        each `Notification` to `handler` until cancel.
+        each `Notification` to `handler` until cancel. Reconnects
+        transparently if the daemon bounces — events emitted during
+        the gap are lost (the daemon doesn't buffer for absent
+        subscribers, by design).
 
-        The returned `Cancel` closes the channel (which the daemon
-        notices via the half-closed stream and drops the subscription).
-        Cancel is sync to match the existing contract; teardown
-        happens on the running loop as a fire-and-forget task."""
-        from grpclib.client import Channel
+        Returns a sync `Cancel` callable. Calling it stops the
+        reconnect loop and drops the subscription cleanly. Teardown
+        is fire-and-forget on the running loop."""
         from grpclib.const import Cardinality
         from grpclib.exceptions import GRPCError, StreamTerminatedError
         from . import wire
@@ -1678,12 +1753,14 @@ class RemoteActorService(ActorService):
             SubscribeNotificationsRequest,
         )
 
-        try:
-            chan = Channel(path=self._socket_path)
-        except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
-            raise DaemonUnreachableError(self._socket_path, e) from e
+        # Open the first stream + wait for the daemon's initial
+        # metadata so the subscription is registered before this call
+        # returns. Subsequent reconnects are transparent.
+        ready = asyncio.Event()
+        stop = asyncio.Event()
 
-        try:
+        async def _open_stream():
+            chan = await self._ensure_channel()
             stream_cm = chan.request(
                 "/actor.v1.ActorService/SubscribeNotifications",
                 Cardinality.UNARY_STREAM,
@@ -1691,38 +1768,27 @@ class RemoteActorService(ActorService):
                 PbNotification,
                 metadata=self._metadata(),
             )
-        except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
-            chan.close()
-            raise DaemonUnreachableError(self._socket_path, e) from e
-
-        # Send the subscribe request and wait for the daemon to flush
-        # initial metadata — that's our "subscribe registered" ack.
-        # Without it, a publisher that fires immediately after this
-        # call returns can race the daemon's registration. The daemon
-        # explicitly emits initial metadata once the queue is added
-        # to its subscriber registry.
-        try:
             stream = await stream_cm.__aenter__()
             await stream.send_message(
                 SubscribeNotificationsRequest(), end=True,
             )
             await stream.recv_initial_metadata()
+            return stream_cm, stream
+
+        # Open synchronously here so a daemon-unreachable error
+        # surfaces to the caller rather than as a silent reconnect.
+        try:
+            initial_cm, initial_stream = await _open_stream()
         except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
-            try:
-                await stream_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
-            chan.close()
             raise DaemonUnreachableError(self._socket_path, e) from e
         except StreamTerminatedError as e:
-            try:
-                await stream_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
-            chan.close()
             raise DaemonUnreachableError(self._socket_path, e) from e
 
-        async def _reader() -> None:
+        async def _drain(stream_cm, stream) -> bool:
+            """Drain Notifications off `stream` until it ends. Returns
+            True if the stream ended cleanly (cancel) and False if it
+            broke unexpectedly (caller should reconnect)."""
+            broke = False
             try:
                 async for pb_n in stream:
                     n = wire.notification_from_pb(pb_n)
@@ -1738,28 +1804,58 @@ class RemoteActorService(ActorService):
                             f"[actor] subscriber handler raised: {e}",
                             file=sys.stderr,
                         )
-            except (asyncio.CancelledError, GRPCError, StreamTerminatedError):
-                pass
+            except asyncio.CancelledError:
+                raise
+            except (GRPCError, StreamTerminatedError, OSError):
+                broke = True
             except Exception as e:
                 print(
                     f"[actor] subscribe stream error: {e}",
                     file=sys.stderr,
                 )
+                broke = True
             finally:
                 try:
                     await stream_cm.__aexit__(None, None, None)
                 except Exception:
                     pass
-                chan.close()
+            return broke
 
-        task = asyncio.create_task(_reader())
+        async def _reader() -> None:
+            stream_cm, stream = initial_cm, initial_stream
+            ready.set()
+            try:
+                while not stop.is_set():
+                    broke = await _drain(stream_cm, stream)
+                    if not broke or stop.is_set():
+                        return
+                    # Reconnect with backoff. On persistent failure
+                    # (daemon never comes back) we keep retrying —
+                    # the user is meant to either fix it or call
+                    # cancel().
+                    delay = 0.1
+                    while not stop.is_set():
+                        await asyncio.sleep(delay)
+                        try:
+                            stream_cm, stream = await _open_stream()
+                            break
+                        except (
+                            FileNotFoundError, ConnectionRefusedError,
+                            OSError, StreamTerminatedError, GRPCError,
+                        ):
+                            delay = min(delay * 2, 2.0)
+            except asyncio.CancelledError:
+                pass
+
+        reader_task = asyncio.create_task(_reader())
 
         def cancel() -> None:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 return
-            loop.create_task(_subscribe_teardown(chan, task))
+            stop.set()
+            loop.create_task(_subscribe_teardown(reader_task))
 
         return cancel
 
@@ -1782,21 +1878,22 @@ class RemoteActorService(ActorService):
                 #   - call s.send_resize(...) on SIGWINCH
                 #   - call s.send_signal(...) on Ctrl-C
                 # then await s.exit_code() to learn the child's status
-        """
+
+        Reuses this service's channel — the bidi stream rides on the
+        same HTTP/2 connection as unary RPCs."""
         return InteractiveSession(
-            socket_path=self._socket_path,
-            metadata=self._metadata(),
+            service=self,
             actor_name=actor_name,
             cols=cols,
             rows=rows,
         )
 
 
-async def _subscribe_teardown(chan, task) -> None:
-    try:
-        chan.close()
-    except Exception:
-        pass
+async def _subscribe_teardown(task) -> None:
+    """Cancel the subscriber's reader task. The reader's stop event
+    is already set by `cancel()`; cancelling here breaks any
+    in-flight `recv_message` / reconnect sleep so teardown
+    completes promptly."""
     task.cancel()
     try:
         await task
@@ -1858,29 +1955,32 @@ class InteractiveSession:
     can drive it identically.
 
     Lifecycle:
-      __aenter__ → opens the channel + stream, sends OpenSession.
+      __aenter__ → opens a stream on the parent service's channel,
+        sends OpenSession.
       send_stdin / send_resize / send_signal → push ClientFrames.
       recv() → await next ServerFrame; returns None on stream end.
+        Raises `InteractiveSessionEnded` if the daemon disconnects
+        mid-session — the PTY's state lives on the daemon, so a broken
+        stream is unrecoverable.
       exit_code() → resolves to the child's exit code once the
         ExitInfo ServerFrame arrives.
-      __aexit__ → cancels outstanding work and closes the channel.
+      __aexit__ → cancels outstanding work; the parent service's
+        channel stays open for the next call.
     """
 
     def __init__(
         self,
         *,
-        socket_path: str,
-        metadata: Dict[str, str],
+        service: "RemoteActorService",
         actor_name: str,
         cols: Optional[int],
         rows: Optional[int],
     ) -> None:
-        self._socket_path = socket_path
-        self._metadata = metadata
+        self._service = service
+        self._socket_path = service._socket_path
         self._actor_name = actor_name
         self._cols = cols
         self._rows = rows
-        self._chan = None
         self._stream_cm = None
         self._stream = None
         self._exit_code: Optional[int] = None
@@ -1888,8 +1988,8 @@ class InteractiveSession:
         self._exit_event = asyncio.Event()
 
     async def __aenter__(self) -> "InteractiveSession":
-        from grpclib.client import Channel
         from grpclib.const import Cardinality
+        from grpclib.exceptions import StreamTerminatedError
         from ._proto.actor.v1 import (
             ClientFrame,
             OpenSession,
@@ -1897,7 +1997,7 @@ class InteractiveSession:
         )
 
         try:
-            self._chan = Channel(path=self._socket_path)
+            chan = await self._service._ensure_channel()
         except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
             raise DaemonUnreachableError(self._socket_path, e) from e
 
@@ -1906,21 +2006,34 @@ class InteractiveSession:
         # generator that wants the client message iterator up front;
         # for our use case we need to send + receive interleaved, so
         # we drive the stream directly.
-        self._stream_cm = self._chan.request(
+        self._stream_cm = chan.request(
             "/actor.v1.ActorService/InteractiveSession",
             Cardinality.STREAM_STREAM,
             ClientFrame,
             ServerFrame,
-            metadata=self._metadata,
+            metadata=self._service._metadata(),
         )
-        self._stream = await self._stream_cm.__aenter__()
-        # Send headers eagerly so the daemon's handler starts running
-        # before the first ClientFrame arrives.
-        await self._stream.send_request()
-        await self._stream.send_message(ClientFrame(open=OpenSession(
-            actor_name=self._actor_name,
-            cols=self._cols, rows=self._rows,
-        )))
+        try:
+            self._stream = await self._stream_cm.__aenter__()
+            # Send headers eagerly so the daemon's handler starts running
+            # before the first ClientFrame arrives.
+            await self._stream.send_request()
+            await self._stream.send_message(ClientFrame(open=OpenSession(
+                actor_name=self._actor_name,
+                cols=self._cols, rows=self._rows,
+            )))
+        except (
+            FileNotFoundError, ConnectionRefusedError, OSError,
+            StreamTerminatedError,
+        ) as e:
+            try:
+                if self._stream_cm is not None:
+                    await self._stream_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self._stream = None
+            self._stream_cm = None
+            raise DaemonUnreachableError(self._socket_path, e) from e
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -1929,12 +2042,7 @@ class InteractiveSession:
                 await self._stream_cm.__aexit__(exc_type, exc, tb)
         except Exception:
             pass
-        finally:
-            if self._chan is not None:
-                try:
-                    self._chan.close()
-                except Exception:
-                    pass
+        # Channel stays open — it belongs to the parent service.
 
     async def send_stdin(self, data: bytes) -> None:
         from ._proto.actor.v1 import ClientFrame
@@ -1974,9 +2082,13 @@ class InteractiveSession:
 
         If the daemon ended the stream with a non-OK status (e.g. the
         actor doesn't exist), translates the gRPC error back into the
-        original `ActorError` subclass."""
+        original `ActorError` subclass. If the wire breaks
+        unexpectedly (daemon crashed mid-session), raises
+        `InteractiveSessionEnded` — the daemon-side PTY state is gone,
+        nothing to reconnect to."""
         import betterproto
         from grpclib.exceptions import GRPCError, StreamTerminatedError
+        from .errors import InteractiveSessionEnded
         from . import wire as _wire
 
         if not self._stream:
@@ -1990,7 +2102,9 @@ class InteractiveSession:
                 type_name = trailers.get(_wire.META_ERROR_TYPE)
             _wire.raise_from_grpc(exc, type_name)
         except StreamTerminatedError as exc:
-            raise DaemonUnreachableError(self._socket_path, exc) from exc
+            raise InteractiveSessionEnded(
+                "interactive session ended (daemon disconnected)",
+            ) from exc
         if msg is None:
             return None
         kind, value = betterproto.which_one_of(msg, "kind")

@@ -154,9 +154,14 @@ async def running_daemon(
         await proc.wait()
         raise RuntimeError("daemon failed to start within timeout")
 
+    service = RemoteActorService(f"unix:{sock}", auto_spawn=False)
     try:
-        yield RemoteActorService(f"unix:{sock}"), sock
+        yield service, sock
     finally:
+        # Close the persistent channel before SIGTERMing the daemon
+        # so its `wait_closed()` doesn't sit waiting for our half of
+        # the connection to drain.
+        await service.aclose()
         proc.terminate()
         try:
             await asyncio.wait_for(proc.wait(), timeout=5)
@@ -484,7 +489,7 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_publish_then_subscriber_receives(self) -> None:
         async with running_daemon(self.tmp) as (client, sock):
-            sub = RemoteActorService(f"unix:{sock}")
+            sub = RemoteActorService(f"unix:{sock}", auto_spawn=False)
             seen: list[Notification] = []
             cancel = await sub.subscribe_notifications(seen.append)
             try:
@@ -497,6 +502,7 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 cancel()
                 await asyncio.sleep(0.1)
+                await sub.aclose()
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0].actor, "alice")
         self.assertEqual(seen[0].status, Status.DONE)
@@ -509,12 +515,13 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
             cancel()
             await asyncio.sleep(0.2)
 
-            pub = RemoteActorService(f"unix:{sock}")
+            pub = RemoteActorService(f"unix:{sock}", auto_spawn=False)
             await pub.publish_notification(Notification(
                 actor="alice", event="run_completed",
                 run_id=1, status=Status.DONE,
             ))
             await asyncio.sleep(0.2)
+            await pub.aclose()
         self.assertEqual(seen, [])
 
 
@@ -523,14 +530,20 @@ class WireDaemonUnreachableTests(unittest.IsolatedAsyncioTestCase):
     running — mirrors the Phase 2 contract."""
 
     async def test_call_against_missing_socket_raises(self) -> None:
-        client = RemoteActorService("unix:/nonexistent/path/sock")
+        client = RemoteActorService(
+            "unix:/nonexistent/path/sock", auto_spawn=False,
+        )
         with self.assertRaises(DaemonUnreachableError):
             await client.list_actors()
+        await client.aclose()
 
     async def test_subscribe_against_missing_socket_raises(self) -> None:
-        client = RemoteActorService("unix:/nonexistent/path/sock")
+        client = RemoteActorService(
+            "unix:/nonexistent/path/sock", auto_spawn=False,
+        )
         with self.assertRaises(DaemonUnreachableError):
             await client.subscribe_notifications(lambda _n: None)
+        await client.aclose()
 
 
 # ---------------------------------------------------------------------------

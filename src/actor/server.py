@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import traceback
-from typing import Any, List, Literal
+from typing import Any, List, Literal, Optional
 
 from . import __version__
 from . import cli_format
@@ -106,17 +106,23 @@ def _ask_tool(ask_key: str):
 # ---------------------------------------------------------------------------
 
 
-def _service() -> ActorService:
-    """Build a `RemoteActorService` pointing at the standard daemon
-    socket. The MCP bridge requires actord to be running — if it
-    isn't, calls surface as `DaemonUnreachableError` and the tool
-    response carries the message.
+# Module-level singleton service so every tool invocation multiplexes
+# over the same gRPC channel (Phase 3). `_spawn_background_run` builds
+# its own service so the per-spawn subscribe connection has its own
+# lifetime and can cancel cleanly.
+_shared_service: Optional[RemoteActorService] = None
 
-    Phase 2 keeps a fresh service per tool call. Subscriptions
-    (`_spawn_background_run`) use their own per-spawn service so the
-    long-lived subscribe connection doesn't leak across tools.
-    """
-    return RemoteActorService(_daemon_socket_uri())
+
+def _service() -> RemoteActorService:
+    """Return the shared MCP-bridge service. Auto-spawns the daemon
+    quietly (no stderr noise — Claude Code surfaces our stderr in
+    chat as system messages)."""
+    global _shared_service
+    if _shared_service is None:
+        _shared_service = RemoteActorService(
+            _daemon_socket_uri(), quiet_spawn=True,
+        )
+    return _shared_service
 
 
 # ---------------------------------------------------------------------------

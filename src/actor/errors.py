@@ -50,6 +50,13 @@ class ConfigError(ActorError):
         super().__init__(f"config error: {msg}")
 
 
+class InteractiveSessionEnded(ActorError):
+    """Raised when an `InteractiveSession`'s bidi stream breaks
+    mid-session (daemon crashed / restarted). The PTY's state lives
+    in the daemon; there's nothing to reconnect to. CLI prints a
+    clear message and exits non-zero."""
+
+
 class DaemonUnreachableError(ActorError):
     """Raised by `RemoteActorService` when actord isn't accepting
     connections. CLI / MCP bridge translate this into a one-line "start

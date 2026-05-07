@@ -337,10 +337,18 @@ class ActorWatchApp(App):
         # the daemon owns the PTY and finalizes the run row. The rest
         # of the watch app still uses LocalActorService for its
         # palette commands and polling — Phase 5 will switch those.
+        #
+        # Phase 3: one shared RemoteActorService for the watch app's
+        # lifetime, so every interactive session multiplexes over the
+        # same gRPC channel. Auto-spawns the daemon on first use; a
+        # one-line stderr notice lands above the splash if the daemon
+        # was actually missing, which is the right UX for an
+        # interactive launcher.
         from ..service import RemoteActorService
         from ..cli import _daemon_socket_uri
+        self._remote_service = RemoteActorService(_daemon_socket_uri())
         self._interactive = InteractiveSessionManager(
-            service_factory=lambda: RemoteActorService(_daemon_socket_uri()),
+            service_factory=lambda: self._remote_service,
             recorder=self._diagnostics,
         )
         # Actor whose terminal widget is currently mounted, if any.

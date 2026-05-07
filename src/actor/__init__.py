@@ -20,6 +20,7 @@ from .errors import (
     ConfigError,
     HookFailedError,
     DaemonUnreachableError,
+    InteractiveSessionEnded,
 )
 
 # Types
@@ -111,6 +112,7 @@ __all__ = [
     "ConfigError",
     "HookFailedError",
     "DaemonUnreachableError",
+    "InteractiveSessionEnded",
     # Types
     "AgentKind",
     "Status",
