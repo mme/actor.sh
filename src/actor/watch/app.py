@@ -1833,9 +1833,11 @@ class ActorWatchApp(App):
         at_bottom: bool,
     ) -> None:
         """Start an off-thread build of the full RichLog content. A
-        300ms timer shows the "Loading logs..." placeholder if the
-        build hasn't committed by then — short builds commit first and
-        the placeholder never flashes."""
+        300ms timer shows the "Loading logs..." placeholder when the
+        build hasn't committed by then AND the widget isn't already
+        showing committed content for this actor. Same-actor rebuilds
+        (resize, tool_result tail) keep the previous render visible
+        until `_apply_log_build` swaps it in."""
         self._log_build_token += 1
         self._log_build_pending = True
         self._log_build_target_actor = actor_name
@@ -1848,6 +1850,16 @@ class ActorWatchApp(App):
             # hasn't already applied. Any newer kick-off bumps the
             # token; a committed apply clears the pending flag.
             if token != self._log_build_token or not self._log_build_pending:
+                return
+            # If a previous apply already committed content for this
+            # actor, leave it on screen — wiping it for the placeholder
+            # would flash the user's view between refreshes (#93). The
+            # placeholder is still useful on a fresh actor switch /
+            # first paint, where nothing has committed yet.
+            if (
+                self._last_log_actor == actor_name
+                and self._last_log_count > 0
+            ):
                 return
             try:
                 log = self.query_one("#logs-content", RichLog)
