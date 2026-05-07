@@ -410,7 +410,7 @@ async def _amain(argv: Optional[List[str]] = None) -> None:
 
     if args.command == "watch":
         from .watch import run_watch
-        run_watch(animate=not args.no_animation)
+        await run_watch(animate=not args.no_animation)
         return
 
     if args.command == "setup":
