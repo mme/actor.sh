@@ -394,6 +394,19 @@ class LocalActorService(ActorService):
         # means both must see the same agent instance, so we cache one
         # per kind for the lifetime of the service.
         self._agent_cache: Dict[AgentKind, Agent] = {}
+        # Serializes access to the shared `sqlite3` connection. The
+        # connection is opened with `check_same_thread=False` so we
+        # can hand it off to the asyncio threadpool, but a single
+        # sqlite3 connection is NOT safe for *concurrent* use across
+        # threads — Python's sqlite3 module manages implicit
+        # transactions per connection, so two parallel ops corrupt
+        # the transaction state. Symptoms: `InterfaceError('bad
+        # parameter or other API misuse')` and `OperationalError
+        # ('cannot commit - no transaction is active')`. Lazy-init
+        # so tests that build a service without a running event loop
+        # still work; the lock is created on first `_db_call` from
+        # an async context.
+        self._db_lock: Optional[asyncio.Lock] = None
 
     # -- Internal helpers --------------------------------------------------
 
@@ -417,13 +430,20 @@ class LocalActorService(ActorService):
         return inst
 
     async def _db_call(self, fn, /, *args, **kwargs):
-        """Run a sync `Database` method on a worker thread.
+        """Run a sync `Database` method on a worker thread,
+        serialized by `self._db_lock`.
 
         SQLite is sync; the service is async. `to_thread` is the
         narrowest bridge — it preserves the existing connection
         (`check_same_thread=False`) without pulling in a separate
-        async-sqlite dependency."""
-        return await asyncio.to_thread(fn, *args, **kwargs)
+        async-sqlite dependency. The lock prevents two
+        threadpool-borrowed threads from operating on the shared
+        connection simultaneously (which corrupts sqlite's
+        per-connection transaction bookkeeping)."""
+        if self._db_lock is None:
+            self._db_lock = asyncio.Lock()
+        async with self._db_lock:
+            return await asyncio.to_thread(fn, *args, **kwargs)
 
     # -- Lifecycle ---------------------------------------------------------
 
