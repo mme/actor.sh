@@ -48,30 +48,26 @@ _FAKES_BIN = (Path(__file__).resolve().parent.parent / "fakes" / "bin").resolve(
 
 
 def _grpc_probe(socket_path: str) -> bool:
-    """Quick `actor_exists` RPC against the daemon to confirm both
-    the listener AND the gRPC handshake are ready. Returns True on
-    success, False on any failure (the harness keeps polling)."""
-    import asyncio as _asyncio
+    """Cheap probe: try a raw AF_UNIX connect to the daemon socket.
+    The daemon binds the socket as part of `Server.start()`, so a
+    successful connect proves the listener is ready to accept new
+    streams; the actual gRPC handshake happens lazily on first RPC.
 
-    async def _attempt() -> bool:
-        from grpclib.client import Channel
-        from actor._proto.actor.v1 import ActorExistsRequest, ActorServiceStub
-        chan = Channel(path=socket_path)
-        try:
-            stub = ActorServiceStub(chan)
-            await stub.actor_exists(
-                ActorExistsRequest(name="__probe__"), timeout=0.5,
-            )
-            return True
-        except Exception:
-            return False
-        finally:
-            chan.close()
-
+    A full RPC probe is unnecessary here and adds enough latency
+    that the 2s overall deadline can run out under load."""
+    import socket as _s
+    sock = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+    sock.settimeout(0.2)
     try:
-        return _asyncio.run(_attempt())
-    except Exception:
+        sock.connect(socket_path)
+        return True
+    except OSError:
         return False
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
 
 
 @dataclass

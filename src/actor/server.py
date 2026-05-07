@@ -319,7 +319,23 @@ def _spawn_background_run(
         # connections opened with `check_same_thread=False` are still
         # cheaper to keep one-per-task than to add cross-task locking.
         svc = _service()
-        cancel = await svc.subscribe_notifications(_dispatch_notification)
+
+        # Track whether _dispatch_notification fired for this spawn so
+        # we can hold the cancel() call until the relay is done. The
+        # gRPC subscribe stream and the unary run_actor stream are
+        # independent multiplexed HTTP/2 streams; without this gate,
+        # cancel() can close the channel before the server-streaming
+        # reader picks up an already-sent notification frame.
+        dispatched = asyncio.Event()
+
+        async def _on_notification(n: Notification) -> None:
+            try:
+                await _dispatch_notification(n)
+            finally:
+                if n.actor == name:
+                    dispatched.set()
+
+        cancel = await svc.subscribe_notifications(_on_notification)
         try:
             try:
                 await svc.run_actor(name=name, prompt=prompt, config=cli_overrides)
@@ -355,6 +371,15 @@ def _spawn_background_run(
                         output=str(e),
                     ))
         finally:
+            # Wait briefly for the relay to fire before tearing the
+            # subscribe channel down. The notification frame may
+            # already be on the wire but unread by the local reader
+            # task; closing the channel first cancels the reader
+            # before it gets a chance to dispatch.
+            try:
+                await asyncio.wait_for(dispatched.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
             cancel()
             # Drop any leftover spawn registration (defensive — the
             # handler usually pops it).

@@ -57,31 +57,39 @@ log = logging.getLogger("actor.daemon")
 
 
 class _SubscriberRegistry:
-    """In-memory set of `asyncio.Queue[Notification]` instances, one
-    per active `SubscribeNotifications` stream. Each per-call handler
-    pushes onto a fresh queue while it's running and pops itself off
-    when the stream ends. The daemon-side `LocalActorService` is
-    subscribed once at startup; `fan_out` snapshots the queue list
-    and pushes the notification to every subscriber."""
+    """Per-daemon set of subscriber send-callbacks, one per active
+    `SubscribeNotifications` stream. Each handler registers a
+    coroutine that knows how to send a `Notification` on its own
+    stream, and unregisters when the stream ends. The daemon-side
+    `LocalActorService` is subscribed once at startup; `fan_out`
+    awaits each subscriber's send so `publish_notification` doesn't
+    return until every wire frame has been written.
+
+    Awaiting inline (rather than queueing + draining in a separate
+    task) keeps notification delivery in lockstep with run-completion:
+    by the time `wait_for_run` returns to the caller, every
+    subscriber has the event. Otherwise a caller that subscribes,
+    runs, and immediately cancels can race the fan-out and lose
+    its event.
+    """
 
     def __init__(self) -> None:
-        self._queues: Set[asyncio.Queue[Notification]] = set()
+        self._senders: Set[Callable[[Notification], Awaitable[None]]] = set()
 
-    def add(self, q: asyncio.Queue[Notification]) -> None:
-        self._queues.add(q)
+    def add(self, sender: Callable[[Notification], Awaitable[None]]) -> None:
+        self._senders.add(sender)
 
-    def remove(self, q: asyncio.Queue[Notification]) -> None:
-        self._queues.discard(q)
+    def remove(self, sender: Callable[[Notification], Awaitable[None]]) -> None:
+        self._senders.discard(sender)
 
     async def fan_out(self, n: Notification) -> None:
-        for q in list(self._queues):
+        for sender in list(self._senders):
             try:
-                q.put_nowait(n)
-            except asyncio.QueueFull:
-                # Drop on overflow rather than block the publisher.
-                # The pre-Phase-2.5 design didn't have a queue depth
-                # cap — keep this loud so we notice if it ever fires.
-                log.warning("subscriber queue full; dropping notification")
+                await sender(n)
+            except Exception as e:
+                # A failed subscriber shouldn't block the others or
+                # block the publisher.
+                log.warning("subscriber send failed: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -329,16 +337,34 @@ class ActorServiceServicer(pb.ActorServiceBase):
         request = await stream.recv_message()
         assert request is not None
         with _CallContext(stream.metadata):
-            queue: asyncio.Queue[Notification] = asyncio.Queue(maxsize=256)
-            self._subs.add(queue)
-            try:
-                while True:
-                    n = await queue.get()
+            stop = asyncio.Event()
+            send_lock = asyncio.Lock()
+
+            async def _send(n: Notification) -> None:
+                # Serialize sends so concurrent fan-outs don't
+                # interleave on the wire.
+                async with send_lock:
                     await stream.send_message(wire.notification_to_pb(n))
+
+            self._subs.add(_send)
+            # Send initial metadata eagerly so clients can synchronize
+            # on "subscribe registered" before publishing — without
+            # this ack, a publisher that fires immediately after
+            # `await subscribe_notifications(...)` returns can race
+            # the registration and lose its event.
+            try:
+                await stream.send_initial_metadata()
+            except Exception:
+                pass
+            # Park here until the client closes the stream. We don't
+            # actually need to read more from it — the only client
+            # message was the SubscribeNotificationsRequest.
+            try:
+                await stop.wait()
             except asyncio.CancelledError:
                 raise
             finally:
-                self._subs.remove(queue)
+                self._subs.remove(_send)
 
     async def _interactive_session(self, stream: Stream) -> None:
         with _CallContext(stream.metadata):

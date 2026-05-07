@@ -1695,16 +1695,18 @@ class RemoteActorService(ActorService):
             chan.close()
             raise DaemonUnreachableError(self._socket_path, e) from e
 
-        # Send the subscribe request synchronously so connection
-        # errors surface here rather than on the first published event.
-        # We don't await initial metadata because the daemon only
-        # flushes initial metadata when it has its first Notification
-        # to send — that would deadlock idle subscribers.
+        # Send the subscribe request and wait for the daemon to flush
+        # initial metadata — that's our "subscribe registered" ack.
+        # Without it, a publisher that fires immediately after this
+        # call returns can race the daemon's registration. The daemon
+        # explicitly emits initial metadata once the queue is added
+        # to its subscriber registry.
         try:
             stream = await stream_cm.__aenter__()
             await stream.send_message(
                 SubscribeNotificationsRequest(), end=True,
             )
+            await stream.recv_initial_metadata()
         except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
             try:
                 await stream_cm.__aexit__(None, None, None)
