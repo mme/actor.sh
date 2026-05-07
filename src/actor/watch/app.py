@@ -3591,15 +3591,21 @@ class ActorWatchApp(App):
                 focused.scroll_down()
 
 
-def run_watch(animate: bool = True) -> None:
+async def run_watch(animate: bool = True) -> None:
     """Entry point for `actor watch`. Port 2204 is reserved for actord
-    (issue #35) — there is no longer a browser/serve mode."""
+    (issue #35) — there is no longer a browser/serve mode.
+
+    Async because the CLI's main loop already owns the asyncio event
+    loop (PR #88 wrapped `cli.main` in `asyncio.run`); calling
+    Textual's sync `App.run()` from inside a running loop double-nests
+    `asyncio.run` and crashes."""
     app = ActorWatchApp(animate=animate)
-    app.run()
+    await app.run_async()
 
 
 def main() -> None:
     """Direct entry point when run as module."""
+    import asyncio
     import sys
     animate = "--no-animation" not in sys.argv
-    run_watch(animate=animate)
+    asyncio.run(run_watch(animate=animate))
