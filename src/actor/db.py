@@ -315,6 +315,17 @@ class Database:
         if cur.rowcount == 0:
             raise ActorError("run not found")
 
+    def list_running_runs_with_pid(self) -> List[Run]:
+        """All `runs` rows currently in `running` state with a recorded
+        PID. Used by the daemon's startup orphan sweep to detect runs
+        whose agent died while the daemon was down."""
+        cur = self._conn.execute(
+            """SELECT id, actor_name, prompt, status, exit_code, pid, config,
+                      started_at, finished_at
+               FROM runs WHERE status = 'running' AND pid IS NOT NULL""",
+        )
+        return [self._row_to_run(row) for row in cur.fetchall()]
+
     def update_run_status(self, run_id: int, status: Status, exit_code: Optional[int]) -> None:
         now = _now_iso()
         cur = self._conn.execute(

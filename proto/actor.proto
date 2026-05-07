@@ -251,6 +251,17 @@ message PublishNotificationRequest {
 }
 message PublishNotificationResponse {}
 
+message GetServerInfoRequest {}
+message GetServerInfoResponse {
+  int32 pid = 1;
+  // Daemon start time (ISO 8601 UTC).
+  string started_at = 2;
+  // actor-sh version the daemon was built / installed with.
+  string version = 3;
+  // Number of currently-active client streams (rough load gauge).
+  int32 connection_count = 4;
+}
+
 message SubscribeNotificationsRequest {}
 
 
@@ -336,6 +347,9 @@ service ActorService {
   // -- Notifications --
   rpc PublishNotification(PublishNotificationRequest) returns (PublishNotificationResponse);
   rpc SubscribeNotifications(SubscribeNotificationsRequest) returns (stream Notification);
+
+  // -- Server introspection (Phase 3 / `actor daemon status`) --
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
 
   // -- Interactive (bidirectional streaming) --
   rpc InteractiveSession(stream ClientFrame) returns (stream ServerFrame);

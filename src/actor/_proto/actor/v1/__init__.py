@@ -370,6 +370,24 @@ class PublishNotificationResponse(betterproto.Message):
 
 
 @dataclass(eq=False, repr=False)
+class GetServerInfoRequest(betterproto.Message):
+    pass
+
+
+@dataclass(eq=False, repr=False)
+class GetServerInfoResponse(betterproto.Message):
+    pid: int = betterproto.int32_field(1)
+    started_at: str = betterproto.string_field(2)
+    """Daemon start time (ISO 8601 UTC)."""
+
+    version: str = betterproto.string_field(3)
+    """actor-sh version the daemon was built / installed with."""
+
+    connection_count: int = betterproto.int32_field(4)
+    """Number of currently-active client streams (rough load gauge)."""
+
+
+@dataclass(eq=False, repr=False)
 class SubscribeNotificationsRequest(betterproto.Message):
     pass
 
@@ -739,6 +757,23 @@ class ActorServiceStub(betterproto.ServiceStub):
         ):
             yield response
 
+    async def get_server_info(
+        self,
+        get_server_info_request: "GetServerInfoRequest",
+        *,
+        timeout: Optional[float] = None,
+        deadline: Optional["Deadline"] = None,
+        metadata: Optional["MetadataLike"] = None
+    ) -> "GetServerInfoResponse":
+        return await self._unary_unary(
+            "/actor.v1.ActorService/GetServerInfo",
+            get_server_info_request,
+            GetServerInfoResponse,
+            timeout=timeout,
+            deadline=deadline,
+            metadata=metadata,
+        )
+
     async def interactive_session(
         self,
         client_frame_iterator: Union[AsyncIterable[ClientFrame], Iterable[ClientFrame]],
@@ -852,6 +887,11 @@ class ActorServiceBase(ServiceBase):
     ) -> AsyncIterator[Notification]:
         raise grpclib.GRPCError(grpclib.const.Status.UNIMPLEMENTED)
         yield Notification()
+
+    async def get_server_info(
+        self, get_server_info_request: "GetServerInfoRequest"
+    ) -> "GetServerInfoResponse":
+        raise grpclib.GRPCError(grpclib.const.Status.UNIMPLEMENTED)
 
     async def interactive_session(
         self, client_frame_iterator: AsyncIterator[ClientFrame]
@@ -997,6 +1037,14 @@ class ActorServiceBase(ServiceBase):
             request,
         )
 
+    async def __rpc_get_server_info(
+        self,
+        stream: "grpclib.server.Stream[GetServerInfoRequest, GetServerInfoResponse]",
+    ) -> None:
+        request = await stream.recv_message()
+        response = await self.get_server_info(request)
+        await stream.send_message(response)
+
     async def __rpc_interactive_session(
         self, stream: "grpclib.server.Stream[ClientFrame, ServerFrame]"
     ) -> None:
@@ -1122,6 +1170,12 @@ class ActorServiceBase(ServiceBase):
                 grpclib.const.Cardinality.UNARY_STREAM,
                 SubscribeNotificationsRequest,
                 Notification,
+            ),
+            "/actor.v1.ActorService/GetServerInfo": grpclib.const.Handler(
+                self.__rpc_get_server_info,
+                grpclib.const.Cardinality.UNARY_UNARY,
+                GetServerInfoRequest,
+                GetServerInfoResponse,
             ),
             "/actor.v1.ActorService/InteractiveSession": grpclib.const.Handler(
                 self.__rpc_interactive_session,

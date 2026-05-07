@@ -51,6 +51,25 @@ from .types import ActorConfig, AgentKind, Status, _now_iso
 log = logging.getLogger("actor.daemon")
 
 
+# Module-level counter of in-flight RPC handlers. Each unary +
+# streaming handler bumps this on entry and decrements on exit so
+# `GetServerInfo` can report a rough load gauge for `actor daemon
+# status`.
+_active_handlers = 0
+
+
+class _ConnectionCounter:
+    """Context manager that increments `_active_handlers` for the
+    lifetime of a request handler."""
+    def __enter__(self) -> "_ConnectionCounter":
+        global _active_handlers
+        _active_handlers += 1
+        return self
+    def __exit__(self, *exc) -> None:
+        global _active_handlers
+        _active_handlers -= 1
+
+
 # ---------------------------------------------------------------------------
 # Subscription state
 # ---------------------------------------------------------------------------
@@ -167,9 +186,12 @@ class ActorServiceServicer(pb.ActorServiceBase):
         self,
         service: LocalActorService,
         subscribers: _SubscriberRegistry,
+        *,
+        started_at: str,
     ) -> None:
         self._service = service
         self._subs = subscribers
+        self._started_at = started_at
 
     # -- unary handlers (each receives a raw Stream) ------------------
 
@@ -320,6 +342,22 @@ class ActorServiceServicer(pb.ActorServiceBase):
             roles={name: wire.role_to_pb(r) for name, r in roles.items()},
         )
 
+    async def _get_server_info(self, stream: Stream) -> None:
+        await _unary(stream, pb.GetServerInfoRequest, self._do_get_server_info)
+
+    async def _do_get_server_info(
+        self, req: pb.GetServerInfoRequest,
+    ) -> pb.GetServerInfoResponse:
+        from . import __version__ as _ver
+        # Subtract 1 for the ongoing GetServerInfo handler itself.
+        active = max(0, _active_handlers - 1)
+        return pb.GetServerInfoResponse(
+            pid=os.getpid(),
+            started_at=self._started_at,
+            version=_ver,
+            connection_count=active,
+        )
+
     async def _publish_notification(self, stream: Stream) -> None:
         await _unary(stream, pb.PublishNotificationRequest, self._do_publish_notification)
 
@@ -336,7 +374,7 @@ class ActorServiceServicer(pb.ActorServiceBase):
     async def _subscribe_notifications(self, stream: Stream) -> None:
         request = await stream.recv_message()
         assert request is not None
-        with _CallContext(stream.metadata):
+        with _CallContext(stream.metadata), _ConnectionCounter():
             stop = asyncio.Event()
             send_lock = asyncio.Lock()
 
@@ -367,7 +405,7 @@ class ActorServiceServicer(pb.ActorServiceBase):
                 self._subs.remove(_send)
 
     async def _interactive_session(self, stream: Stream) -> None:
-        with _CallContext(stream.metadata):
+        with _CallContext(stream.metadata), _ConnectionCounter():
             try:
                 await _run_interactive(self._service, stream)
             except GRPCError:
@@ -467,6 +505,10 @@ class ActorServiceServicer(pb.ActorServiceBase):
                 self._publish_notification, _const.Cardinality.UNARY_UNARY,
                 pb.PublishNotificationRequest, pb.PublishNotificationResponse,
             ),
+            "/actor.v1.ActorService/GetServerInfo": _const.Handler(
+                self._get_server_info, _const.Cardinality.UNARY_UNARY,
+                pb.GetServerInfoRequest, pb.GetServerInfoResponse,
+            ),
             "/actor.v1.ActorService/SubscribeNotifications": _const.Handler(
                 self._subscribe_notifications, _const.Cardinality.UNARY_STREAM,
                 pb.SubscribeNotificationsRequest, pb.Notification,
@@ -489,7 +531,7 @@ async def _unary(
     `ActorError` subclass."""
     request = await stream.recv_message()
     assert request is not None
-    with _CallContext(stream.metadata):
+    with _CallContext(stream.metadata), _ConnectionCounter():
         try:
             response = await body(request)
             await stream.send_message(response)
@@ -768,6 +810,11 @@ def _check_socket(socket_path: Path) -> None:
 
 
 def _configure_logging(log_file: Optional[Path]) -> None:
+    """Stderr handler for foreground / debug; rotating-file handler
+    for persistent logs. Phase 3 — 10MB × 3 backups for ~30MB of
+    history before old chunks roll off. No external logrotate cron;
+    rotation happens in-process on the next emit after the cap."""
+    from logging.handlers import RotatingFileHandler
     root = logging.getLogger()
     for h in list(root.handlers):
         root.removeHandler(h)
@@ -780,7 +827,9 @@ def _configure_logging(log_file: Optional[Path]) -> None:
     root.addHandler(stderr)
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(log_file)
+        fh = RotatingFileHandler(
+            log_file, maxBytes=10 * 1024 * 1024, backupCount=3,
+        )
         fh.setFormatter(fmt)
         root.addHandler(fh)
     root.setLevel(logging.INFO)
@@ -806,6 +855,39 @@ def _build_service(db_path: str) -> LocalActorService:
         agent_factory=create_agent,
         app_config=app_config,
     )
+
+
+def _sweep_orphaned_runs(service: LocalActorService) -> None:
+    """Mark `runs` rows with status='running' + dead PID as ERROR.
+
+    A run row stays at 'running' if the daemon (or `actor run`) was
+    killed before the wait_for_run fired. On the next daemon startup
+    those rows are stale: the agent process is gone, no one will
+    update the row. Sweep them here so subsequent reads see the
+    truth.
+
+    Keeps the row's existing pid + exit_code=-1 so an operator
+    inspecting later sees `error/-1` and the original PID for
+    reference."""
+    db = service._db  # type: ignore[attr-defined]
+    rows = db.list_running_runs_with_pid()
+    for run in rows:
+        if run.pid is None:
+            continue
+        if _pid_alive(run.pid):
+            continue
+        try:
+            db.update_run_status(run.id, Status.ERROR, -1)
+        except ActorError as e:
+            log.warning(
+                "orphan sweep: failed to update run id=%s actor=%s: %s",
+                run.id, run.actor_name, e,
+            )
+            continue
+        log.warning(
+            "orphaned run id=%s actor=%s pid=%s (process dead)",
+            run.id, run.actor_name, run.pid,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -863,10 +945,18 @@ async def main(
     _check_socket(socket_path)
 
     service = _build_service(db_path)
+
+    # Crash recovery: any run rows still flagged 'running' from a
+    # previous daemon process where the agent died first need to flip
+    # to 'error' before we accept clients. Otherwise `actor list` /
+    # status checks would lie about live runs that don't exist anymore.
+    _sweep_orphaned_runs(service)
+
     subscribers = _SubscriberRegistry()
     await service.subscribe_notifications(subscribers.fan_out)
 
-    servicer = ActorServiceServicer(service, subscribers)
+    started_at = _now_iso()
+    servicer = ActorServiceServicer(service, subscribers, started_at=started_at)
     server = Server([servicer])
 
     await server.start(path=str(socket_path))

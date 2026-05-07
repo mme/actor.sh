@@ -293,14 +293,23 @@ Examples:
         help="Manage the actord daemon (issue #35)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
+Most clients (CLI, MCP bridge, watch) auto-spawn the daemon on demand
+— these commands are the explicit lifecycle controls when you want
+them.
+
 Examples:
-  actor daemon start                                Run the daemon in the foreground
-  actor daemon start --listen unix:/tmp/sock        Listen on a custom unix socket""",
+  actor daemon start                  Background; returns once the socket is up
+  actor daemon start --foreground     Run in this terminal; Ctrl-C exits
+  actor daemon stop                   SIGTERM; falls back to SIGKILL after 10s
+  actor daemon restart                Stop + start in one go
+  actor daemon status                 Show pid, uptime, version, connections
+  actor daemon logs -n 50             Tail the last 50 lines of daemon.log
+  actor daemon logs --follow          Stream new log lines as they arrive""",
     )
     p_daemon_sub = p_daemon.add_subparsers(dest="daemon_command")
     p_daemon_start = p_daemon_sub.add_parser(
         "start",
-        help="Start the daemon in the foreground (Ctrl-C to exit)",
+        help="Start the daemon (backgrounds by default; --foreground for the current terminal)",
     )
     p_daemon_start.add_argument(
         "--listen",
@@ -311,6 +320,35 @@ Examples:
         "--log-file",
         default="~/.actor/daemon.log",
         help="Log file path (default: ~/.actor/daemon.log; pass empty to disable)",
+    )
+    p_daemon_start.add_argument(
+        "--foreground", action="store_true",
+        help="Run in this terminal instead of backgrounding (used for debugging)",
+    )
+
+    p_daemon_sub.add_parser(
+        "stop",
+        help="Stop the running daemon (SIGTERM, then SIGKILL after 10s)",
+    )
+    p_daemon_sub.add_parser(
+        "restart",
+        help="Stop the running daemon and start a fresh background instance",
+    )
+    p_daemon_sub.add_parser(
+        "status",
+        help="Show whether the daemon is running plus pid / uptime / connections",
+    )
+    p_daemon_logs = p_daemon_sub.add_parser(
+        "logs",
+        help="Print the tail of ~/.actor/daemon.log",
+    )
+    p_daemon_logs.add_argument(
+        "-n", "--lines", type=int, default=50,
+        help="Number of lines to print from the tail (default 50)",
+    )
+    p_daemon_logs.add_argument(
+        "-f", "--follow", action="store_true",
+        help="Stream new log lines as they arrive (Ctrl-C to exit)",
     )
 
     # -- main --
@@ -451,23 +489,8 @@ async def _amain(argv: Optional[List[str]] = None) -> None:
         return
 
     if args.command == "daemon":
-        if args.daemon_command != "start":
-            parser.parse_args(["daemon", "--help"])
-            return
-        from . import daemon
-        log_file = (
-            Path(os.path.expanduser(args.log_file))
-            if args.log_file else None
-        )
-        try:
-            await daemon.main(
-                transport_uri=args.listen,
-                db_path=_db_path(),
-                log_file=log_file,
-            )
-        except RuntimeError as e:
-            print(f"error: {e}", file=sys.stderr)
-            sys.exit(1)
+        from . import daemon_cli
+        await daemon_cli.dispatch(args, parser)
         return
 
     if args.command == "update":
@@ -654,3 +677,10 @@ async def _amain(argv: Optional[List[str]] = None) -> None:
     except ActorError as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        # Close the gRPC channel cleanly so grpclib doesn't emit an
+        # "Unclosed connection" ResourceWarning on interpreter exit.
+        try:
+            await service.aclose()
+        except Exception:
+            pass

@@ -156,6 +156,16 @@ class InteractiveRunHandle:
 
 
 @dataclass(frozen=True)
+class ServerInfo:
+    """Snapshot of the daemon's identity + load. Returned by
+    `RemoteActorService.get_server_info`; backs `actor daemon status`."""
+    pid: int
+    started_at: str
+    version: str
+    connection_count: int
+
+
+@dataclass(frozen=True)
 class LogsResult:
     session_id: Optional[str]
     entries: List[LogEntry]
@@ -1382,6 +1392,7 @@ def _build_rpc_paths():
         "get_logs": ("/actor.v1.ActorService/GetLogs", pb.GetLogsResponse),
         "list_roles": ("/actor.v1.ActorService/ListRoles", pb.ListRolesResponse),
         "publish_notification": ("/actor.v1.ActorService/PublishNotification", pb.PublishNotificationResponse),
+        "get_server_info": ("/actor.v1.ActorService/GetServerInfo", pb.GetServerInfoResponse),
     }
 
 
@@ -1731,6 +1742,18 @@ class RemoteActorService(ActorService):
         await self._stub_call(
             "publish_notification",
             PublishNotificationRequest(notification=wire.notification_to_pb(n)),
+        )
+
+    async def get_server_info(self) -> "ServerInfo":
+        """Daemon identity + load snapshot. Used by
+        `actor daemon status` to render the human-readable table."""
+        from ._proto.actor.v1 import GetServerInfoRequest
+        resp = await self._stub_call("get_server_info", GetServerInfoRequest())
+        return ServerInfo(
+            pid=resp.pid,
+            started_at=resp.started_at,
+            version=resp.version,
+            connection_count=resp.connection_count,
         )
 
     async def subscribe_notifications(

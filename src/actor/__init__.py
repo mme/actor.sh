@@ -80,6 +80,7 @@ from .service import (
     ActorDetail,
     InteractiveRunHandle,
     LogsResult,
+    ServerInfo,
     agent_class,
     create_agent,
 )
@@ -161,6 +162,7 @@ __all__ = [
     "ActorDetail",
     "InteractiveRunHandle",
     "LogsResult",
+    "ServerInfo",
     "agent_class",
     "create_agent",
     # Helpers
