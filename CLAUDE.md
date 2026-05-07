@@ -347,6 +347,22 @@ per-agent `defaults "<name>" { ... }` shape.
 Load programmatically via `actor.config.load_config(cwd=..., home=...)` —
 both args default to `Path.cwd()` / `$HOME` so tests can inject temp dirs.
 
+### Daemon block
+
+The top-level `daemon { }` block configures the actord process itself.
+Today it carries one key:
+
+```kdl
+daemon {
+    name "alice-laptop"
+}
+```
+
+`name` overrides the zeroconf service-instance the daemon advertises
+under `_actor._tcp.local.` (Phase 4). Defaults to the system hostname
+when unset. Edit + bounce the daemon (`actor daemon restart`) to apply
+— values are read on daemon startup.
+
 ### Ask block
 
 A top-level `ask { }` block holds free-form natural-language guidance
@@ -476,6 +492,47 @@ batcher, diagnostics) are unit-testable with synthetic inputs, and the
 impure parts (PtySession, widget) are integration-tested with real
 `/bin/cat` and `/bin/sh` subprocesses. Ctrl+Shift+D inside `actor watch`
 dumps the DiagnosticRecorder ring buffer to stderr for post-mortems.
+
+## Discovery (Phase 4)
+
+Each running actord advertises itself on the LAN via mDNS as
+`_actor._tcp.local.` and runs a persistent zeroconf browser. Visibility
+is read-only — Phase 4 doesn't connect to peers; it just lists them.
+
+```bash
+actor servers              # plain table; self appears first marked with *
+actor servers --verbose    # full sha256 fingerprints
+actor servers --json       # machine-readable
+```
+
+Backed by:
+
+- `src/actor/identity.py` — Ed25519 keypair + self-signed cert minted
+  at first daemon start (`~/.actor/daemon.{key,pem}`, key 0600). The
+  fingerprint (`sha256(DER(cert))`) is the daemon's identity on the
+  network and rides the zeroconf TXT record.
+- `src/actor/discovery.py` — `DiscoveryService` owns one
+  `AsyncZeroconf` instance, registers the local record, runs an
+  `AsyncServiceBrowser`, and exposes `snapshot()` for the
+  `ListServers` RPC handler.
+- `daemon { name "..." }` in settings.kdl overrides the published
+  instance name (defaults to system hostname).
+- TXT keys: `version`, `fingerprint=sha256:<hex>`, `user=<unix>`,
+  `pid=<pid>`. Total payload well under the ~1KB UDP cap.
+- Advertised port is **2204** (the canonical local-listener port).
+  Phase 4 doesn't bind a TCP listener — the port is metadata for
+  Phase 6, which will swap it for the real ephemeral inter-daemon
+  port. Clients don't connect to the advertised host:port today.
+
+If publishing fails (mDNS blocked, network down) the daemon logs a
+warning but keeps running — discovery is non-essential to local
+operation. `actor servers` still returns the local self-record so the
+output table is never empty.
+
+The cert is minted now even though it's only *used* in Phase 6
+(mTLS+pinning) so that visibility (Phase 4) and trust (Phase 6) share
+one identity object — a daemon's fingerprint is stable across daemon
+phases / restarts.
 
 ## Architecture notes
 

@@ -213,6 +213,7 @@ class DaemonSoakTest(unittest.IsolatedAsyncioTestCase):
             writer.writerow([
                 "elapsed_s", "rss_kb", "open_fds", "connections",
                 "log_size", "db_size", "events_seen", "events_published",
+                "mdns_advertised", "peers_seen",
             ])
 
         events_published = 0
@@ -272,6 +273,17 @@ class DaemonSoakTest(unittest.IsolatedAsyncioTestCase):
                 conns = info.connection_count
             except Exception:
                 conns = -1
+            # Phase 4: snapshot the daemon's mDNS view. Self counts as
+            # "advertised" iff the daemon's own record is present (it
+            # always is unless zeroconf failed entirely); peers_seen
+            # excludes self.
+            try:
+                servers = await worker.list_servers()
+                mdns_advertised = any(s.is_self for s in servers)
+                peers_seen = sum(1 for s in servers if not s.is_self)
+            except Exception:
+                mdns_advertised = False
+                peers_seen = -1
             log = self._tmp / ".actor" / "daemon.log"
             db = self._tmp / ".actor" / "actor.db"
             with metrics_path.open("a", newline="") as f:
@@ -285,6 +297,8 @@ class DaemonSoakTest(unittest.IsolatedAsyncioTestCase):
                     db.stat().st_size if db.exists() else 0,
                     events_seen,
                     events_published,
+                    "1" if mdns_advertised else "0",
+                    peers_seen,
                 ])
             if warmup_baseline is None and elapsed >= WARMUP_SECONDS:
                 if rss is not None and fds is not None:
